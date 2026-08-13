@@ -1,0 +1,20 @@
+# Local toolchains and scratch data
+/tmp/
+
+# Build and test output
+/bin/
+/dist/
+/coverage/
+*.coverprofile
+*.test
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
