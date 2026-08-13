@@ -613,7 +613,7 @@ func attemptEventType(phase domain.AttemptPhase) string {
 
 const taskColumns = `
 	id::text, tenant_id, namespace, agent_version_ref, goal, spec, request_hash,
-	idempotency_key, phase, cancel_requested_at, active_run_id::text, result_ref,
+	idempotency_key, phase, admission_reason_code, admitted_at, cancel_requested_at, active_run_id::text, result_ref,
 	resource_version, created_at, updated_at`
 
 const runColumns = `
@@ -622,7 +622,7 @@ const runColumns = `
 
 const attemptColumns = `
 	id::text, tenant_id, run_id::text, ordinal, phase, runtime_class,
-	runtime_instance_id, fencing_token, failure_code, failure_message,
+	runtime_pool_id, runtime_instance_id, fencing_token, failure_code, failure_message,
 	resource_version, created_at, updated_at, started_at, finished_at`
 
 const leaseColumns = `
@@ -634,11 +634,11 @@ type scanner interface{ Scan(...any) error }
 func scanTask(row scanner) (kernelstore.Task, error) {
 	var task kernelstore.Task
 	var id string
-	var activeID, result sql.NullString
-	var cancel sql.NullTime
+	var admissionReason, activeID, result sql.NullString
+	var admitted, cancel sql.NullTime
 	var hash []byte
 	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &task.Goal,
-		&task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &cancel, &activeID, &result,
+		&task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel, &activeID, &result,
 		&task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return task, err
 	}
@@ -651,6 +651,12 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 		return task, fmt.Errorf("task request hash has length %d", len(hash))
 	}
 	copy(task.RequestHash[:], hash)
+	if admissionReason.Valid {
+		task.AdmissionReasonCode = admissionReason.String
+	}
+	if admitted.Valid {
+		task.AdmittedAt = &admitted.Time
+	}
 	if cancel.Valid {
 		task.CancelRequestedAt = &cancel.Time
 	}
@@ -703,10 +709,10 @@ func scanRun(row scanner) (kernelstore.Run, error) {
 func scanAttempt(row scanner) (kernelstore.Attempt, error) {
 	var attempt kernelstore.Attempt
 	var id, runID string
-	var failureCode, failureMessage sql.NullString
+	var runtimePool, failureCode, failureMessage sql.NullString
 	var started, finished sql.NullTime
 	if err := row.Scan(&id, &attempt.TenantID, &runID, &attempt.Ordinal, &attempt.Phase,
-		&attempt.RuntimeClass, &attempt.RuntimeInstanceID, &attempt.FencingToken,
+		&attempt.RuntimeClass, &runtimePool, &attempt.RuntimeInstanceID, &attempt.FencingToken,
 		&failureCode, &failureMessage, &attempt.ResourceVersion, &attempt.CreatedAt,
 		&attempt.UpdatedAt, &started, &finished); err != nil {
 		return attempt, err
@@ -720,6 +726,9 @@ func scanAttempt(row scanner) (kernelstore.Attempt, error) {
 	}
 	if failureCode.Valid {
 		attempt.FailureCode = failureCode.String
+	}
+	if runtimePool.Valid {
+		attempt.RuntimePoolID = runtimePool.String
 	}
 	if failureMessage.Valid {
 		attempt.FailureMessage = failureMessage.String
