@@ -74,6 +74,9 @@ func (e *Engine) Evaluate(task store.Task) Decision {
 	if spec.Placement.LLMConcurrency <= 0 || (e.limits.MaxLLMConcurrency > 0 && spec.Placement.LLMConcurrency > e.limits.MaxLLMConcurrency) {
 		reasons = append(reasons, reason("LLM_CONCURRENCY_INVALID", "placement.llmConcurrency", "LLM concurrency must be positive and within the tenant limit"))
 	}
+	if maxAttempts := spec.RetryPolicy.EffectiveMaxAttempts(); maxAttempts < 1 || maxAttempts > 10 {
+		reasons = append(reasons, reason("RETRY_ATTEMPTS_INVALID", "retryPolicy.maxAttempts", "max attempts must be between 1 and 10"))
+	}
 	if len(reasons) != 0 {
 		return Decision{ReasonCode: reasons[0].Code, Reasons: reasons}
 	}

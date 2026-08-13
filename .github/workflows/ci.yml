@@ -15,7 +15,7 @@ concurrency:
 jobs:
   kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
@@ -51,6 +51,17 @@ jobs:
       - name: Verify module graph
         run: go mod verify
 
+      - name: Verify Runtime Protocol schema and generated bindings
+        run: |
+          export GOBIN="$RUNNER_TEMP/bin"
+          export PATH="$GOBIN:$PATH"
+          go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0
+          buf lint
+          buf generate
+          git diff --exit-code -- gen/go
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
@@ -68,3 +79,20 @@ jobs:
 
       - name: Build control-plane commands
         run: go build ./cmd/...
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Check Rust formatting
+        run: cargo +1.97.1 fmt --all -- --check
+
+      - name: Lint Wasmtime Provider
+        run: cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test Wasmtime Provider
+        run: cargo +1.97.1 test --workspace --locked
+
+      - name: Audit Rust dependencies
+        run: |
+          cargo +1.97.1 install cargo-audit --version 0.22.2 --locked
+          cargo +1.97.1 audit

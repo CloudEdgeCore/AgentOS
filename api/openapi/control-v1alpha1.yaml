@@ -68,6 +68,31 @@ paths:
                 $ref: '#/components/schemas/Task'
         '401': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/tasks/{taskId}:cancel:
+    post:
+      operationId: cancelTask
+      summary: Request cancellation of a durable task
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '202':
+          description: Cancellation was committed or durably requested from the active Runtime.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -89,6 +114,14 @@ components:
       in: header
       required: false
       schema: { type: string, format: uuid }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Current weak ETag returned by a Task response.
+      schema:
+        type: string
+        pattern: '^W/"[1-9][0-9]*"$'
   responses:
     Problem:
       description: Structured request failure.
@@ -138,6 +171,7 @@ components:
         activeRunId: { type: [string, 'null'], format: uuid }
         resultRef: { type: [string, 'null'] }
         reasonCode: { type: [string, 'null'] }
+        cancelRequestedAt: { type: [string, 'null'], format: date-time }
         resourceVersion: { type: integer, format: int64, minimum: 1 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }

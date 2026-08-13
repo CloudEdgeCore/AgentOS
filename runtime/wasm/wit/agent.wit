@@ -1,0 +1,8 @@
+package agentos:runtime@0.1.0;
+
+world agent {
+    /// Execute one logical Agent task. The input and successful output are
+    /// bounded UTF-8 JSON documents. No filesystem, network, clock,
+    /// environment, random, or secret capability is imported by this world.
+    export run: func(input: string) -> result<string, string>;
+}

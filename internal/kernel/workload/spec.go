@@ -9,10 +9,22 @@ import (
 )
 
 type Spec struct {
-	Priority  int        `json:"priority"`
-	Deadline  *time.Time `json:"deadline,omitempty"`
-	Budget    Budget     `json:"budget"`
-	Placement Placement  `json:"placement"`
+	Priority    int         `json:"priority"`
+	Deadline    *time.Time  `json:"deadline,omitempty"`
+	Budget      Budget      `json:"budget"`
+	Placement   Placement   `json:"placement"`
+	RetryPolicy RetryPolicy `json:"retryPolicy,omitempty"`
+}
+
+type RetryPolicy struct {
+	MaxAttempts int `json:"maxAttempts,omitempty"`
+}
+
+func (p RetryPolicy) EffectiveMaxAttempts() int {
+	if p.MaxAttempts == 0 {
+		return 3
+	}
+	return p.MaxAttempts
 }
 
 type Budget struct {

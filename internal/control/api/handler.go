@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,12
 type TaskStore interface {
 	CreateTask(context.Context, store.CreateTaskInput) (store.CreateTaskResult, error)
 	GetTask(context.Context, string, uuid.UUID) (store.Task, error)
+	RequestTaskCancellation(context.Context, string, uuid.UUID, int64) (store.Task, error)
 }
 
 type Handler struct {
@@ -48,6 +50,7 @@ func NewHandler(taskStore TaskStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/tasks", handler.createTask)
 	mux.HandleFunc("GET /v1/tasks/{taskID}", handler.getTask)
+	mux.HandleFunc("POST /v1/tasks/{taskAction}", handler.cancelTask)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("/v1/tasks", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}", handler.methodNotAllowed)
@@ -64,22 +67,23 @@ type createTaskRequest struct {
 }
 
 type taskResponse struct {
-	APIVersion      string          `json:"apiVersion"`
-	Kind            string          `json:"kind"`
-	ID              string          `json:"id"`
-	TenantID        string          `json:"tenantId"`
-	Namespace       string          `json:"namespace"`
-	AgentVersionRef string          `json:"agentVersionRef"`
-	Goal            string          `json:"goal"`
-	Spec            json.RawMessage `json:"spec"`
-	Phase           string          `json:"phase"`
-	ActiveRunID     *string         `json:"activeRunId"`
-	ResultRef       *string         `json:"resultRef"`
-	ReasonCode      *string         `json:"reasonCode"`
-	ResourceVersion int64           `json:"resourceVersion"`
-	CreatedAt       time.Time       `json:"createdAt"`
-	UpdatedAt       time.Time       `json:"updatedAt"`
-	TraceID         string          `json:"traceId"`
+	APIVersion        string          `json:"apiVersion"`
+	Kind              string          `json:"kind"`
+	ID                string          `json:"id"`
+	TenantID          string          `json:"tenantId"`
+	Namespace         string          `json:"namespace"`
+	AgentVersionRef   string          `json:"agentVersionRef"`
+	Goal              string          `json:"goal"`
+	Spec              json.RawMessage `json:"spec"`
+	Phase             string          `json:"phase"`
+	ActiveRunID       *string         `json:"activeRunId"`
+	ResultRef         *string         `json:"resultRef"`
+	ReasonCode        *string         `json:"reasonCode"`
+	CancelRequestedAt *time.Time      `json:"cancelRequestedAt"`
+	ResourceVersion   int64           `json:"resourceVersion"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+	TraceID           string          `json:"traceId"`
 }
 
 type problem struct {
@@ -173,6 +177,36 @@ func (h *Handler) getTask(writer http.ResponseWriter, request *http.Request) {
 	h.writeTask(writer, http.StatusOK, task, traceID)
 }
 
+func (h *Handler) cancelTask(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	taskID, ok := strings.CutSuffix(request.PathValue("taskAction"), ":cancel")
+	if !ok {
+		h.notFound(writer, request)
+		return
+	}
+	id, err := uuid.Parse(taskID)
+	if err != nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "TASK_NOT_FOUND", "task was not found", traceID)
+		return
+	}
+	expectedVersion, err := parseEntityVersion(request.Header.Get("If-Match"))
+	if err != nil {
+		h.writeProblem(writer, request, http.StatusPreconditionRequired, "IF_MATCH_REQUIRED", "If-Match must contain the current weak resource-version ETag", traceID)
+		return
+	}
+	task, err := h.store.RequestTaskCancellation(request.Context(), principal.TenantID, id, expectedVersion)
+	if err != nil {
+		h.writeStoreProblem(writer, request, err, traceID)
+		return
+	}
+	h.writeTask(writer, http.StatusAccepted, task, traceID)
+}
+
 func (h *Handler) health(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
@@ -217,6 +251,10 @@ func (h *Handler) writeTask(writer http.ResponseWriter, status int, task store.T
 	if task.AdmissionReasonCode != "" {
 		response.ReasonCode = &task.AdmissionReasonCode
 	}
+	if task.CancelRequestedAt != nil {
+		value := task.CancelRequestedAt.UTC()
+		response.CancelRequestedAt = &value
+	}
 	writer.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, task.ResourceVersion))
 	writeJSON(writer, status, response)
 }
@@ -229,6 +267,8 @@ func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Re
 		h.writeProblem(writer, request, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "idempotency key was already used for a different request", traceID)
 	case errors.Is(err, store.ErrVersionConflict):
 		h.writeProblem(writer, request, http.StatusConflict, "RESOURCE_VERSION_CONFLICT", "resource changed concurrently", traceID)
+	case errors.Is(err, store.ErrInvalidTransition):
+		h.writeProblem(writer, request, http.StatusConflict, "TASK_STATE_CONFLICT", "task lifecycle does not allow this operation", traceID)
 	default:
 		h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be completed", traceID)
 	}
@@ -279,6 +319,20 @@ func validateCreateTask(body createTaskRequest) error {
 		return fmt.Errorf("spec must be a JSON object")
 	}
 	return nil
+}
+
+func parseEntityVersion(value string) (int64, error) {
+	if len(value) < 5 || !strings.HasPrefix(value, `W/"`) || !strings.HasSuffix(value, `"`) {
+		return 0, fmt.Errorf("weak ETag is required")
+	}
+	version, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(value, `W/"`), `"`), 10, 64)
+	if err != nil || version <= 0 {
+		return 0, fmt.Errorf("weak ETag is invalid")
+	}
+	if value != fmt.Sprintf(`W/"%d"`, version) {
+		return 0, fmt.Errorf("weak ETag is not canonical")
+	}
+	return version, nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

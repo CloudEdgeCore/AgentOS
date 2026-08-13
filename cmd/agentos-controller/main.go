@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/recovery"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,6 +59,7 @@ func main() {
 	})
 	admissionController := admission.NewController(repository, engine, *controllerID+"/admission", 50, 30*time.Second)
 	schedulerController := scheduler.NewController(repository, scheduler.StaticPoolSource(pools), *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
+	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	for {
@@ -69,8 +71,12 @@ func main() {
 		if schedulerErr != nil && ctx.Err() == nil {
 			slog.Error("scheduler reconciliation", "error", schedulerErr)
 		}
-		if admitted > 0 || scheduled > 0 {
-			slog.Info("reconciled tasks", "admitted", admitted, "scheduled", scheduled)
+		recovered, recoveryErr := recoveryController.Reconcile(ctx)
+		if recoveryErr != nil && ctx.Err() == nil {
+			slog.Error("runtime recovery reconciliation", "error", recoveryErr)
+		}
+		if admitted > 0 || scheduled > 0 || recovered > 0 {
+			slog.Info("reconciled tasks", "admitted", admitted, "scheduled", scheduled, "recovered", recovered)
 			continue
 		}
 		select {

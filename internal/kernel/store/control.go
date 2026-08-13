@@ -96,3 +96,7 @@ type ControlStore interface {
 	MarkOutboxPublished(context.Context, uuid.UUID, string, int64, time.Time) error
 	MarkOutboxFailed(context.Context, uuid.UUID, string, int64, string, time.Time) error
 }
+
+type TaskCancellationStore interface {
+	RequestTaskCancellation(context.Context, string, uuid.UUID, int64) (Task, error)
+}

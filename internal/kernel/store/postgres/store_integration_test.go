@@ -454,7 +454,8 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE runtime_operation_receipts, checkpoints, artifacts,
+		inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	return pool, postgresstore.NewWithClock(pool, clock)

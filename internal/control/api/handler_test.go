@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -116,6 +117,39 @@ func TestGetTaskDoesNotCrossTenantBoundary(t *testing.T) {
 	}
 }
 
+func TestCancelTaskRequiresCurrentETag(t *testing.T) {
+	backend := newMemoryStore()
+	created, err := backend.CreateTask(context.Background(), store.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1",
+		Goal: "cancel me", Spec: []byte(`{}`), IdempotencyKey: "cancel-request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend))
+	request := httptest.NewRequest(http.MethodPost, "/v1/tasks/"+created.Task.ID.String()+":cancel", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing If-Match status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/tasks/"+created.Task.ID.String()+":cancel", nil)
+	request.Header.Set("If-Match", `W/"1"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || response.Header().Get("ETag") != `W/"2"` {
+		t.Fatalf("cancel status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	var body taskPhaseResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Phase != "CANCELLED" {
+		t.Fatalf("cancel response=%+v err=%v", body, err)
+	}
+}
+
+type taskPhaseResponse struct {
+	Phase string `json:"phase"`
+}
+
 func TestRoutingFailuresRemainStructured(t *testing.T) {
 	handler := controlapi.NewHandler(newMemoryStore())
 	request := httptest.NewRequest(http.MethodDelete, "/v1/tasks", nil)
@@ -201,5 +235,24 @@ func (m *memoryStore) GetTask(_ context.Context, tenantID string, id uuid.UUID) 
 	if !ok || task.TenantID != tenantID {
 		return store.Task{}, store.ErrNotFound
 	}
+	return task, nil
+}
+
+func (m *memoryStore) RequestTaskCancellation(_ context.Context, tenantID string, id uuid.UUID, expectedVersion int64) (store.Task, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.byID[id]
+	if !ok || task.TenantID != tenantID {
+		return store.Task{}, store.ErrNotFound
+	}
+	if task.ResourceVersion != expectedVersion {
+		return store.Task{}, store.ErrVersionConflict
+	}
+	if err := domain.ValidateTaskTransition(task.Phase, domain.TaskCancelled); err != nil {
+		return store.Task{}, errors.Join(store.ErrInvalidTransition, err)
+	}
+	now := task.UpdatedAt.Add(time.Second)
+	task.Phase, task.ResourceVersion, task.UpdatedAt, task.CancelRequestedAt = domain.TaskCancelled, task.ResourceVersion+1, now, &now
+	m.byID[id] = task
 	return task, nil
 }
