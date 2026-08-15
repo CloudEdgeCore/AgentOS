@@ -34,7 +34,9 @@ func EnsureStream(ctx context.Context, js jetstream.JetStream, replicas int) err
 	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name: StreamName, Description: "Agent OS durable domain event projection",
 		Subjects: []string{SubjectPrefix + ".>"}, Retention: jetstream.LimitsPolicy,
-		MaxAge: 7 * 24 * time.Hour, MaxBytes: 10 << 30, MaxMsgSize: 1 << 20,
+		// The cap must stay modest: JetStream file stores refuse to create a
+		// stream whose MaxBytes exceeds the currently available disk.
+		MaxAge: 7 * 24 * time.Hour, MaxBytes: 2 << 30, MaxMsgSize: 1 << 20,
 		Storage: jetstream.FileStorage, Replicas: replicas, Duplicates: 10 * time.Minute,
 	})
 	if err != nil {

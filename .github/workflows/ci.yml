@@ -80,9 +80,13 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
 
       - name: Build Wasmtime provider
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo +1.97.1 build --bin agentos-runtime-wasm --locked
 
       - name: Build conformance component
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo +1.97.1 run --bin component-fixture --locked -- --out target/conformance/agent.wasm
 
       - name: PostgreSQL integration tests with race detector
