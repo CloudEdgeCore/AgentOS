@@ -270,6 +270,18 @@ components:
         namespace: { type: string }
         agentVersionRef: { type: string }
         agentVersionId: { type: [string, 'null'], format: uuid, description: The immutable publication the reference resolved to during admission. }
+        usage:
+          type: object
+          additionalProperties: false
+          description: Cumulative consumed budget dimensions from the settlement ledger.
+          properties:
+            tokens: { type: integer, format: int64, minimum: 0 }
+            costUsd: { type: number, minimum: 0 }
+            toolCalls: { type: integer, format: int64, minimum: 0 }
+            wallSeconds: { type: integer, format: int64, minimum: 0 }
+        budgetExhausted:
+          type: boolean
+          description: A settlement was rejected because it would exceed the reservation; new consumption must stop.
         goal: { type: string }
         spec: { type: object, additionalProperties: true }
         phase:

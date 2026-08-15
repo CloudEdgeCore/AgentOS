@@ -52,6 +52,11 @@ type DecideAdmissionInput struct {
 	// reference resolved to. It is set by the admission controller whenever
 	// the reference is resolvable, regardless of the admission outcome.
 	AgentVersionID *uuid.UUID
+	// Budget is the task's reserved ceiling, derived from its workload spec
+	// by the admission controller. When set and the task is admitted, the
+	// ledger row is created in the same transaction as the admission
+	// decision; nil means the task carries no budget.
+	Budget *TaskBudget
 }
 
 type ScheduleTaskInput struct {

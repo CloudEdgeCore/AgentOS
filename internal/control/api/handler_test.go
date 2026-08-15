@@ -268,6 +268,51 @@ func publishRequest(body []byte, key string) *http.Request {
 	return request
 }
 
+func TestGetTaskReportsBudgetUsage(t *testing.T) {
+	backend := newMemoryStore()
+	created, err := backend.CreateTask(context.Background(), store.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
+		Goal: "usage", Spec: []byte(`{}`), IdempotencyKey: "usage-task",
+	})
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	backend.setBudget(created.Task.ID, store.TaskBudgetStatus{
+		TaskID: created.Task.ID, TenantID: "tenant-a",
+		Reserved:  store.TaskBudget{Tokens: 100, CostUSD: 1, ToolCalls: 10, WallSeconds: 60},
+		Consumed:  store.TaskBudget{Tokens: 60, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 30},
+		Exhausted: true, ResourceVersion: 2, UpdatedAt: now,
+	})
+	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend))
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+created.Task.ID.String(), nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Usage           usageResponse `json:"usage"`
+		BudgetExhausted bool          `json:"budgetExhausted"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Usage.Tokens != 60 || body.Usage.CostUSD != 0.5 || body.Usage.ToolCalls != 4 || body.Usage.WallSeconds != 30 {
+		t.Fatalf("unexpected usage: %+v", body.Usage)
+	}
+	if !body.BudgetExhausted {
+		t.Fatal("budgetExhausted = false, want true")
+	}
+}
+
+type usageResponse struct {
+	Tokens      int64   `json:"tokens"`
+	CostUSD     float64 `json:"costUsd"`
+	ToolCalls   int64   `json:"toolCalls"`
+	WallSeconds int64   `json:"wallSeconds"`
+}
+
 func TestRoutingFailuresRemainStructured(t *testing.T) {
 	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore())
 	request := httptest.NewRequest(http.MethodDelete, "/v1/tasks", nil)
@@ -315,10 +360,14 @@ type memoryStore struct {
 	byKey    map[string]uuid.UUID
 	hashes   map[string][32]byte
 	versions []store.AgentVersion
+	budgets  map[uuid.UUID]store.TaskBudgetStatus
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{byID: map[uuid.UUID]store.Task{}, byKey: map[string]uuid.UUID{}, hashes: map[string][32]byte{}}
+	return &memoryStore{
+		byID: map[uuid.UUID]store.Task{}, byKey: map[string]uuid.UUID{},
+		hashes: map[string][32]byte{}, budgets: map[uuid.UUID]store.TaskBudgetStatus{},
+	}
 }
 
 func (m *memoryStore) CreateTask(_ context.Context, in store.CreateTaskInput) (store.CreateTaskResult, error) {
@@ -424,4 +473,24 @@ func (m *memoryStore) GetAgentVersionByRef(_ context.Context, tenantID, ref stri
 		}
 	}
 	return store.AgentVersion{}, store.ErrNotFound
+}
+
+func (m *memoryStore) GetTaskBudget(_ context.Context, tenantID string, id uuid.UUID) (store.TaskBudgetStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.byID[id]
+	if !ok || task.TenantID != tenantID {
+		return store.TaskBudgetStatus{}, store.ErrNotFound
+	}
+	status, ok := m.budgets[id]
+	if !ok {
+		return store.TaskBudgetStatus{}, store.ErrBudgetNotReserved
+	}
+	return status, nil
+}
+
+func (m *memoryStore) setBudget(id uuid.UUID, status store.TaskBudgetStatus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.budgets[id] = status
 }

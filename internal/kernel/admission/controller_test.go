@@ -75,6 +75,28 @@ func TestControllerAdmitsAndBindsResolvedAgentVersion(t *testing.T) {
 	if decision.AgentVersionID == nil || decision.AgentVersionID.String() != repository.versionID("agent@1") {
 		t.Fatalf("version was not bound correctly: %v", decision.AgentVersionID)
 	}
+	if decision.Budget == nil || decision.Budget.Tokens != 500 || decision.Budget.CostUSD != 2 ||
+		decision.Budget.ToolCalls != 10 || decision.Budget.WallSeconds != 60 {
+		t.Fatalf("task budget was not reserved: %+v", decision.Budget)
+	}
+}
+
+func TestControllerPassesNoBudgetForUnboundedTasks(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	controller := NewController(repository, New(testLimits()), "admission-1", 10, time.Minute)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":70,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":0,"costUsd":0,"toolCalls":0,"wallSeconds":0},
+		"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	if decision := repository.lastDecision(); decision.Admit && decision.Budget != nil {
+		t.Fatalf("zero budget was reserved: %+v", decision.Budget)
+	}
 }
 
 func taskClaim(ref, spec string) store.Task {

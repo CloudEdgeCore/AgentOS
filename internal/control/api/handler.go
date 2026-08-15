@@ -30,6 +30,7 @@ type TaskStore interface {
 	CreateTask(context.Context, store.CreateTaskInput) (store.CreateTaskResult, error)
 	GetTask(context.Context, string, uuid.UUID) (store.Task, error)
 	RequestTaskCancellation(context.Context, string, uuid.UUID, int64) (store.Task, error)
+	GetTaskBudget(context.Context, string, uuid.UUID) (store.TaskBudgetStatus, error)
 }
 
 type AgentVersionStore interface {
@@ -78,6 +79,13 @@ type createTaskRequest struct {
 	Spec            json.RawMessage `json:"spec"`
 }
 
+type usageSummary struct {
+	Tokens      int64   `json:"tokens"`
+	CostUSD     float64 `json:"costUsd"`
+	ToolCalls   int64   `json:"toolCalls"`
+	WallSeconds int64   `json:"wallSeconds"`
+}
+
 type taskResponse struct {
 	APIVersion        string          `json:"apiVersion"`
 	Kind              string          `json:"kind"`
@@ -93,6 +101,8 @@ type taskResponse struct {
 	ResultRef         *string         `json:"resultRef"`
 	ReasonCode        *string         `json:"reasonCode"`
 	CancelRequestedAt *time.Time      `json:"cancelRequestedAt"`
+	Usage             usageSummary    `json:"usage"`
+	BudgetExhausted   bool            `json:"budgetExhausted"`
 	ResourceVersion   int64           `json:"resourceVersion"`
 	CreatedAt         time.Time       `json:"createdAt"`
 	UpdatedAt         time.Time       `json:"updatedAt"`
@@ -167,7 +177,7 @@ func (h *Handler) createTask(writer http.ResponseWriter, request *http.Request) 
 		writer.Header().Set("Idempotent-Replayed", "true")
 	}
 	writer.Header().Set("Location", "/v1/tasks/"+result.Task.ID.String())
-	h.writeTask(writer, status, result.Task, traceID)
+	h.writeTask(writer, status, result.Task, usageSummary{}, false, traceID)
 }
 
 func (h *Handler) getTask(writer http.ResponseWriter, request *http.Request) {
@@ -187,7 +197,18 @@ func (h *Handler) getTask(writer http.ResponseWriter, request *http.Request) {
 		h.writeStoreProblem(writer, request, err, traceID)
 		return
 	}
-	h.writeTask(writer, http.StatusOK, task, traceID)
+	usage, budgetExhausted := usageSummary{}, false
+	if status, err := h.tasks.GetTaskBudget(request.Context(), principal.TenantID, id); err == nil {
+		usage = usageSummary{
+			Tokens: status.Consumed.Tokens, CostUSD: status.Consumed.CostUSD,
+			ToolCalls: status.Consumed.ToolCalls, WallSeconds: status.Consumed.WallSeconds,
+		}
+		budgetExhausted = status.Exhausted
+	} else if !errors.Is(err, store.ErrBudgetNotReserved) {
+		h.writeStoreProblem(writer, request, err, traceID)
+		return
+	}
+	h.writeTask(writer, http.StatusOK, task, usage, budgetExhausted, traceID)
 }
 
 func (h *Handler) cancelTask(writer http.ResponseWriter, request *http.Request) {
@@ -217,7 +238,18 @@ func (h *Handler) cancelTask(writer http.ResponseWriter, request *http.Request) 
 		h.writeStoreProblem(writer, request, err, traceID)
 		return
 	}
-	h.writeTask(writer, http.StatusAccepted, task, traceID)
+	usage, budgetExhausted := usageSummary{}, false
+	if status, err := h.tasks.GetTaskBudget(request.Context(), principal.TenantID, id); err == nil {
+		usage = usageSummary{
+			Tokens: status.Consumed.Tokens, CostUSD: status.Consumed.CostUSD,
+			ToolCalls: status.Consumed.ToolCalls, WallSeconds: status.Consumed.WallSeconds,
+		}
+		budgetExhausted = status.Exhausted
+	} else if !errors.Is(err, store.ErrBudgetNotReserved) {
+		h.writeStoreProblem(writer, request, err, traceID)
+		return
+	}
+	h.writeTask(writer, http.StatusAccepted, task, usage, budgetExhausted, traceID)
 }
 
 type createAgentVersionRequest struct {
@@ -350,11 +382,12 @@ func (h *Handler) requestContext(next http.Handler) http.Handler {
 	})
 }
 
-func (h *Handler) writeTask(writer http.ResponseWriter, status int, task store.Task, traceID string) {
+func (h *Handler) writeTask(writer http.ResponseWriter, status int, task store.Task, usage usageSummary, budgetExhausted bool, traceID string) {
 	response := taskResponse{
 		APIVersion: "agentos.dev/v1alpha1", Kind: "Task", ID: task.ID.String(),
 		TenantID: task.TenantID, Namespace: task.Namespace, AgentVersionRef: task.AgentVersionRef,
 		Goal: task.Goal, Spec: task.Spec, Phase: string(task.Phase), ResourceVersion: task.ResourceVersion,
+		Usage: usage, BudgetExhausted: budgetExhausted,
 		CreatedAt: task.CreatedAt.UTC(), UpdatedAt: task.UpdatedAt.UTC(), TraceID: traceID,
 	}
 	if task.AgentVersionID != nil {

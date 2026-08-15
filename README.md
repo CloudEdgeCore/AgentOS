@@ -6,6 +6,7 @@ The project is in its v0.1 kernel-slice phase. The current implementation establ
 
 - persistent `Task`, `Run`, and `Attempt` lifecycles;
 - an immutable `AgentVersion` publication registry with canonical `name@version` references;
+- a reserved task budget ledger with idempotent usage settlements and hard-stop enforcement;
 - optimistic concurrency through `resource_version`;
 - single-active-attempt execution through lease and fencing tokens;
 - idempotent creation and durable inbox/outbox messaging;

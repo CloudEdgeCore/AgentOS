@@ -100,7 +100,8 @@ func (env *conformanceEnv) prepareScenario(t *testing.T, scenario scenario) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := env.pool.Exec(ctx, `TRUNCATE TABLE runtime_operation_receipts, checkpoints, artifacts,
-		agent_versions, inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
+		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
+		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	published, err := env.store.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
@@ -358,7 +359,8 @@ func newConformanceEnv(t *testing.T) *conformanceEnv {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `TRUNCATE TABLE runtime_operation_receipts, checkpoints, artifacts,
-		agent_versions, inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
+		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
+		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	repository := postgresstore.New(pool)

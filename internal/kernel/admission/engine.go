@@ -108,7 +108,7 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 	}
 	processed := 0
 	for _, claim := range claims {
-		decision, versionID, err := c.decide(ctx, claim)
+		decision, versionID, budget, err := c.decide(ctx, claim)
 		if err != nil {
 			return processed, err
 		}
@@ -116,7 +116,7 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 			TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
 			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 			Admit: decision.Admit, ReasonCode: decision.ReasonCode, Reasons: decision.Reasons,
-			EvaluatorVersion: EvaluatorVersion, AgentVersionID: versionID,
+			EvaluatorVersion: EvaluatorVersion, AgentVersionID: versionID, Budget: budget,
 		})
 		if err != nil {
 			return processed, err
@@ -129,27 +129,42 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 // decide resolves the task's agent version reference and evaluates both the
 // bounded workload spec and the published version policy. The resolved version
 // is bound to the task regardless of the outcome so that the decision record
-// always documents what the task referenced.
-func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decision, *uuid.UUID, error) {
+// always documents what the task referenced; the decoded budget reservation is
+// passed along so that admitted tasks hold a ledger.
+func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decision, *uuid.UUID, *store.TaskBudget, error) {
 	version, err := c.store.GetAgentVersionByRef(ctx, claim.Task.TenantID, claim.Task.AgentVersionRef)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrAgentVersionRefInvalid):
-			return rejected("AGENT_VERSION_REF_INVALID", "agentVersionRef", "agent version reference must be a published name@version"), nil, nil
+			return rejected("AGENT_VERSION_REF_INVALID", "agentVersionRef", "agent version reference must be a published name@version"), nil, nil, nil
 		case errors.Is(err, store.ErrNotFound):
-			return rejected("AGENT_VERSION_NOT_FOUND", "agentVersionRef", "agent version is not published in this tenant"), nil, nil
+			return rejected("AGENT_VERSION_NOT_FOUND", "agentVersionRef", "agent version is not published in this tenant"), nil, nil, nil
 		default:
-			return Decision{}, nil, err
+			return Decision{}, nil, nil, err
 		}
+	}
+	spec, err := workload.Decode(claim.Task.Spec)
+	if err != nil {
+		// The engine reports SPEC_INVALID for the same failure; budget
+		// reservation is irrelevant for a spec that cannot be decoded.
+		spec = workload.Spec{}
+	}
+	var budget *store.TaskBudget
+	if !spec.Budget.Zero() {
+		value := store.TaskBudget{
+			Tokens: spec.Budget.Tokens, CostUSD: spec.Budget.CostUSD,
+			ToolCalls: spec.Budget.ToolCalls, WallSeconds: spec.Budget.WallSeconds,
+		}
+		budget = &value
 	}
 	decision := c.engine.Evaluate(claim.Task)
 	if !decision.Admit {
-		return decision, &version.ID, nil
+		return decision, &version.ID, budget, nil
 	}
 	if reasons := checkVersionPolicy(claim.Task.Spec, version); len(reasons) != 0 {
-		return Decision{ReasonCode: reasons[0].Code, Reasons: reasons}, &version.ID, nil
+		return Decision{ReasonCode: reasons[0].Code, Reasons: reasons}, &version.ID, budget, nil
 	}
-	return decision, &version.ID, nil
+	return decision, &version.ID, budget, nil
 }
 
 // checkVersionPolicy enforces the runtime-class policy published with the

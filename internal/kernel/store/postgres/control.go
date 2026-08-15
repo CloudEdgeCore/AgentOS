@@ -103,6 +103,9 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 		strings.TrimSpace(in.ReasonCode) == "" || strings.TrimSpace(in.EvaluatorVersion) == "" {
 		return kernelstore.Task{}, fmt.Errorf("admission tenant, owner, reason code, and evaluator version are required")
 	}
+	if in.Budget != nil && !in.Budget.Valid() {
+		return kernelstore.Task{}, fmt.Errorf("budget values must not be negative")
+	}
 	reasons, err := json.Marshal(in.Reasons)
 	if err != nil {
 		return kernelstore.Task{}, fmt.Errorf("encode admission reasons: %w", err)
@@ -156,6 +159,19 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	}
 	if err := deleteTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerAdmission, in.OwnerID, in.ClaimFencingToken); err != nil {
 		return kernelstore.Task{}, err
+	}
+	// The budget reservation commits atomically with the admission decision:
+	// only admitted tasks hold a ledger, and rejected tasks never reserve.
+	if to == domain.TaskAdmitted && in.Budget != nil && !in.Budget.Zero() {
+		if _, err := tx.Exec(ctx, `INSERT INTO task_budget_ledgers (
+			tenant_id, task_id, reserved_tokens, reserved_cost_usd,
+			reserved_tool_calls, reserved_wall_seconds, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+		ON CONFLICT (tenant_id, task_id) DO NOTHING`,
+			in.TenantID, in.TaskID.String(), in.Budget.Tokens, in.Budget.CostUSD,
+			in.Budget.ToolCalls, in.Budget.WallSeconds, now); err != nil {
+			return kernelstore.Task{}, classify(err)
+		}
 	}
 	if err := insertEvent(ctx, tx, in.TenantID, "Task", task.ID, updated.ResourceVersion, "Task"+title(string(to)), map[string]any{
 		"taskId": task.ID, "phase": to, "reasonCode": in.ReasonCode, "reasons": in.Reasons,

@@ -34,6 +34,12 @@ type Budget struct {
 	WallSeconds int64   `json:"wallSeconds"`
 }
 
+// Zero reports whether every dimension is unset, meaning the task carries no
+// budget ceiling and its usage is not enforced.
+func (b Budget) Zero() bool {
+	return b.Tokens == 0 && b.CostUSD == 0 && b.ToolCalls == 0 && b.WallSeconds == 0
+}
+
 type Placement struct {
 	RuntimeClasses []string `json:"runtimeClasses"`
 	PreferredClass string   `json:"preferredClass,omitempty"`
