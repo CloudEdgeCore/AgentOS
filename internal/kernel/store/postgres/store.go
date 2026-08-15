@@ -612,7 +612,7 @@ func attemptEventType(phase domain.AttemptPhase) string {
 }
 
 const taskColumns = `
-	id::text, tenant_id, namespace, agent_version_ref, goal, spec, request_hash,
+	id::text, tenant_id, namespace, agent_version_ref, agent_version_id::text, goal, spec, request_hash,
 	idempotency_key, phase, admission_reason_code, admitted_at, cancel_requested_at, active_run_id::text, result_ref,
 	resource_version, created_at, updated_at`
 
@@ -634,12 +634,13 @@ type scanner interface{ Scan(...any) error }
 func scanTask(row scanner) (kernelstore.Task, error) {
 	var task kernelstore.Task
 	var id string
+	var agentVersionID sql.NullString
 	var admissionReason, activeID, result sql.NullString
 	var admitted, cancel sql.NullTime
 	var hash []byte
-	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &task.Goal,
-		&task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel, &activeID, &result,
-		&task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
+	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &agentVersionID,
+		&task.Goal, &task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel,
+		&activeID, &result, &task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return task, err
 	}
 	parsed, err := uuid.Parse(id)
@@ -647,6 +648,13 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 		return task, fmt.Errorf("parse task id: %w", err)
 	}
 	task.ID = parsed
+	if agentVersionID.Valid {
+		parsed, err := uuid.Parse(agentVersionID.String)
+		if err != nil {
+			return task, fmt.Errorf("parse agent version id: %w", err)
+		}
+		task.AgentVersionID = &parsed
+	}
 	if len(hash) != len(task.RequestHash) {
 		return task, fmt.Errorf("task request hash has length %d", len(hash))
 	}

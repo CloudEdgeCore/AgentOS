@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/control/auth"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -31,14 +32,21 @@ type TaskStore interface {
 	RequestTaskCancellation(context.Context, string, uuid.UUID, int64) (store.Task, error)
 }
 
-type Handler struct {
-	store TaskStore
-	newID func() uuid.UUID
+type AgentVersionStore interface {
+	CreateAgentVersion(context.Context, store.CreateAgentVersionInput) (store.CreateAgentVersionResult, error)
+	GetAgentVersion(context.Context, string, uuid.UUID) (store.AgentVersion, error)
 }
 
-func NewHandler(taskStore TaskStore) http.Handler {
+type Handler struct {
+	tasks        TaskStore
+	agentVersion AgentVersionStore
+	newID        func() uuid.UUID
+}
+
+func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore) http.Handler {
 	handler := &Handler{
-		store: taskStore,
+		tasks:        taskStore,
+		agentVersion: agentVersions,
 		newID: func() uuid.UUID {
 			id, err := uuid.NewV7()
 			if err != nil {
@@ -51,9 +59,13 @@ func NewHandler(taskStore TaskStore) http.Handler {
 	mux.HandleFunc("POST /v1/tasks", handler.createTask)
 	mux.HandleFunc("GET /v1/tasks/{taskID}", handler.getTask)
 	mux.HandleFunc("POST /v1/tasks/{taskAction}", handler.cancelTask)
+	mux.HandleFunc("POST /v1/agent-versions", handler.createAgentVersion)
+	mux.HandleFunc("GET /v1/agent-versions/{agentVersionID}", handler.getAgentVersion)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("/v1/tasks", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/agent-versions", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/agent-versions/{agentVersionID}", handler.methodNotAllowed)
 	mux.HandleFunc("/healthz", handler.methodNotAllowed)
 	mux.HandleFunc("/", handler.notFound)
 	return handler.requestContext(mux)
@@ -73,6 +85,7 @@ type taskResponse struct {
 	TenantID          string          `json:"tenantId"`
 	Namespace         string          `json:"namespace"`
 	AgentVersionRef   string          `json:"agentVersionRef"`
+	AgentVersionID    *string         `json:"agentVersionId"`
 	Goal              string          `json:"goal"`
 	Spec              json.RawMessage `json:"spec"`
 	Phase             string          `json:"phase"`
@@ -139,7 +152,7 @@ func (h *Handler) createTask(writer http.ResponseWriter, request *http.Request) 
 		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_TASK", err.Error(), traceID)
 		return
 	}
-	result, err := h.store.CreateTask(request.Context(), store.CreateTaskInput{
+	result, err := h.tasks.CreateTask(request.Context(), store.CreateTaskInput{
 		ID: h.newID(), TenantID: principal.TenantID, Namespace: body.Namespace,
 		AgentVersionRef: body.AgentVersionRef, Goal: body.Goal, Spec: body.Spec,
 		IdempotencyKey: idempotencyKey,
@@ -169,7 +182,7 @@ func (h *Handler) getTask(writer http.ResponseWriter, request *http.Request) {
 		h.writeProblem(writer, request, http.StatusNotFound, "TASK_NOT_FOUND", "task was not found", traceID)
 		return
 	}
-	task, err := h.store.GetTask(request.Context(), principal.TenantID, id)
+	task, err := h.tasks.GetTask(request.Context(), principal.TenantID, id)
 	if err != nil {
 		h.writeStoreProblem(writer, request, err, traceID)
 		return
@@ -199,12 +212,115 @@ func (h *Handler) cancelTask(writer http.ResponseWriter, request *http.Request) 
 		h.writeProblem(writer, request, http.StatusPreconditionRequired, "IF_MATCH_REQUIRED", "If-Match must contain the current weak resource-version ETag", traceID)
 		return
 	}
-	task, err := h.store.RequestTaskCancellation(request.Context(), principal.TenantID, id, expectedVersion)
+	task, err := h.tasks.RequestTaskCancellation(request.Context(), principal.TenantID, id, expectedVersion)
 	if err != nil {
 		h.writeStoreProblem(writer, request, err, traceID)
 		return
 	}
 	h.writeTask(writer, http.StatusAccepted, task, traceID)
+}
+
+type createAgentVersionRequest struct {
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Namespace string          `json:"namespace"`
+	Spec      json.RawMessage `json:"spec"`
+}
+
+type agentVersionResponse struct {
+	APIVersion      string          `json:"apiVersion"`
+	Kind            string          `json:"kind"`
+	ID              string          `json:"id"`
+	TenantID        string          `json:"tenantId"`
+	Namespace       string          `json:"namespace"`
+	Name            string          `json:"name"`
+	Version         string          `json:"version"`
+	Ref             string          `json:"ref"`
+	Spec            json.RawMessage `json:"spec"`
+	SpecDigest      string          `json:"specDigest"`
+	ResourceVersion int64           `json:"resourceVersion"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	TraceID         string          `json:"traceId"`
+}
+
+func (h *Handler) createAgentVersion(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		h.writeProblem(writer, request, http.StatusUnsupportedMediaType, "CONTENT_TYPE_REQUIRED", "Content-Type must be application/json", traceID)
+		return
+	}
+	idempotencyKey := request.Header.Get("Idempotency-Key")
+	if !idempotencyKeyPattern.MatchString(idempotencyKey) {
+		h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be 1..128 safe ASCII characters", traceID)
+		return
+	}
+
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBody)
+	encoded, err := io.ReadAll(request.Body)
+	if err != nil {
+		h.writeDecodeProblem(writer, request, err, traceID)
+		return
+	}
+	if err := rejectDuplicateJSONKeys(encoded); err != nil {
+		h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_JSON", err.Error(), traceID)
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var body createAgentVersionRequest
+	if err := decoder.Decode(&body); err != nil {
+		h.writeDecodeProblem(writer, request, err, traceID)
+		return
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_JSON", err.Error(), traceID)
+		return
+	}
+	if err := validateCreateAgentVersion(body); err != nil {
+		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_AGENT_VERSION", err.Error(), traceID)
+		return
+	}
+	result, err := h.agentVersion.CreateAgentVersion(request.Context(), store.CreateAgentVersionInput{
+		ID: h.newID(), TenantID: principal.TenantID, Namespace: body.Namespace,
+		Name: body.Name, Version: body.Version, Spec: body.Spec,
+	})
+	if err != nil {
+		h.writeStoreProblem(writer, request, err, traceID)
+		return
+	}
+	status := http.StatusCreated
+	if result.Existing {
+		status = http.StatusOK
+		writer.Header().Set("Idempotent-Replayed", "true")
+	}
+	writer.Header().Set("Location", "/v1/agent-versions/"+result.AgentVersion.ID.String())
+	h.writeAgentVersion(writer, status, result.AgentVersion, traceID)
+}
+
+func (h *Handler) getAgentVersion(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	id, err := uuid.Parse(request.PathValue("agentVersionID"))
+	if err != nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "AGENT_VERSION_NOT_FOUND", "agent version was not found", traceID)
+		return
+	}
+	version, err := h.agentVersion.GetAgentVersion(request.Context(), principal.TenantID, id)
+	if err != nil {
+		h.writeStoreProblem(writer, request, err, traceID)
+		return
+	}
+	h.writeAgentVersion(writer, http.StatusOK, version, traceID)
 }
 
 func (h *Handler) health(writer http.ResponseWriter, _ *http.Request) {
@@ -241,6 +357,10 @@ func (h *Handler) writeTask(writer http.ResponseWriter, status int, task store.T
 		Goal: task.Goal, Spec: task.Spec, Phase: string(task.Phase), ResourceVersion: task.ResourceVersion,
 		CreatedAt: task.CreatedAt.UTC(), UpdatedAt: task.UpdatedAt.UTC(), TraceID: traceID,
 	}
+	if task.AgentVersionID != nil {
+		value := task.AgentVersionID.String()
+		response.AgentVersionID = &value
+	}
 	if task.ActiveRunID != nil {
 		value := task.ActiveRunID.String()
 		response.ActiveRunID = &value
@@ -259,6 +379,18 @@ func (h *Handler) writeTask(writer http.ResponseWriter, status int, task store.T
 	writeJSON(writer, status, response)
 }
 
+func (h *Handler) writeAgentVersion(writer http.ResponseWriter, status int, version store.AgentVersion, traceID string) {
+	response := agentVersionResponse{
+		APIVersion: agentversion.APIVersion, Kind: agentversion.Kind, ID: version.ID.String(),
+		TenantID: version.TenantID, Namespace: version.Namespace, Name: version.Name,
+		Version: version.Version, Ref: version.Ref(), Spec: version.Spec,
+		SpecDigest: fmt.Sprintf("%x", version.SpecDigest), ResourceVersion: version.ResourceVersion,
+		CreatedAt: version.CreatedAt.UTC(), TraceID: traceID,
+	}
+	writer.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, version.ResourceVersion))
+	writeJSON(writer, status, response)
+}
+
 func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Request, err error, traceID string) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -269,6 +401,8 @@ func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Re
 		h.writeProblem(writer, request, http.StatusConflict, "RESOURCE_VERSION_CONFLICT", "resource changed concurrently", traceID)
 	case errors.Is(err, store.ErrInvalidTransition):
 		h.writeProblem(writer, request, http.StatusConflict, "TASK_STATE_CONFLICT", "task lifecycle does not allow this operation", traceID)
+	case errors.Is(err, store.ErrAgentVersionConflict):
+		h.writeProblem(writer, request, http.StatusConflict, "AGENT_VERSION_CONFLICT", "agent version identity was already published with a different spec", traceID)
 	default:
 		h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be completed", traceID)
 	}
@@ -302,8 +436,8 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 }
 
 func validateCreateTask(body createTaskRequest) error {
-	if strings.TrimSpace(body.AgentVersionRef) == "" || len(body.AgentVersionRef) > 512 {
-		return fmt.Errorf("agentVersionRef is required and must not exceed 512 bytes")
+	if _, _, err := agentversion.ParseRef(body.AgentVersionRef); err != nil {
+		return fmt.Errorf("agentVersionRef must be a canonical name@version reference: %v", err)
 	}
 	if strings.TrimSpace(body.Goal) == "" || len(body.Goal) > 16*1024 {
 		return fmt.Errorf("goal is required and must not exceed 16 KiB")
@@ -317,6 +451,22 @@ func validateCreateTask(body createTaskRequest) error {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(body.Spec, &object); err != nil || object == nil {
 		return fmt.Errorf("spec must be a JSON object")
+	}
+	return nil
+}
+
+func validateCreateAgentVersion(body createAgentVersionRequest) error {
+	if err := agentversion.ValidateName(body.Name); err != nil {
+		return err
+	}
+	if err := agentversion.ValidateVersion(body.Version); err != nil {
+		return err
+	}
+	if strings.TrimSpace(body.Namespace) == "" || len(body.Namespace) > 255 {
+		return fmt.Errorf("namespace is required and must not exceed 255 bytes")
+	}
+	if err := agentversion.ValidateSpec(body.Spec); err != nil {
+		return err
 	}
 	return nil
 }

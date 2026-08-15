@@ -48,6 +48,10 @@ type DecideAdmissionInput struct {
 	ReasonCode          string
 	Reasons             []AdmissionReason
 	EvaluatorVersion    string
+	// AgentVersionID binds the task to the immutable published version its
+	// reference resolved to. It is set by the admission controller whenever
+	// the reference is resolvable, regardless of the admission outcome.
+	AgentVersionID *uuid.UUID
 }
 
 type ScheduleTaskInput struct {
@@ -95,6 +99,7 @@ type ControlStore interface {
 	ClaimOutbox(context.Context, ClaimOutboxInput) ([]OutboxEvent, error)
 	MarkOutboxPublished(context.Context, uuid.UUID, string, int64, time.Time) error
 	MarkOutboxFailed(context.Context, uuid.UUID, string, int64, string, time.Time) error
+	GetAgentVersionByRef(context.Context, string, string) (AgentVersion, error)
 }
 
 type TaskCancellationStore interface {

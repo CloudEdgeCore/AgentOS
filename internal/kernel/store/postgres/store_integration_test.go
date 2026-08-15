@@ -252,8 +252,9 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)
 	ctx := context.Background()
+	published := publishVersion(t, ctx, repository, "tenant-a", "agent", "1", `{"runtimeClassPolicy":{"allowed":["oci"]}}`)
 	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
-		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1",
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
 		Goal: "controller chain", IdempotencyKey: "controller-chain",
 		Spec: []byte(`{
 			"priority":70,
@@ -280,6 +281,9 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 	}
 	if admitted.Phase != domain.TaskAdmitted || admitted.AdmissionReasonCode != "ADMISSION_PASSED" {
 		t.Fatalf("unexpected admission state: %+v", admitted)
+	}
+	if admitted.AgentVersionID == nil || *admitted.AgentVersionID != published.AgentVersion.ID {
+		t.Fatalf("task was not bound to the published agent version: %+v", admitted)
 	}
 
 	schedulerController := scheduler.NewController(repository, staticPools{{
@@ -434,6 +438,18 @@ func createAdmittedRun(t *testing.T, ctx context.Context, store *postgresstore.S
 	return admitted, run
 }
 
+func publishVersion(t *testing.T, ctx context.Context, repository *postgresstore.Store, tenantID, name, version, spec string) kernelstore.CreateAgentVersionResult {
+	t.Helper()
+	published, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: tenantID, Namespace: "default", Name: name, Version: version,
+		Spec: []byte(spec),
+	})
+	if err != nil {
+		t.Fatalf("publish agent version: %v", err)
+	}
+	return published
+}
+
 func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstore.Store) {
 	t.Helper()
 	url := os.Getenv(testDatabaseEnvironment)
@@ -455,7 +471,7 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 		t.Fatalf("apply migrations: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `TRUNCATE TABLE runtime_operation_receipts, checkpoints, artifacts,
-		inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
+		agent_versions, inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	return pool, postgresstore.NewWithClock(pool, clock)

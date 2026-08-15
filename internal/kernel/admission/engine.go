@@ -3,13 +3,17 @@ package admission
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
+	"github.com/google/uuid"
 )
 
 const EvaluatorVersion = "builtin/v1alpha1"
@@ -104,12 +108,15 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 	}
 	processed := 0
 	for _, claim := range claims {
-		decision := c.engine.Evaluate(claim.Task)
-		_, err := c.store.DecideAdmission(ctx, store.DecideAdmissionInput{
+		decision, versionID, err := c.decide(ctx, claim)
+		if err != nil {
+			return processed, err
+		}
+		_, err = c.store.DecideAdmission(ctx, store.DecideAdmissionInput{
 			TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
 			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 			Admit: decision.Admit, ReasonCode: decision.ReasonCode, Reasons: decision.Reasons,
-			EvaluatorVersion: EvaluatorVersion,
+			EvaluatorVersion: EvaluatorVersion, AgentVersionID: versionID,
 		})
 		if err != nil {
 			return processed, err
@@ -117,6 +124,54 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 		processed++
 	}
 	return processed, nil
+}
+
+// decide resolves the task's agent version reference and evaluates both the
+// bounded workload spec and the published version policy. The resolved version
+// is bound to the task regardless of the outcome so that the decision record
+// always documents what the task referenced.
+func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decision, *uuid.UUID, error) {
+	version, err := c.store.GetAgentVersionByRef(ctx, claim.Task.TenantID, claim.Task.AgentVersionRef)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrAgentVersionRefInvalid):
+			return rejected("AGENT_VERSION_REF_INVALID", "agentVersionRef", "agent version reference must be a published name@version"), nil, nil
+		case errors.Is(err, store.ErrNotFound):
+			return rejected("AGENT_VERSION_NOT_FOUND", "agentVersionRef", "agent version is not published in this tenant"), nil, nil
+		default:
+			return Decision{}, nil, err
+		}
+	}
+	decision := c.engine.Evaluate(claim.Task)
+	if !decision.Admit {
+		return decision, &version.ID, nil
+	}
+	if reasons := checkVersionPolicy(claim.Task.Spec, version); len(reasons) != 0 {
+		return Decision{ReasonCode: reasons[0].Code, Reasons: reasons}, &version.ID, nil
+	}
+	return decision, &version.ID, nil
+}
+
+// checkVersionPolicy enforces the runtime-class policy published with the
+// agent version. An absent policy is permissive: the engine-level limits
+// remain authoritative.
+func checkVersionPolicy(raw json.RawMessage, version store.AgentVersion) []store.AdmissionReason {
+	spec, err := workload.Decode(raw)
+	if err != nil {
+		return []store.AdmissionReason{reason("AGENT_VERSION_POLICY_INVALID", "agentVersionRef", "task spec could not be decoded against the published agent version")}
+	}
+	var policy agentversion.Spec
+	if err := json.Unmarshal(version.Spec, &policy); err != nil {
+		return []store.AdmissionReason{reason("AGENT_VERSION_POLICY_INVALID", "agentVersionRef", "published agent version policy is invalid")}
+	}
+	var reasons []store.AdmissionReason
+	for _, runtimeClass := range spec.Placement.RuntimeClasses {
+		if len(policy.RuntimeClassPolicy.Allowed) > 0 && !slices.Contains(policy.RuntimeClassPolicy.Allowed, runtimeClass) {
+			reasons = append(reasons, reason("RUNTIME_CLASS_NOT_ALLOWED", "placement.runtimeClasses",
+				fmt.Sprintf("runtime class %q is not allowed by agent version %s", runtimeClass, version.Ref())))
+		}
+	}
+	return reasons
 }
 
 func rejected(code, field, message string) Decision {

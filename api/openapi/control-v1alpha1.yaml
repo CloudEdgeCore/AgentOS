@@ -93,6 +93,72 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '428': { $ref: '#/components/responses/Problem' }
+  /v1/agent-versions:
+    post:
+      operationId: createAgentVersion
+      summary: Publish an immutable agent version
+      description: >-
+        Publishes an immutable AgentVersion. Reusing the same name and version
+        with an identical spec replays the existing publication; a different
+        spec for the same identity conflicts.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentVersionRequest'
+      responses:
+        '201':
+          description: A new immutable agent version was published.
+          headers:
+            Location:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '200':
+          description: The identical publication already exists.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, const: 'true' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/agent-versions/{agentVersionId}:
+    get:
+      operationId: getAgentVersion
+      summary: Read a published agent version in the authenticated tenant
+      parameters:
+        - name: agentVersionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The immutable published agent version.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -139,6 +205,46 @@ components:
         goal: { type: string, minLength: 1, maxLength: 16384 }
         namespace: { type: string, minLength: 1, maxLength: 255 }
         spec: { type: object, additionalProperties: true }
+    CreateAgentVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [name, version, namespace, spec]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        namespace: { type: string, minLength: 1, maxLength: 255 }
+        spec: { type: object, additionalProperties: true }
+    AgentVersion:
+      type: object
+      additionalProperties: false
+      required:
+        - apiVersion
+        - kind
+        - id
+        - tenantId
+        - namespace
+        - name
+        - version
+        - ref
+        - spec
+        - specDigest
+        - resourceVersion
+        - createdAt
+        - traceId
+      properties:
+        apiVersion: { type: string, const: agentos.dev/v1alpha1 }
+        kind: { type: string, const: AgentVersion }
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        version: { type: string }
+        ref: { type: string, description: Canonical name@version reference used by tasks. }
+        spec: { type: object, additionalProperties: true }
+        specDigest: { type: string, description: SHA-256 of the canonical spec document. }
+        resourceVersion: { type: integer, format: int64, const: 1, description: Immutable publications always have resource version 1. }
+        createdAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
     Task:
       type: object
       additionalProperties: false
@@ -163,6 +269,7 @@ components:
         tenantId: { type: string }
         namespace: { type: string }
         agentVersionRef: { type: string }
+        agentVersionId: { type: [string, 'null'], format: uuid, description: The immutable publication the reference resolved to during admission. }
         goal: { type: string }
         spec: { type: object, additionalProperties: true }
         phase:

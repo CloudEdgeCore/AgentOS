@@ -267,6 +267,14 @@ func (s *Store) CommitCheckpoint(ctx context.Context, input kernelstore.CommitCh
 	if task.AgentVersionRef != in.AgentVersionRef || attempt.RuntimeClass == "" {
 		return zeroCheckpoint, zeroAttempt, fmt.Errorf("checkpoint compatibility identity does not match assignment")
 	}
+	resolvedVersionID, err := resolveAgentVersionID(ctx, tx, in.TenantID, in.AgentVersionRef)
+	if err != nil {
+		return zeroCheckpoint, zeroAttempt, err
+	}
+	if resolvedVersionID == nil {
+		return zeroCheckpoint, zeroAttempt, fmt.Errorf("%w: checkpoint references unpublished agent version %s", kernelstore.ErrNotFound, in.AgentVersionRef)
+	}
+	agentVersionID := sql.NullString{String: resolvedVersionID.String(), Valid: true}
 	if !lease.ExpiresAt.After(s.now()) {
 		return zeroCheckpoint, zeroAttempt, fmt.Errorf("%w: lease expired", kernelstore.ErrFenced)
 	}
@@ -281,7 +289,7 @@ func (s *Store) CommitCheckpoint(ctx context.Context, input kernelstore.CommitCh
 	now := s.now()
 	_, err = tx.Exec(ctx, checkpointInsert,
 		in.CheckpointID.String(), in.TenantID, run.ID.String(), attempt.ID.String(), ordinal,
-		in.FencingToken, in.AgentVersionRef, attempt.RuntimeClass, in.Provider, in.RuntimeABI,
+		in.FencingToken, in.AgentVersionRef, agentVersionID, attempt.RuntimeClass, in.Provider, in.RuntimeABI,
 		in.SchemaVersion, artifact.ID.String(), in.ConfirmedReceiptIDs, requestHash[:], in.IdempotencyKey,
 		requestHash[:], now)
 	if err != nil {
@@ -839,9 +847,9 @@ const checkpointSelectWithHash = `SELECT
 
 const checkpointInsert = `INSERT INTO checkpoints (
 	id, tenant_id, run_id, attempt_id, ordinal, fencing_token, agent_version_ref,
-	runtime_class, provider, runtime_abi, schema_version, state_artifact_id,
+	agent_version_id, runtime_class, provider, runtime_abi, schema_version, state_artifact_id,
 	confirmed_receipt_ids, envelope_sha256, idempotency_key, request_hash, created_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`
 
 func scanCheckpoint(row scanner) (kernelstore.Checkpoint, error) {
 	checkpoint, _, err := scanCheckpointValues(row, false)

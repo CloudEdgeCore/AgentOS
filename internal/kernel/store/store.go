@@ -33,6 +33,7 @@ type Task struct {
 	TenantID            string
 	Namespace           string
 	AgentVersionRef     string
+	AgentVersionID      *uuid.UUID
 	Goal                string
 	Spec                json.RawMessage
 	RequestHash         [32]byte

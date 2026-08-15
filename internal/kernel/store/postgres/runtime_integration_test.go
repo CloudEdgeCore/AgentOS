@@ -20,7 +20,7 @@ import (
 
 func TestRuntimeCheckpointCompletionAndIdempotency(t *testing.T) {
 	clock := newFakeClock()
-	_, repository := prepare(t, clock.Now)
+	pool, repository := prepare(t, clock.Now)
 	ctx := context.Background()
 	assignment := scheduleRuntimeTask(t, ctx, repository, "runtime-complete", 3)
 
@@ -39,7 +39,7 @@ func TestRuntimeCheckpointCompletionAndIdempotency(t *testing.T) {
 	checkpointInput := kernelstore.CommitCheckpointInput{
 		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
 		ExpectedAttemptVersion: running.ResourceVersion, IdempotencyKey: "checkpoint-1", CheckpointID: uuid.New(),
-		AgentVersionRef: "agent:v1", Provider: "reference-go", RuntimeABI: "agentos.reference/v1",
+		AgentVersionRef: "agent@1", Provider: "reference-go", RuntimeABI: "agentos.reference/v1",
 		SchemaVersion: "state/v1", State: artifactReference("artifact://tenant-a/sha256/checkpoint", "checkpoint-state"),
 		ConfirmedReceiptIDs: []string{"receipt-b", "receipt-a", "receipt-a"},
 	}
@@ -49,6 +49,13 @@ func TestRuntimeCheckpointCompletionAndIdempotency(t *testing.T) {
 	}
 	if checkpoint.Ordinal != 1 || checkpointedAttempt.ResourceVersion != running.ResourceVersion+1 || len(checkpoint.ConfirmedReceiptIDs) != 2 {
 		t.Fatalf("unexpected checkpoint: %+v attempt=%+v", checkpoint, checkpointedAttempt)
+	}
+	var boundVersionID string
+	if err := pool.QueryRow(ctx, `SELECT agent_version_id::text FROM checkpoints WHERE id = $1`, checkpoint.ID.String()).Scan(&boundVersionID); err != nil {
+		t.Fatalf("read checkpoint version binding: %v", err)
+	}
+	if boundVersionID != assignment.Task.AgentVersionID.String() {
+		t.Fatalf("checkpoint bound to %s, want %s", boundVersionID, assignment.Task.AgentVersionID)
 	}
 	retriedCheckpoint, retriedAttempt, err := repository.CommitCheckpoint(ctx, checkpointInput)
 	if err != nil || retriedCheckpoint.ID != checkpoint.ID || retriedAttempt.ResourceVersion != checkpointedAttempt.ResourceVersion {
@@ -104,7 +111,7 @@ func TestExpiredRuntimeRecoversCheckpointWithHigherFence(t *testing.T) {
 	checkpoint, _, err := repository.CommitCheckpoint(ctx, kernelstore.CommitCheckpointInput{
 		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
 		ExpectedAttemptVersion: running.ResourceVersion, IdempotencyKey: "recoverable-checkpoint", CheckpointID: uuid.New(),
-		AgentVersionRef: "agent:v1", Provider: "reference-go", RuntimeABI: "agentos.reference/v1",
+		AgentVersionRef: "agent@1", Provider: "reference-go", RuntimeABI: "agentos.reference/v1",
 		SchemaVersion: "state/v1", State: artifactReference("artifact://tenant-a/sha256/recovery", "recoverable-state"),
 	})
 	if err != nil {
@@ -179,8 +186,9 @@ func TestRunningTaskCancellationConvergesThroughRuntime(t *testing.T) {
 
 func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgresstore.Store, key string, maxAttempts int) kernelstore.RuntimeAssignment {
 	t.Helper()
+	publishVersion(t, ctx, repository, "tenant-a", "agent", "1", `{"runtimeClassPolicy":{"allowed":["oci"]}}`)
 	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
-		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1", Goal: key,
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1", Goal: key,
 		IdempotencyKey: key, Spec: []byte(`{
 			"priority":70,"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
 			"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1},

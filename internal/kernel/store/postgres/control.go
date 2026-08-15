@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,12 +134,17 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	if err := domain.ValidateTaskTransition(task.Phase, to); err != nil {
 		return kernelstore.Task{}, fmt.Errorf("%w: %v", kernelstore.ErrInvalidTransition, err)
 	}
+	agentVersionID := sql.NullString{}
+	if in.AgentVersionID != nil {
+		agentVersionID = sql.NullString{String: in.AgentVersionID.String(), Valid: true}
+	}
 	updated, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = $1,
 		admission_reason_code = $2,
+		agent_version_id = $7,
 		admitted_at = CASE WHEN $1 = 'ADMITTED' THEN $3 ELSE admitted_at END,
 		resource_version = resource_version + 1, updated_at = $3
 		WHERE tenant_id = $4 AND id = $5 AND resource_version = $6
-		RETURNING `+taskColumns, to, in.ReasonCode, now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion))
+		RETURNING `+taskColumns, to, in.ReasonCode, now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion, agentVersionID))
 	if err != nil {
 		return kernelstore.Task{}, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
 	}
