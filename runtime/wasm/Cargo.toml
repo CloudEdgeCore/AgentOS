@@ -19,6 +19,9 @@ tonic = { version = "0.14.6", features = ["transport"] }
 tonic-prost = "0.14.6"
 uuid = { version = "1.18.1", features = ["v7"] }
 wasmtime = { version = "47.0.3", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std", "wat"] }
+wat = "1.256"
+wit-component = "0.252"
+wit-parser = "0.252"
 
 [build-dependencies]
 prost-build = "0.14.4"

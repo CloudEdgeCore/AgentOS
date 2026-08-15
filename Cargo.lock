@@ -30,6 +30,9 @@ dependencies = [
  "tonic-prost-build",
  "uuid",
  "wasmtime",
+ "wat",
+ "wit-component",
+ "wit-parser",
 ]
 
 [[package]]
@@ -1669,6 +1672,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-metadata"
+version = "0.252.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b7e08e02a3cd55bf778009d4cd6faae50da011f293644daf78a531a32d6d142"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "wasm-encoder 0.252.0",
+ "wasmparser 0.252.0",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.252.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1955,6 +1970,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "wit-component"
+version = "0.252.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76db0662b590f45d33d0e363fa13539a5a1eecd35d5a12fe208c335461c1053d"
+dependencies = [
+ "anyhow",
+ "bitflags",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder 0.252.0",
+ "wasm-metadata",
+ "wasmparser 0.252.0",
+ "wit-parser",
 ]
 
 [[package]]

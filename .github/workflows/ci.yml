@@ -34,6 +34,8 @@ jobs:
     env:
       AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
       AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
+      AGENTOS_WASMTIME_RUNTIME: ${{ github.workspace }}/target/debug/agentos-runtime-wasm
+      AGENTOS_WASMTIME_PACKAGE_ROOT: ${{ github.workspace }}/target/conformance
 
     steps:
       - name: Check out source
@@ -74,14 +76,20 @@ jobs:
       - name: Unit tests with race detector
         run: go test -race -count=1 ./...
 
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Build Wasmtime provider
+        run: cargo +1.97.1 build --bin agentos-runtime-wasm --locked
+
+      - name: Build conformance component
+        run: cargo +1.97.1 run --bin component-fixture --locked -- --out target/conformance/agent.wasm
+
       - name: PostgreSQL integration tests with race detector
         run: go test -race -tags=integration -count=1 ./...
 
       - name: Build control-plane commands
         run: go build ./cmd/...
-
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
 
       - name: Check Rust formatting
         run: cargo +1.97.1 fmt --all -- --check

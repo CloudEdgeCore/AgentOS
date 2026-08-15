@@ -77,6 +77,20 @@ The Wasmtime Provider accepts only components beneath its configured package
 root, exposes no WASI imports, and enforces memory, fuel and epoch-interruption
 limits. Its development gRPC transport must not be exposed outside loopback.
 
+Run the dual-provider conformance suite (the same published AgentVersion on
+the Go reference provider and the Wasmtime provider):
+
+```powershell
+cargo run --bin component-fixture -- --out tmp/conformance/agent.wasm
+$env:AGENTOS_WASMTIME_RUNTIME = "target\debug\agentos-runtime-wasm.exe"
+$env:AGENTOS_WASMTIME_PACKAGE_ROOT = "tmp\conformance"
+go test -tags=integration -run TestSameAgentVersionRunsOnBothProviders -count=1 ./internal/runtime/control/...
+```
+
+The conformance test skips the Wasmtime leg when
+`AGENTOS_WASMTIME_RUNTIME` and `AGENTOS_WASMTIME_PACKAGE_ROOT` are unset; CI
+builds the provider and component in the same job and always runs both legs.
+
 The development API intentionally accepts only a fixed tenant identity and
 refuses non-loopback listeners. Verified OIDC/workload identity middleware is
 required before a non-development deployment.

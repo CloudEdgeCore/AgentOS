@@ -93,7 +93,11 @@ impl Sandbox {
         })?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.memory_bytes)
-            .instances(1)
+            // The wit-component adapter encodes every agent component as an
+            // adapter core module plus the agent core module, so exactly two
+            // core instances are required; the host controls all imports, so
+            // untrusted code cannot grow this count itself.
+            .instances(2)
             .tables(8)
             .build();
         let mut store = Store::new(&self.engine, HostState { limits });
@@ -159,5 +163,21 @@ mod tests {
             error.to_string().contains("canonicalize") || error.to_string().contains("escapes")
         );
         std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn executes_the_conformance_component() {
+        let root = std::env::temp_dir().join(format!("agentos-wasm-exec-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).expect("create package root");
+        let component = crate::fixture::build_agent_component().expect("build fixture component");
+        std::fs::write(root.join("agent.wasm"), component).expect("stage component");
+        let sandbox = Sandbox::new(&root, 10_000_000, Duration::from_secs(30), 32 << 20)
+            .expect("create sandbox");
+        let input = r#"{"agentVersionRef":"conformance@1","goal":"echo me"}"#;
+        let output = sandbox
+            .execute("agent.wasm", input)
+            .expect("execute conformance component");
+        assert_eq!(output, input, "component must echo its input verbatim");
+        std::fs::remove_dir_all(root).expect("remove package root");
     }
 }

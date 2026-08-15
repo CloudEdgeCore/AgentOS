@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
-mod sandbox;
-
+use agentos_runtime_wasm::sandbox::{CHECKPOINT_SCHEMA, PROVIDER_NAME, RUNTIME_ABI, Sandbox};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,7 +22,6 @@ use protocol::{
     CommitCheckpointRequest, CompleteAttemptRequest, HeartbeatRequest, PollAssignmentRequest,
     TransitionAttemptRequest,
 };
-use sandbox::{CHECKPOINT_SCHEMA, PROVIDER_NAME, RUNTIME_ABI, Sandbox};
 
 #[derive(Clone)]
 struct Settings {
@@ -361,8 +359,16 @@ fn parse_settings(arguments: Vec<String>) -> Result<Settings> {
     let artifact_root_input = required("--artifact-root")?;
     std::fs::create_dir_all(&artifact_root_input).context("create artifact root")?;
     let artifact_root = Path::new(&artifact_root_input).canonicalize()?;
+    // Match the Go tools' CLI contract: a bare host:port is accepted and
+    // treated as the plaintext loopback development transport.
+    let control_endpoint = required("--control-endpoint")?;
+    let control_endpoint = if control_endpoint.contains("://") {
+        control_endpoint
+    } else {
+        format!("http://{control_endpoint}")
+    };
     Ok(Settings {
-        control_endpoint: required("--control-endpoint")?,
+        control_endpoint,
         tenant_id,
         runtime_instance_id: required("--runtime-instance-id")?,
         package_root,
