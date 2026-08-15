@@ -57,6 +57,9 @@ type DecideAdmissionInput struct {
 	// ledger row is created in the same transaction as the admission
 	// decision; nil means the task carries no budget.
 	Budget *TaskBudget
+	// PolicyRevision records the Rego policy revision that produced the
+	// decision; empty when no policy engine participated.
+	PolicyRevision string
 }
 
 type ScheduleTaskInput struct {

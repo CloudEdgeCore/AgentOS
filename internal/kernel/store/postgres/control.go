@@ -152,9 +152,10 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 		return kernelstore.Task{}, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO admission_decisions (
-		id, tenant_id, task_id, decision, reason_code, reasons, evaluator_version, decided_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, s.newID().String(), in.TenantID,
-		in.TaskID.String(), decision, in.ReasonCode, reasons, in.EvaluatorVersion, now); err != nil {
+		id, tenant_id, task_id, decision, reason_code, reasons, evaluator_version, policy_revision, decided_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9)`, s.newID().String(), in.TenantID,
+		in.TaskID.String(), decision, in.ReasonCode, reasons, in.EvaluatorVersion,
+		in.PolicyRevision, now); err != nil {
 		return kernelstore.Task{}, classify(err)
 	}
 	if err := deleteTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerAdmission, in.OwnerID, in.ClaimFencingToken); err != nil {

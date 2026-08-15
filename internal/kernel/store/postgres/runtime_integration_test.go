@@ -202,7 +202,7 @@ func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgres
 		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10, MaxToolCalls: 100,
 		MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
-	if count, err := admission.NewController(repository, engine, "admission-"+key, 10, time.Minute).Reconcile(ctx); err != nil || count != 1 {
+	if count, err := admission.NewController(repository, engine, testPolicyEngine(t), "admission-"+key, 10, time.Minute).Reconcile(ctx); err != nil || count != 1 {
 		t.Fatalf("admission count=%d err=%v", count, err)
 	}
 	pools := staticPools{{

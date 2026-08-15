@@ -13,6 +13,7 @@ import (
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
@@ -270,7 +271,7 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10,
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
-	admissionController := admission.NewController(repository, engine, "admission-1", 10, time.Minute)
+	admissionController := admission.NewController(repository, engine, testPolicyEngine(t), "admission-1", 10, time.Minute)
 	processed, err := admissionController.Reconcile(ctx)
 	if err != nil || processed != 1 {
 		t.Fatalf("admission reconcile processed=%d err=%v", processed, err)
@@ -284,6 +285,14 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 	}
 	if admitted.AgentVersionID == nil || *admitted.AgentVersionID != published.AgentVersion.ID {
 		t.Fatalf("task was not bound to the published agent version: %+v", admitted)
+	}
+	var policyRevision string
+	if err := pool.QueryRow(ctx, `SELECT policy_revision FROM admission_decisions
+		WHERE tenant_id = $1 AND task_id = $2`, "tenant-a", admitted.ID.String()).Scan(&policyRevision); err != nil {
+		t.Fatalf("read policy revision: %v", err)
+	}
+	if policyRevision != policy.Revision {
+		t.Fatalf("policy revision = %q, want %q", policyRevision, policy.Revision)
 	}
 
 	schedulerController := scheduler.NewController(repository, staticPools{{
@@ -448,6 +457,15 @@ func publishVersion(t *testing.T, ctx context.Context, repository *postgresstore
 		t.Fatalf("publish agent version: %v", err)
 	}
 	return published
+}
+
+func testPolicyEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	engine, err := policy.New(policy.TenantPolicies{"tenant-a": {MaxPriority: 100}})
+	if err != nil {
+		t.Fatalf("prepare test policy engine: %v", err)
+	}
+	return engine
 }
 
 func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstore.Store) {

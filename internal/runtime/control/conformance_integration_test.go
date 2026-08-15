@@ -19,6 +19,7 @@ import (
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
@@ -126,7 +127,7 @@ func (env *conformanceEnv) prepareScenario(t *testing.T, scenario scenario) {
 		RuntimeClasses: []string{"oci", "wasmtime"}, MaxTokens: 1000, MaxCostUSD: 10,
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
-	admissionController := admission.NewController(env.store, engine, "admission-"+scenario.key, 10, time.Minute)
+	admissionController := admission.NewController(env.store, engine, testPolicyEngine(t), "admission-"+scenario.key, 10, time.Minute)
 	if count, err := admissionController.Reconcile(ctx); err != nil || count != 1 {
 		t.Fatalf("admission reconcile count=%d err=%v", count, err)
 	}
@@ -387,4 +388,13 @@ type staticPools []scheduler.RuntimePool
 
 func (s staticPools) ListRuntimePools(context.Context, string) ([]scheduler.RuntimePool, error) {
 	return s, nil
+}
+
+func testPolicyEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	engine, err := policy.New(policy.TenantPolicies{conformanceTenant: {MaxPriority: 100}})
+	if err != nil {
+		t.Fatalf("prepare test policy engine: %v", err)
+	}
+	return engine
 }

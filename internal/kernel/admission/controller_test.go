@@ -9,13 +9,14 @@ import (
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/google/uuid"
 )
 
 func TestControllerRejectsUnpublishedAgentVersion(t *testing.T) {
 	repository := &fakeControlStore{}
-	controller := NewController(repository, New(testLimits()), "admission-1", 10, time.Minute)
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
 	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
 		"priority":70,"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
 		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
@@ -36,7 +37,7 @@ func TestControllerRejectsUnpublishedAgentVersion(t *testing.T) {
 
 func TestControllerRejectsRuntimeClassNotAllowedByVersion(t *testing.T) {
 	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["wasm"]}}`)
-	controller := NewController(repository, New(testLimits()), "admission-1", 10, time.Minute)
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
 	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
 		"priority":70,"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
 		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
@@ -57,7 +58,7 @@ func TestControllerRejectsRuntimeClassNotAllowedByVersion(t *testing.T) {
 
 func TestControllerAdmitsAndBindsResolvedAgentVersion(t *testing.T) {
 	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
-	controller := NewController(repository, New(testLimits()), "admission-1", 10, time.Minute)
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
 	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
 		"priority":70,"deadline":"2099-08-14T12:00:00Z",
 		"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
@@ -79,11 +80,80 @@ func TestControllerAdmitsAndBindsResolvedAgentVersion(t *testing.T) {
 		decision.Budget.ToolCalls != 10 || decision.Budget.WallSeconds != 60 {
 		t.Fatalf("task budget was not reserved: %+v", decision.Budget)
 	}
+	if decision.PolicyRevision != policy.Revision {
+		t.Fatalf("policy revision = %q, want %q", decision.PolicyRevision, policy.Revision)
+	}
+}
+
+func TestControllerDeniesAboveTenantPolicyMaximum(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 60), "admission-1", 10, time.Minute)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":70,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
+		"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	decision := repository.lastDecision()
+	if decision.Admit || decision.ReasonCode != "POLICY_DENIED" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	found := false
+	for _, reason := range decision.Reasons {
+		if reason.Code == "TASK_PRIORITY_EXCEEDS_TENANT_MAX" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("policy deny reason missing: %+v", decision.Reasons)
+	}
+	if decision.PolicyRevision != policy.Revision {
+		t.Fatalf("policy revision = %q, want %q", decision.PolicyRevision, policy.Revision)
+	}
+}
+
+func TestControllerDeniesTenantWithoutPolicyData(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	policyEngine, err := policy.New(policy.TenantPolicies{})
+	if err != nil {
+		t.Fatalf("prepare empty policy engine: %v", err)
+	}
+	controller := NewController(repository, New(testLimits()), policyEngine, "admission-1", 10, time.Minute)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":1,"costUsd":1,"toolCalls":1,"wallSeconds":1},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	decision := repository.lastDecision()
+	if decision.Admit || decision.ReasonCode != "POLICY_DENIED" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if len(decision.Reasons) != 1 || decision.Reasons[0].Code != "TENANT_POLICY_NOT_FOUND" {
+		t.Fatalf("unexpected deny reasons: %+v", decision.Reasons)
+	}
+}
+
+func newTestPolicy(t *testing.T, maxPriority int) *policy.Engine {
+	t.Helper()
+	engine, err := policy.New(policy.TenantPolicies{"tenant-a": {MaxPriority: maxPriority}})
+	if err != nil {
+		t.Fatalf("prepare test policy engine: %v", err)
+	}
+	return engine
 }
 
 func TestControllerPassesNoBudgetForUnboundedTasks(t *testing.T) {
 	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
-	controller := NewController(repository, New(testLimits()), "admission-1", 10, time.Minute)
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
 	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
 		"priority":70,"deadline":"2099-08-14T12:00:00Z",
 		"budget":{"tokens":0,"costUsd":0,"toolCalls":0,"wallSeconds":0},

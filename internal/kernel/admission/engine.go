@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
 	"github.com/google/uuid"
@@ -90,13 +91,14 @@ func (e *Engine) Evaluate(task store.Task) Decision {
 type Controller struct {
 	store    store.ControlStore
 	engine   *Engine
+	policy   *policy.Engine
 	ownerID  string
 	batch    int
 	claimTTL time.Duration
 }
 
-func NewController(repository store.ControlStore, engine *Engine, ownerID string, batch int, claimTTL time.Duration) *Controller {
-	return &Controller{store: repository, engine: engine, ownerID: ownerID, batch: batch, claimTTL: claimTTL}
+func NewController(repository store.ControlStore, engine *Engine, policyEngine *policy.Engine, ownerID string, batch int, claimTTL time.Duration) *Controller {
+	return &Controller{store: repository, engine: engine, policy: policyEngine, ownerID: ownerID, batch: batch, claimTTL: claimTTL}
 }
 
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
@@ -117,6 +119,7 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 			Admit: decision.Admit, ReasonCode: decision.ReasonCode, Reasons: decision.Reasons,
 			EvaluatorVersion: EvaluatorVersion, AgentVersionID: versionID, Budget: budget,
+			PolicyRevision: policy.Revision,
 		})
 		if err != nil {
 			return processed, err
@@ -163,6 +166,16 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 	}
 	if reasons := checkVersionPolicy(claim.Task.Spec, version); len(reasons) != 0 {
 		return Decision{ReasonCode: reasons[0].Code, Reasons: reasons}, &version.ID, budget, nil
+	}
+	// The Rego policy engine is the tenant-attribute gate: it runs after the
+	// bounded spec checks and denies by default on any failure.
+	policyDecision := c.policy.Evaluate(ctx, claim.Task.TenantID, policy.TaskContext{Priority: spec.Priority})
+	if !policyDecision.Allow {
+		reasons := make([]store.AdmissionReason, 0, len(policyDecision.DenyReasons))
+		for _, code := range policyDecision.DenyReasons {
+			reasons = append(reasons, reason(code, "policy", "rego policy denied the task"))
+		}
+		return Decision{ReasonCode: "POLICY_DENIED", Reasons: reasons}, &version.ID, budget, nil
 	}
 	return decision, &version.ID, budget, nil
 }

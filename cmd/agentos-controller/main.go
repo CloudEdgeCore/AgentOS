@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/recovery"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
@@ -26,6 +27,7 @@ func main() {
 	databaseURL := flag.String("database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL (or DATABASE_URL)")
 	controllerID := flag.String("controller-id", "", "stable unique controller instance ID")
 	poolsFile := flag.String("runtime-pools", "", "JSON runtime pool configuration")
+	tenantPoliciesFile := flag.String("tenant-policies", "", "JSON tenant policy data (absent tenants are denied by default)")
 	interval := flag.Duration("interval", 250*time.Millisecond, "reconciliation interval")
 	devMode := flag.Bool("dev-mode", false, "acknowledge static development pools and built-in limits")
 	flag.Parse()
@@ -37,6 +39,19 @@ func main() {
 	if err != nil {
 		slog.Error("load runtime pools", "error", err)
 		os.Exit(2)
+	}
+	tenantPolicies := policy.TenantPolicies{}
+	if *tenantPoliciesFile != "" {
+		tenantPolicies, err = loadTenantPolicies(*tenantPoliciesFile)
+		if err != nil {
+			slog.Error("load tenant policies", "error", err)
+			os.Exit(2)
+		}
+	}
+	policyEngine, err := policy.New(tenantPolicies)
+	if err != nil {
+		slog.Error("prepare policy engine", "error", err)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -57,7 +72,7 @@ func main() {
 		MaxToolCalls: 100_000, MaxWallSeconds: 86_400, MaxCPU: 64_000,
 		MaxMemory: 262_144, MaxLLMConcurrency: 128,
 	})
-	admissionController := admission.NewController(repository, engine, *controllerID+"/admission", 50, 30*time.Second)
+	admissionController := admission.NewController(repository, engine, policyEngine, *controllerID+"/admission", 50, 30*time.Second)
 	schedulerController := scheduler.NewController(repository, scheduler.StaticPoolSource(pools), *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
 	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
 	ticker := time.NewTicker(*interval)
@@ -85,6 +100,23 @@ func main() {
 		case <-ticker.C:
 		}
 	}
+}
+
+func loadTenantPolicies(path string) (policy.TenantPolicies, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var policies policy.TenantPolicies
+	if err := decoder.Decode(&policies); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("tenant policy file must contain exactly one JSON document")
+	}
+	return policies, nil
 }
 
 func loadPools(path string) ([]scheduler.RuntimePool, error) {
