@@ -28,8 +28,6 @@ type Store struct {
 
 var _ kernelstore.KernelStore = (*Store)(nil)
 
-var errRetryableTransaction = errors.New("retryable PostgreSQL transaction")
-
 func New(pool *pgxpool.Pool) *Store {
 	return NewWithClock(pool, func() time.Time { return time.Now().UTC() })
 }
@@ -44,7 +42,7 @@ func (s *Store) CreateTask(ctx context.Context, in kernelstore.CreateTaskInput) 
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
 		result, err := s.createTaskOnce(ctx, in)
-		if !errors.Is(err, errRetryableTransaction) {
+		if !kernelstore.IsRetryableTransaction(err) {
 			return result, err
 		}
 		lastErr = err
@@ -500,7 +498,24 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 
 func (s *Store) now() time.Time { return s.clock().UTC() }
 
+// begin opens a READ COMMITTED transaction: state machines are expressed
+// with resource-version CAS, targeted row locks and unique constraints
+// (ADR-002). SERIALIZABLE was measured at ~94% conflict under 16-way
+// concurrent completions (PostgreSQL SSI page-level predicates), so it is
+// not used for the v0.1 hot paths; every invariant is enforced by row locks
+// and constraints instead.
 func (s *Store) begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, classify(err)
+	}
+	return tx, nil
+}
+
+// beginSerializable is retained for future cross-row invariants that row
+// locks cannot express. Any adoption must first measure the SSI conflict rate
+// under the target concurrency and calibrate retry budgets.
+func (s *Store) beginSerializable(ctx context.Context) (pgx.Tx, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, classify(err)
@@ -588,7 +603,7 @@ func classify(err error) error {
 		case "23505":
 			return fmt.Errorf("%w: postgres %s", kernelstore.ErrVersionConflict, pgErr.Code)
 		case "40001", "40P01":
-			return fmt.Errorf("%w: %w: postgres %s", kernelstore.ErrVersionConflict, errRetryableTransaction, pgErr.Code)
+			return fmt.Errorf("%w: %w: postgres %s", kernelstore.ErrVersionConflict, kernelstore.ErrRetryableTransaction, pgErr.Code)
 		}
 	}
 	return err

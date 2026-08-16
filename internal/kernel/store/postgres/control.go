@@ -213,6 +213,8 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 		in.LeaseID = s.newID()
 	}
 	now := s.now()
+	// Placement is a cross-row invariant (ADR-002): the run, attempt, lease,
+	// task state and outbox events share one SERIALIZABLE transaction.
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return kernelstore.AttemptLease{}, err

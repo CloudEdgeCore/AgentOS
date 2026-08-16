@@ -62,8 +62,14 @@ go run ./cmd/agentos-control -database-url $databaseUrl -dev-tenant dev
 go run ./cmd/agentos-controller -database-url $databaseUrl -controller-id dev-controller -runtime-pools deploy/dev/runtime-pools.json -tenant-policies deploy/dev/tenant-policies.json -dev-mode
 go run ./cmd/agentos-outbox -database-url $databaseUrl -nats-url nats://127.0.0.1:54222 -dispatcher-id dev-outbox
 go run ./cmd/agentos-runtime-control -database-url $databaseUrl -listen 127.0.0.1:9090 -dev-tenant dev -dev-mode
-go run ./cmd/agentos-runtime-reference -control-address 127.0.0.1:9090 -tenant dev -runtime-instance-id dev-worker-1 -artifact-root tmp/artifacts -dev-mode
+go run ./cmd/agentos-runtime-reference -control-address 127.0.0.1:9090 -gateway-address 127.0.0.1:9091 -mcp-listen 127.0.0.1:9092 -tenant dev -runtime-instance-id dev-worker-1 -artifact-root tmp/artifacts -dev-mode
+go run ./cmd/agentos-gateway -database-url $databaseUrl -tenant-policies deploy/dev/tenant-policies.json -tenant dev -seed-dev-tools -dev-mode
 ```
+
+The reference Runtime exposes a loopback MCP endpoint (`-mcp-listen`) while an
+assignment executes: a sandboxed Agent can call the tenant's tools through the
+standard Model Context Protocol, with the fenced attempt identity injected by
+the worker and default-deny outside execution windows.
 
 The reference Runtime is deterministic and not a security sandbox. Build and
 verify the actual Wasmtime Provider with the pinned Rust toolchain:

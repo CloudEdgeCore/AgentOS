@@ -148,7 +148,7 @@ func (s *Store) PollRuntimeAssignment(ctx context.Context, tenantID, runtimeInst
 		FROM attempts a
 		JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
 		JOIN runtime_leases l ON l.tenant_id = a.tenant_id AND l.attempt_id = a.id
-		WHERE a.tenant_id = $1 AND a.runtime_instance_id = $2 AND a.phase = 'PLACED'
+		WHERE a.tenant_id = $1 AND a.runtime_instance_id = $2 AND a.phase IN ('PLACED', 'WAITING_APPROVAL')
 		  AND r.active_attempt_id = a.id AND r.current_fencing_token = a.fencing_token
 		  AND l.released_at IS NULL AND l.expires_at > $3
 		ORDER BY a.created_at, a.id LIMIT 1`, tenantID, runtimeInstanceID, s.now()).Scan(&attemptID, &fencingToken)
@@ -214,10 +214,48 @@ func (s *Store) GetRuntimeAssignment(ctx context.Context, tenantID string, attem
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return result, classify(err)
 	}
+	if result.Attempt.Phase == domain.AttemptWaitingApproval {
+		var approvalID string
+		approvalErr := tx.QueryRow(ctx, `SELECT approval_id::text FROM tool_calls
+			WHERE tenant_id = $1 AND attempt_id = $2 AND status = 'REQUIRES_APPROVAL' AND approval_id IS NOT NULL
+			ORDER BY created_at DESC LIMIT 1`, tenantID, attemptID.String()).Scan(&approvalID)
+		if approvalErr == nil {
+			parsed, parseErr := uuid.Parse(approvalID)
+			if parseErr != nil {
+				return result, fmt.Errorf("parse pending approval ID: %w", parseErr)
+			}
+			result.PendingApprovalID = &parsed
+		} else if !errors.Is(approvalErr, pgx.ErrNoRows) {
+			return result, classify(approvalErr)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, classify(err)
 	}
 	return result, nil
+}
+
+// GetHeartbeatStatus is the narrow lease-renewal read: the task's pending
+// cancellation flag and the attempt's current resource version, both fenced
+// against the run's current fencing token. Heartbeat uses this instead of
+// re-materializing the full assignment on every renewal.
+func (s *Store) GetHeartbeatStatus(ctx context.Context, tenantID string, attemptID uuid.UUID, fencingToken int64) (kernelstore.HeartbeatStatus, error) {
+	var status kernelstore.HeartbeatStatus
+	if tenantID == "" || attemptID == uuid.Nil || fencingToken <= 0 {
+		return status, fmt.Errorf("tenant, attempt, and fencing token are required")
+	}
+	var cancelRequestedAt *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT a.resource_version, t.cancel_requested_at
+		FROM attempts a
+		JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
+		JOIN tasks t ON t.tenant_id = r.tenant_id AND t.id = r.task_id
+		WHERE a.tenant_id = $1 AND a.id = $2 AND r.current_fencing_token = $3`,
+		tenantID, attemptID.String(), fencingToken).Scan(&status.AttemptVersion, &cancelRequestedAt)
+	if err != nil {
+		return status, classify(err)
+	}
+	status.CancelRequested = cancelRequestedAt != nil
+	return status, nil
 }
 
 func (s *Store) CommitCheckpoint(ctx context.Context, input kernelstore.CommitCheckpointInput) (kernelstore.Checkpoint, kernelstore.Attempt, error) {
@@ -324,6 +362,9 @@ func (s *Store) CompleteAttempt(ctx context.Context, in kernelstore.CompleteAtte
 	if err != nil {
 		return result, err
 	}
+	// Completion finalization is a cross-row invariant (ADR-002): result
+	// registration, attempt/run/task terminal states, lease release, outbox
+	// events and the idempotency receipt share one SERIALIZABLE transaction.
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return result, err
@@ -609,6 +650,9 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 	if in.NewLeaseID == uuid.Nil {
 		in.NewLeaseID = s.newID()
 	}
+	// Lease-expiry recovery is a cross-row invariant (ADR-002): releasing the
+	// old lease, fencing the run, and placing the next attempt are one
+	// SERIALIZABLE transaction.
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return result, err

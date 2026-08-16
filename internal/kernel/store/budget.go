@@ -60,6 +60,32 @@ func (in SettleTaskUsageInput) Valid() bool {
 		strings.TrimSpace(in.IdempotencyKey) != "" && in.Usage.Valid() && !in.Usage.Zero()
 }
 
+// SettleTaskUsageDeltaInput settles a usage family up to a cumulative target:
+// the delta between what the family already settled and the target is recorded
+// under one idempotency key. The family is the set of settlements whose
+// idempotency key is FamilyPrefix followed by ":<suffix>". This is the exact
+// accounting primitive for model calls: per-step Settle records accrue under
+// "model:<callID>:<seq>" and Finish settles only the remainder to reach the
+// final cumulative total, so a stream that both settles steps and finalizes is
+// charged exactly once.
+type SettleTaskUsageDeltaInput struct {
+	TenantID string
+	TaskID   uuid.UUID
+	// FamilyPrefix scopes the already-settled sum (e.g. "model:<callID>").
+	// Wildcards are rejected so the prefix can never widen the match.
+	FamilyPrefix string
+	// Target is the cumulative usage the family must reach.
+	Target TaskBudget
+	// IdempotencyKey is the key of the delta settlement row.
+	IdempotencyKey string
+}
+
+func (in SettleTaskUsageDeltaInput) Valid() bool {
+	return strings.TrimSpace(in.TenantID) != "" && in.TaskID != uuid.Nil &&
+		strings.TrimSpace(in.FamilyPrefix) != "" && !strings.ContainsAny(in.FamilyPrefix, "%_") &&
+		strings.TrimSpace(in.IdempotencyKey) != "" && in.Target.Valid()
+}
+
 type BudgetStore interface {
 	// GetTaskBudget returns the reservation and cumulative consumption of a
 	// task, or ErrBudgetNotReserved when the task carries no budget.
@@ -69,4 +95,9 @@ type BudgetStore interface {
 	// marks the ledger exhausted without being recorded. Replays of an
 	// already-recorded settlement return the current status.
 	SettleTaskUsage(context.Context, SettleTaskUsageInput) (TaskBudgetStatus, error)
+	// SettleTaskUsageDelta settles the remainder between a family's already
+	// settled usage and a cumulative target, exactly once per IdempotencyKey.
+	// The hard stop and replay semantics match SettleTaskUsage; a family that
+	// already settled at least the target settles nothing.
+	SettleTaskUsageDelta(context.Context, SettleTaskUsageDeltaInput) (TaskBudgetStatus, error)
 }

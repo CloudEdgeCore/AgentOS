@@ -26,7 +26,17 @@ var (
 	ErrFenced              = errors.New("attempt fencing token is stale")
 	ErrCompletionPending   = errors.New("completed attempt is awaiting result commit")
 	ErrResultRequired      = errors.New("durable result reference is required")
+	// ErrRetryableTransaction marks a transient serialization failure that
+	// callers must retry with bounded backoff (ADR-002: SERIALIZABLE with
+	// bounded retries).
+	ErrRetryableTransaction = errors.New("retryable transaction conflict")
 )
+
+// IsRetryableTransaction reports whether err is a transient transaction
+// failure that may be retried with backoff.
+func IsRetryableTransaction(err error) bool {
+	return errors.Is(err, ErrRetryableTransaction)
+}
 
 type Task struct {
 	ID                  uuid.UUID

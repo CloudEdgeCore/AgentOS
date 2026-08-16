@@ -32,7 +32,13 @@ func NewController(repository Repository, batch int, leaseTTL time.Duration) *Co
 	}
 }
 
+// Reconcile recovers expired attempts. Transient transaction conflicts are
+// retried with bounded backoff (ADR-002).
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
+	return store.RetryRetryable(ctx, func() (int, error) { return c.reconcileOnce(ctx) })
+}
+
+func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	candidates, err := c.repository.ListExpiredAttempts(ctx, c.now(), c.batch)
 	if err != nil {
 		return 0, err

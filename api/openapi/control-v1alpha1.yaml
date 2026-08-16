@@ -93,6 +93,39 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '428': { $ref: '#/components/responses/Problem' }
+  /v1/tasks/{taskId}/events:
+    get:
+      operationId: watchTask
+      summary: Stream task lifecycle events over Server-Sent Events
+      description: >-
+        Opens a text/event-stream for the task. The stream immediately emits
+        one task.updated event with the current snapshot, then emits
+        task.updated on every resource-version change and closes with a
+        task.terminal event once the task reaches a terminal phase. Comment
+        heartbeats keep the connection alive. Events are best-effort (the
+        cursor is the resource version), so after a reconnect clients must
+        reconcile with GET /v1/tasks/{taskId}.
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: poll
+          in: query
+          required: false
+          description: State-check interval (default 500ms, 100ms..5s).
+          schema: { type: string, example: 500ms }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: A stream of Task snapshots, one SSE event per change.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/TaskEvent'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
   /v1/agent-versions:
     post:
       operationId: createAgentVersion
@@ -159,6 +192,65 @@ paths:
                 $ref: '#/components/schemas/AgentVersion'
         '401': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/tools:
+    get:
+      operationId: listTools
+      summary: Discover the tools the authenticated tenant may invoke
+      description: >-
+        Returns the versioned tool descriptors registered in the tenant's
+        registry. Invocation is gated by policy outside the LLM; this endpoint
+        only lists declared capabilities.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The tenant's registered tool descriptors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolList'
+        '401': { $ref: '#/components/responses/Problem' }
+  /v1/approvals/{approvalId}:decide:
+    post:
+      operationId: decideApproval
+      summary: Approve or reject a high-risk tool call
+      description: >-
+        Records a human decision for a pending approval request. The decision
+        is bound to the canonical tool name, argument summary and target
+        resource of the original call and cannot be reused by another
+        invocation; expired requests transition to EXPIRED and cannot be
+        decided.
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecideApprovalRequest'
+      responses:
+        '200':
+          description: The decision was recorded and the approval advanced.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolApproval'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -294,6 +386,96 @@ components:
         resourceVersion: { type: integer, format: int64, minimum: 1 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
+    TaskEvent:
+      type: object
+      additionalProperties: false
+      description: >-
+        One Server-Sent Event frame of the task event stream. The event field
+        is task.updated for snapshots and task.terminal for the closing frame;
+        the id field is the task resource version.
+      properties:
+        event:
+          type: string
+          enum: [task.updated, task.terminal]
+        id:
+          type: integer
+          format: int64
+          description: Resource version of the emitted snapshot.
+        data:
+          $ref: '#/components/schemas/Task'
+    ToolDescriptor:
+      type: object
+      additionalProperties: false
+      required: [name, version, sideEffectRisk, actions, resourcePatterns, paramsSchema, specDigest, createdAt]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        sideEffectRisk:
+          type: string
+          enum: [none, low, high]
+        actions:
+          type: array
+          items: { type: string }
+        resourcePatterns:
+          type: array
+          items: { type: string }
+        paramsSchema:
+          type: object
+          description: JSON Schema the invocation arguments must satisfy.
+        specDigest:
+          type: string
+          description: SHA-256 of the immutable descriptor spec.
+        createdAt: { type: string, format: date-time }
+    ToolList:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, tools, traceId]
+      properties:
+        apiVersion: { type: string, const: 'agentos.dev/v1alpha1' }
+        kind: { type: string, const: ToolList }
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolDescriptor'
+        traceId: { type: string, format: uuid }
+    DecideApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [decision, decidedBy]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVED, REJECTED]
+        decidedBy:
+          type: string
+          description: Identity of the human decision maker, for audit.
+    ToolApproval:
+      type: object
+      additionalProperties: false
+      required: [id, tenantId, callId, taskId, runId, attemptId, toolName, toolVersion, action, resource, argsHash, status, requestedAt, expiresAt, resourceVersion, traceId]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        callId: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        runId: { type: string, format: uuid }
+        attemptId: { type: string, format: uuid }
+        toolName: { type: string }
+        toolVersion: { type: string }
+        action: { type: string }
+        resource: { type: string }
+        argsHash:
+          type: string
+          description: SHA-256 of the canonical invocation arguments the decision is bound to.
+        status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, EXPIRED]
+        requestedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        decidedAt: { type: [string, 'null'], format: date-time }
+        decidedBy: { type: [string, 'null'] }
+        resourceVersion: { type: integer, format: int64, minimum: 1 }
         traceId: { type: string, format: uuid }
     Problem:
       type: object

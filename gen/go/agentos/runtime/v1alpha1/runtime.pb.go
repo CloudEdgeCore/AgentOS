@@ -535,8 +535,14 @@ type Assignment struct {
 	LeaseVersion      int64                  `protobuf:"varint,11,opt,name=lease_version,json=leaseVersion,proto3" json:"lease_version,omitempty"`
 	LeaseExpiresAt    *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=lease_expires_at,json=leaseExpiresAt,proto3" json:"lease_expires_at,omitempty"`
 	ResumeCheckpoint  *CheckpointReference   `protobuf:"bytes,13,opt,name=resume_checkpoint,json=resumeCheckpoint,proto3" json:"resume_checkpoint,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// phase is the current Attempt phase ("PLACED", "RUNNING",
+	// "WAITING_APPROVAL", ...) so a worker can branch on resume state.
+	Phase string `protobuf:"bytes,14,opt,name=phase,proto3" json:"phase,omitempty"`
+	// approval_id is set when the attempt is WAITING_APPROVAL: the pending
+	// human approval the worker must re-present to the Tool Gateway.
+	ApprovalId    string `protobuf:"bytes,15,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Assignment) Reset() {
@@ -658,6 +664,20 @@ func (x *Assignment) GetResumeCheckpoint() *CheckpointReference {
 		return x.ResumeCheckpoint
 	}
 	return nil
+}
+
+func (x *Assignment) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
+}
+
+func (x *Assignment) GetApprovalId() string {
+	if x != nil {
+		return x.ApprovalId
+	}
+	return ""
 }
 
 type TransitionAttemptRequest struct {
@@ -1399,7 +1419,7 @@ const file_agentos_runtime_v1alpha1_runtime_proto_rawDesc = "" +
 	"\x15GetAssignmentResponse\x12D\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2$.agentos.runtime.v1alpha1.AssignmentR\n" +
-	"assignment\"\xde\x04\n" +
+	"assignment\"\x95\x05\n" +
 	"\n" +
 	"Assignment\x12E\n" +
 	"\bidentity\x18\x01 \x01(\v2).agentos.runtime.v1alpha1.AttemptIdentityR\bidentity\x12\x15\n" +
@@ -1415,7 +1435,10 @@ const file_agentos_runtime_v1alpha1_runtime_proto_rawDesc = "" +
 	" \x01(\x03R\x0eattemptVersion\x12#\n" +
 	"\rlease_version\x18\v \x01(\x03R\fleaseVersion\x12D\n" +
 	"\x10lease_expires_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\x0eleaseExpiresAt\x12Z\n" +
-	"\x11resume_checkpoint\x18\r \x01(\v2-.agentos.runtime.v1alpha1.CheckpointReferenceR\x10resumeCheckpoint\"\xdb\x02\n" +
+	"\x11resume_checkpoint\x18\r \x01(\v2-.agentos.runtime.v1alpha1.CheckpointReferenceR\x10resumeCheckpoint\x12\x14\n" +
+	"\x05phase\x18\x0e \x01(\tR\x05phase\x12\x1f\n" +
+	"\vapproval_id\x18\x0f \x01(\tR\n" +
+	"approvalId\"\xdb\x02\n" +
 	"\x18TransitionAttemptRequest\x12E\n" +
 	"\bidentity\x18\x01 \x01(\v2).agentos.runtime.v1alpha1.AttemptIdentityR\bidentity\x128\n" +
 	"\x18expected_attempt_version\x18\x02 \x01(\x03R\x16expectedAttemptVersion\x12'\n" +

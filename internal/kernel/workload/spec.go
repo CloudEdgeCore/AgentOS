@@ -14,6 +14,34 @@ type Spec struct {
 	Budget      Budget      `json:"budget"`
 	Placement   Placement   `json:"placement"`
 	RetryPolicy RetryPolicy `json:"retryPolicy,omitempty"`
+	// ToolCalls is the deterministic tool script the reference provider
+	// executes through the Tool Gateway before completing. Other providers
+	// ignore it; the gateway enforces policy and budget regardless of caller.
+	ToolCalls []ToolCall `json:"tools,omitempty"`
+	// ModelCalls is the deterministic model script the reference provider
+	// executes through the Model Gateway (Begin/Settle/Finish) after tools.
+	ModelCalls []ModelCallScript `json:"modelCalls,omitempty"`
+}
+
+// ModelCallScript is one deterministic model invocation with pre-declared
+// usage, metered and hard-stopped by the Model Gateway.
+type ModelCallScript struct {
+	ModelRef      string `json:"modelRef"`
+	InputTokens   int64  `json:"inputTokens,omitempty"`
+	OutputTokens  int64  `json:"outputTokens,omitempty"`
+	IdempotencyKey string `json:"idempotencyKey"`
+}
+
+// ToolCall is one deterministic gateway invocation the reference provider
+// performs on behalf of the Attempt. IdempotencyKeys must be unique within a
+// task so replays converge on the stored receipts.
+type ToolCall struct {
+	ToolName       string          `json:"name"`
+	ToolVersion    string          `json:"version,omitempty"`
+	Action         string          `json:"action"`
+	Resource       string          `json:"resource"`
+	Args           json.RawMessage `json:"args,omitempty"`
+	IdempotencyKey string          `json:"idempotencyKey"`
 }
 
 type RetryPolicy struct {

@@ -13,6 +13,7 @@ import (
 
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
+	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
 	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
@@ -49,10 +50,7 @@ func main() {
 		slog.Error("listen for Runtime Protocol", "error", err)
 		os.Exit(1)
 	}
-	server := grpc.NewServer(
-		grpc.MaxRecvMsgSize(1<<20),
-		grpc.MaxSendMsgSize(1<<20),
-	)
+	server := grpc.NewServer(grpcx.ServerOptions()...)
 	runtimev1alpha1.RegisterRuntimeControlServiceServer(server,
 		runtimecontrol.NewService(postgresstore.New(pool), *devTenant, *maxLeaseTTL))
 	healthServer := health.NewServer()

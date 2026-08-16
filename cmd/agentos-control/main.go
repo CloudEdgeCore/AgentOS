@@ -48,7 +48,7 @@ func main() {
 	}
 
 	repository := postgresstore.New(pool)
-	handler := controlapi.NewHandler(repository, repository)
+	handler := controlapi.NewHandler(repository, repository, repository)
 	handler = auth.StaticMiddleware(auth.Principal{Subject: "local-developer", TenantID: *devTenant}, handler)
 	server := &http.Server{
 		Addr:              *listen,

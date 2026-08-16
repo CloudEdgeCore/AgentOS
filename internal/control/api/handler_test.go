@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +22,7 @@ import (
 )
 
 func TestCreateTaskRequiresIdentityAndIdempotency(t *testing.T) {
-	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore())
+	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore(), newMemoryStore())
 	body := []byte(`{"agentVersionRef":"agent@1","goal":"test","namespace":"default","spec":{}}`)
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/tasks", bytes.NewReader(body))
@@ -47,7 +49,7 @@ func TestCreateTaskIsStrictAndIdempotent(t *testing.T) {
 	backend := newMemoryStore()
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend),
+		controlapi.NewHandler(backend, backend, backend),
 	)
 	body := []byte(`{"agentVersionRef":"agent@1","goal":"test","namespace":"default","spec":{"runtimeClass":"oci"}}`)
 
@@ -105,7 +107,7 @@ func TestGetTaskDoesNotCrossTenantBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	handler := controlapi.NewHandler(backend, backend)
+	handler := controlapi.NewHandler(backend, backend, backend)
 
 	owner := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, handler)
 	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String(), nil)
@@ -133,7 +135,7 @@ func TestCancelTaskRequiresCurrentETag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend))
+	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend))
 	request := httptest.NewRequest(http.MethodPost, "/v1/tasks/"+created.Task.ID.String()+":cancel", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -161,7 +163,7 @@ func TestPublishAgentVersionIsStrictAndIdempotent(t *testing.T) {
 	backend := newMemoryStore()
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend),
+		controlapi.NewHandler(backend, backend, backend),
 	)
 	spec := []byte(`{"runtimeClassPolicy":{"allowed":["oci"],"preferred":"oci"},"lifecycle":{"maxAttempts":5}}`)
 	first := performPublish(handler, spec, "publish-1")
@@ -228,7 +230,7 @@ func TestGetAgentVersionDoesNotCrossTenantBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed agent version: %v", err)
 	}
-	handler := controlapi.NewHandler(backend, backend)
+	handler := controlapi.NewHandler(backend, backend, backend)
 
 	owner := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, handler)
 	request := httptest.NewRequest(http.MethodGet, "/v1/agent-versions/"+published.AgentVersion.ID.String(), nil)
@@ -284,7 +286,7 @@ func TestGetTaskReportsBudgetUsage(t *testing.T) {
 		Consumed:  store.TaskBudget{Tokens: 60, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 30},
 		Exhausted: true, ResourceVersion: 2, UpdatedAt: now,
 	})
-	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend))
+	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend))
 	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+created.Task.ID.String(), nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -314,7 +316,7 @@ type usageResponse struct {
 }
 
 func TestRoutingFailuresRemainStructured(t *testing.T) {
-	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore())
+	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore(), newMemoryStore())
 	request := httptest.NewRequest(http.MethodDelete, "/v1/tasks", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -355,18 +357,21 @@ func assertReason(t *testing.T, response *httptest.ResponseRecorder, expected st
 }
 
 type memoryStore struct {
-	mu       sync.Mutex
-	byID     map[uuid.UUID]store.Task
-	byKey    map[string]uuid.UUID
-	hashes   map[string][32]byte
-	versions []store.AgentVersion
-	budgets  map[uuid.UUID]store.TaskBudgetStatus
+	mu        sync.Mutex
+	byID      map[uuid.UUID]store.Task
+	byKey     map[string]uuid.UUID
+	hashes    map[string][32]byte
+	versions  []store.AgentVersion
+	budgets   map[uuid.UUID]store.TaskBudgetStatus
+	tools     []store.ToolDescriptor
+	approvals map[uuid.UUID]store.ToolApproval
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
 		byID: map[uuid.UUID]store.Task{}, byKey: map[string]uuid.UUID{},
 		hashes: map[string][32]byte{}, budgets: map[uuid.UUID]store.TaskBudgetStatus{},
+		approvals: map[uuid.UUID]store.ToolApproval{},
 	}
 }
 
@@ -489,8 +494,290 @@ func (m *memoryStore) GetTaskBudget(_ context.Context, tenantID string, id uuid.
 	return status, nil
 }
 
+func (m *memoryStore) ListToolDescriptors(context.Context, string) ([]store.ToolDescriptor, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.tools), nil
+}
+
+func (m *memoryStore) GetToolApproval(_ context.Context, tenantID string, id uuid.UUID) (store.ToolApproval, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	approval, ok := m.approvals[id]
+	if !ok || approval.TenantID != tenantID {
+		return store.ToolApproval{}, store.ErrNotFound
+	}
+	return approval, nil
+}
+
+func (m *memoryStore) DecideToolApproval(_ context.Context, in store.DecideToolApprovalInput) (store.ToolApproval, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	approval, ok := m.approvals[in.ApprovalID]
+	if !ok || approval.TenantID != in.TenantID {
+		return store.ToolApproval{}, store.ErrNotFound
+	}
+	if approval.ResourceVersion != in.ExpectedVersion {
+		return store.ToolApproval{}, store.ErrVersionConflict
+	}
+	if approval.Status != store.ToolApprovalPending {
+		return store.ToolApproval{}, store.ErrInvalidTransition
+	}
+	approval.Status = in.Decision
+	approval.DecidedAt, approval.DecidedBy = &in.Now, in.DecidedBy
+	approval.ResourceVersion++
+	m.approvals[approval.ID] = approval
+	return approval, nil
+}
+
 func (m *memoryStore) setBudget(id uuid.UUID, status store.TaskBudgetStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.budgets[id] = status
+}
+
+func TestListToolsReturnsRegisteredDescriptors(t *testing.T) {
+	backend := newMemoryStore()
+	backend.tools = []store.ToolDescriptor{
+		{ID: uuid.New(), TenantID: "tenant-a", Name: "fs.read", Version: "1.0.0", SideEffectRisk: store.ToolRiskLow,
+			Actions: []string{"read"}, ResourcePatterns: []string{"fs:/tmp"},
+			ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tools", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Tools) != 1 || body.Tools[0]["name"] != "fs.read" || body.Tools[0]["sideEffectRisk"] != "low" {
+		t.Fatalf("unexpected tools response: %+v", body)
+	}
+}
+
+func TestDecideApprovalRequiresBindingAndIfMatch(t *testing.T) {
+	backend := newMemoryStore()
+	approvalID := uuid.New()
+	now := time.Now().UTC()
+	backend.approvals[approvalID] = store.ToolApproval{
+		ID: approvalID, TenantID: "tenant-a", CallID: uuid.New(), TaskID: uuid.New(),
+		RunID: uuid.New(), AttemptID: uuid.New(), ToolName: "fs.write", ToolVersion: "1.0.0",
+		Action: "write", Resource: "fs:/tmp", ArgsHash: [32]byte{1}, Status: store.ToolApprovalPending,
+		RequestedAt: now, ExpiresAt: now.Add(time.Hour), ResourceVersion: 1,
+	}
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend),
+	)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+approvalID.String()+":decide",
+		bytes.NewReader([]byte(`{"decision":"APPROVED","decidedBy":"human-1"}`)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("If-Match", `W/"1"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["status"] != "APPROVED" || body["decidedBy"] != "human-1" || body["resourceVersion"] != float64(2) {
+		t.Fatalf("unexpected approval response: %+v", body)
+	}
+
+	stale := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+approvalID.String()+":decide",
+		bytes.NewReader([]byte(`{"decision":"REJECTED","decidedBy":"human-1"}`)))
+	stale.Header.Set("Content-Type", "application/json")
+	stale.Header.Set("If-Match", `W/"1"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, stale)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("stale decision status = %d: %s", response.Code, response.Body.String())
+	}
+	assertReason(t, response, "RESOURCE_VERSION_CONFLICT")
+
+	invalid := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+approvalID.String()+":decide",
+		bytes.NewReader([]byte(`{"decision":"MAYBE","decidedBy":"human-1"}`)))
+	invalid.Header.Set("Content-Type", "application/json")
+	invalid.Header.Set("If-Match", `W/"2"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, invalid)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid decision status = %d: %s", response.Code, response.Body.String())
+	}
+	assertReason(t, response, "INVALID_APPROVAL_DECISION")
+
+	missing := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+uuid.New().String()+":decide",
+		bytes.NewReader([]byte(`{"decision":"APPROVED","decidedBy":"human-1"}`)))
+	missing.Header.Set("Content-Type", "application/json")
+	missing.Header.Set("If-Match", `W/"1"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, missing)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing approval status = %d: %s", response.Code, response.Body.String())
+	}
+	assertReason(t, response, "APPROVAL_NOT_FOUND")
+}
+
+// TestTaskEventsStreamsLifecycle proves the SSE contract: the stream opens
+// with the current snapshot, emits task.updated on every resource-version
+// change, and closes with task.terminal once the task is terminal.
+func TestTaskEventsStreamsLifecycle(t *testing.T) {
+	backend := newMemoryStore()
+	task, err := backend.CreateTask(context.Background(), store.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
+		Goal: "watch me", Spec: []byte(`{}`), IdempotencyKey: "watch-request-1",
+	})
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String()+"/events?poll=100ms", nil)
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+
+	// Give the stream a moment to open, then advance the task to a terminal
+	// phase; the stream must observe the change and close.
+	time.Sleep(50 * time.Millisecond)
+	if _, err := backend.RequestTaskCancellation(context.Background(), "tenant-a", task.Task.ID, 1); err != nil {
+		t.Fatalf("advance task: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event stream did not close after the task became terminal")
+	}
+
+	body := response.Body.String()
+	var initial, updated, terminal bool
+	for _, frame := range strings.Split(body, "\n\n") {
+		if strings.TrimSpace(frame) == "" || strings.HasPrefix(frame, ": keepalive") {
+			continue
+		}
+		var event, id string
+		var data string
+		for _, line := range strings.Split(frame, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				event = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "id: "):
+				id = strings.TrimPrefix(line, "id: ")
+			case strings.HasPrefix(line, "data: "):
+				data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			t.Fatalf("decode event data %q: %v", data, err)
+		}
+		switch {
+		case event == "task.updated" && id == "1" && payload["phase"] == "QUEUED":
+			initial = true
+		case event == "task.updated" && id == "2" && payload["phase"] == "CANCELLED":
+			updated = true
+		case event == "task.terminal" && id == "2" && payload["phase"] == "CANCELLED":
+			terminal = true
+		default:
+			t.Fatalf("unexpected event frame: event=%q id=%q payload=%v", event, id, payload)
+		}
+	}
+	if !initial || !updated || !terminal {
+		t.Fatalf("stream incomplete: initial=%v updated=%v terminal=%v\n%s", initial, updated, terminal, body)
+	}
+}
+
+// TestTaskEventsClosesImmediatelyForTerminalTask proves that connecting to an
+// already-terminal task yields a single snapshot pair and an immediate close.
+func TestTaskEventsClosesImmediatelyForTerminalTask(t *testing.T) {
+	backend := newMemoryStore()
+	task, err := backend.CreateTask(context.Background(), store.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
+		Goal: "done already", Spec: []byte(`{}`), IdempotencyKey: "watch-terminal-1",
+	})
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if _, err := backend.RequestTaskCancellation(context.Background(), "tenant-a", task.Task.ID, 1); err != nil {
+		t.Fatalf("advance task: %v", err)
+	}
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String()+"/events", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "event: task.terminal") {
+		t.Fatalf("terminal task stream: %s", response.Body.String())
+	}
+}
+
+// TestTaskEventsRejectsInvalidRequests proves the events route enforces the
+// same tenant boundary and validates its poll parameter.
+func TestTaskEventsRejectsInvalidRequests(t *testing.T) {
+	backend := newMemoryStore()
+	task, err := backend.CreateTask(context.Background(), store.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
+		Goal: "private", Spec: []byte(`{}`), IdempotencyKey: "watch-private-1",
+	})
+	if err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	handler := controlapi.NewHandler(backend, backend, backend)
+
+	// Cross-tenant observation must fail closed.
+	other := auth.StaticMiddleware(auth.Principal{Subject: "other", TenantID: "tenant-b"}, handler)
+	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String()+"/events", nil)
+	response := httptest.NewRecorder()
+	other.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant status = %d: %s", response.Code, response.Body.String())
+	}
+
+	// An invalid poll interval must be rejected up front, not streamed.
+	owner := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, handler)
+	request = httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String()+"/events?poll=10s", nil)
+	response = httptest.NewRecorder()
+	owner.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid poll status = %d: %s", response.Code, response.Body.String())
+	}
+	assertReason(t, response, "INVALID_POLL_INTERVAL")
+
+	// POST is not allowed on the stream resource.
+	request = httptest.NewRequest(http.MethodPost, "/v1/tasks/"+task.Task.ID.String()+"/events", nil)
+	response = httptest.NewRecorder()
+	owner.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d: %s", response.Code, response.Body.String())
+	}
+
+	// Unknown tasks fail closed.
+	request = httptest.NewRequest(http.MethodGet, "/v1/tasks/"+uuid.New().String()+"/events", nil)
+	response = httptest.NewRecorder()
+	owner.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown task status = %d: %s", response.Code, response.Body.String())
+	}
 }

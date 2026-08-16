@@ -97,13 +97,15 @@ func (s *Service) Heartbeat(ctx context.Context, request *runtimev1alpha1.Heartb
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	assignment, err := s.store.GetRuntimeAssignment(ctx, identity.GetTenantId(), attemptID, identity.GetFencingToken())
+	// The narrow renewal read answers the cancel check without
+	// re-materializing the full assignment on every heartbeat.
+	status, err := s.store.GetHeartbeatStatus(ctx, identity.GetTenantId(), attemptID, identity.GetFencingToken())
 	if err != nil {
 		return nil, rpcError(err)
 	}
 	return &runtimev1alpha1.HeartbeatResponse{
 		LeaseVersion: lease.ResourceVersion, ExpiresAt: timestamppb.New(lease.ExpiresAt),
-		CancelRequested: assignment.Task.CancelRequestedAt != nil, AttemptVersion: assignment.Attempt.ResourceVersion,
+		CancelRequested: status.CancelRequested, AttemptVersion: status.AttemptVersion,
 	}, nil
 }
 
@@ -207,7 +209,10 @@ func assignmentProto(assignment store.RuntimeAssignment) *runtimev1alpha1.Assign
 		WorkloadSpecJson: append([]byte(nil), assignment.Task.Spec...), RuntimeClass: assignment.Attempt.RuntimeClass,
 		RuntimePoolId: assignment.Attempt.RuntimePoolID, RuntimeInstanceId: assignment.Attempt.RuntimeInstanceID,
 		AttemptVersion: assignment.Attempt.ResourceVersion, LeaseVersion: assignment.Lease.ResourceVersion,
-		LeaseExpiresAt: timestamppb.New(assignment.Lease.ExpiresAt),
+		LeaseExpiresAt: timestamppb.New(assignment.Lease.ExpiresAt), Phase: string(assignment.Attempt.Phase),
+	}
+	if assignment.PendingApprovalID != nil {
+		result.ApprovalId = assignment.PendingApprovalID.String()
 	}
 	if assignment.ResumeCheckpoint != nil {
 		result.ResumeCheckpoint = checkpointProto(*assignment.ResumeCheckpoint)
@@ -298,6 +303,11 @@ func protoPhase(phase domain.AttemptPhase) runtimev1alpha1.AttemptPhase {
 }
 
 func rpcError(err error) error {
+	if store.IsRetryableTransaction(err) {
+		// Transient serialization failure: the caller must retry with
+		// bounded backoff rather than treating the operation as failed.
+		return status.Error(codes.Unavailable, "transient transaction conflict; retry")
+	}
 	switch {
 	case errors.Is(err, store.ErrNoAssignment), errors.Is(err, store.ErrNotFound):
 		return status.Error(codes.NotFound, err.Error())

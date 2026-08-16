@@ -53,9 +53,15 @@ func (f *Filesystem) Put(ctx context.Context, tenantID, mediaType string, source
 	defer func() { _ = os.Remove(temporaryPath) }()
 	hash := sha256.New()
 	written, copyErr := copyContext(ctx, io.MultiWriter(temporary, hash), io.LimitReader(source, f.maxBytes+1))
+	// Sync before the rename publishes the artifact: a crash must never leave
+	// a committed name pointing at unflushed content.
+	syncErr := temporary.Sync()
 	closeErr := temporary.Close()
 	if copyErr != nil {
 		return result, copyErr
+	}
+	if syncErr != nil {
+		return result, fmt.Errorf("sync staged artifact: %w", syncErr)
 	}
 	if closeErr != nil {
 		return result, fmt.Errorf("close staged artifact: %w", closeErr)

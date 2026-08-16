@@ -75,6 +75,12 @@ message Assignment {
   int64 lease_version = 11;
   google.protobuf.Timestamp lease_expires_at = 12;
   CheckpointReference resume_checkpoint = 13;
+  // phase is the current Attempt phase ("PLACED", "RUNNING",
+  // "WAITING_APPROVAL", ...) so a worker can branch on resume state.
+  string phase = 14;
+  // approval_id is set when the attempt is WAITING_APPROVAL: the pending
+  // human approval the worker must re-present to the Tool Gateway.
+  string approval_id = 15;
 }
 
 enum AttemptPhase {

@@ -79,19 +79,29 @@ func main() {
 	defer ticker.Stop()
 	for {
 		admitted, admissionErr := admissionController.Reconcile(ctx)
+		scheduled, schedulerErr := schedulerController.Reconcile(ctx)
+		recovered, recoveryErr := recoveryController.Reconcile(ctx)
 		if admissionErr != nil && ctx.Err() == nil {
 			slog.Error("admission reconciliation", "error", admissionErr)
 		}
-		scheduled, schedulerErr := schedulerController.Reconcile(ctx)
 		if schedulerErr != nil && ctx.Err() == nil {
 			slog.Error("scheduler reconciliation", "error", schedulerErr)
 		}
-		recovered, recoveryErr := recoveryController.Reconcile(ctx)
 		if recoveryErr != nil && ctx.Err() == nil {
 			slog.Error("runtime recovery reconciliation", "error", recoveryErr)
 		}
 		if admitted > 0 || scheduled > 0 || recovered > 0 {
 			slog.Info("reconciled tasks", "admitted", admitted, "scheduled", scheduled, "recovered", recovered)
+			continue
+		}
+		if (admissionErr != nil || schedulerErr != nil || recoveryErr != nil) && ctx.Err() == nil {
+			// A failing reconcile must not hot-loop: back off one interval
+			// before the next attempt.
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			continue
 		}
 		select {

@@ -101,7 +101,14 @@ func NewController(repository store.ControlStore, engine *Engine, policyEngine *
 	return &Controller{store: repository, engine: engine, policy: policyEngine, ownerID: ownerID, batch: batch, claimTTL: claimTTL}
 }
 
+// Reconcile claims and admits queued tasks. Transient transaction conflicts
+// are retried with bounded backoff (ADR-002); the claim TTL covers permanent
+// failures.
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
+	return store.RetryRetryable(ctx, func() (int, error) { return c.reconcileOnce(ctx) })
+}
+
+func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	claims, err := c.store.ClaimTasks(ctx, store.ClaimTasksInput{
 		Kind: store.ControllerAdmission, Phase: "QUEUED", OwnerID: c.ownerID, Limit: c.batch, TTL: c.claimTTL,
 	})

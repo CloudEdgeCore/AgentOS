@@ -4,14 +4,20 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
+	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
+	"github.com/bian-cloud-skill/agentos/internal/mcp"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
+	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
 	"github.com/bian-cloud-skill/agentos/internal/runtime/reference"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -19,6 +25,9 @@ import (
 
 func main() {
 	controlAddress := flag.String("control-address", "127.0.0.1:9090", "Runtime Protocol control endpoint")
+	gatewayAddress := flag.String("gateway-address", "", "optional Tool Gateway endpoint for workload-spec tool scripts")
+	modelGatewayAddress := flag.String("model-gateway-address", "", "optional Model Gateway endpoint for workload-spec model scripts")
+	mcpListen := flag.String("mcp-listen", "", "optional loopback address for the sandbox Agent MCP endpoint (e.g. 127.0.0.1:9092)")
 	tenantID := flag.String("tenant", "", "development tenant")
 	runtimeInstanceID := flag.String("runtime-instance-id", "", "assigned runtime instance ID")
 	artifactRoot := flag.String("artifact-root", "", "development content-addressed artifact directory")
@@ -33,7 +42,8 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	connection, err := grpc.NewClient(*controlAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	connection, err := grpc.NewClient(*controlAddress,
+		append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
 	if err != nil {
 		slog.Error("create Runtime Protocol client", "error", err)
 		os.Exit(1)
@@ -46,6 +56,60 @@ func main() {
 	}
 	worker := reference.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifactStore,
 		*tenantID, *runtimeInstanceID, *heartbeatTTL)
+	var gatewayConnection *grpc.ClientConn
+	if strings.TrimSpace(*gatewayAddress) != "" {
+		gatewayConnection, err = grpc.NewClient(*gatewayAddress,
+			append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
+		if err != nil {
+			slog.Error("create Tool Gateway client", "error", err)
+			os.Exit(1)
+		}
+		defer gatewayConnection.Close()
+		worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(gatewayConnection))
+		slog.Info("reference runtime wired to Tool Gateway", "address", *gatewayAddress)
+	}
+	if strings.TrimSpace(*modelGatewayAddress) != "" {
+		modelConnection, err := grpc.NewClient(*modelGatewayAddress,
+			append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
+		if err != nil {
+			slog.Error("create Model Gateway client", "error", err)
+			os.Exit(1)
+		}
+		defer modelConnection.Close()
+		worker.WithModelGateway(modelv1alpha1.NewModelGatewayServiceClient(modelConnection))
+		slog.Info("reference runtime wired to Model Gateway", "address", *modelGatewayAddress)
+	}
+	if strings.TrimSpace(*mcpListen) != "" {
+		if gatewayConnection == nil {
+			slog.Error("-mcp-listen requires -gateway-address so the sandbox Agent can reach the Tool Gateway")
+			os.Exit(2)
+		}
+		identitySlot := reference.NewIdentitySlot()
+		adapter := mcp.NewToolAdapter(reference.NewGrpcToolInvoker(gatewayv1alpha1.NewToolGatewayServiceClient(gatewayConnection)), identitySlot)
+		mcpServer := mcp.NewServer("agentos-runtime", "v0.1", adapter)
+		listener, err := net.Listen("tcp", *mcpListen)
+		if err != nil {
+			slog.Error("listen for sandbox Agent MCP endpoint", "error", err)
+			os.Exit(1)
+		}
+		httpServer := &http.Server{
+			Handler:           mcpServer,
+			ReadHeaderTimeout: 5 * time.Second,
+			// ReadTimeout bounds slow body reads (Slowloris); the MCP SSE
+			// responses are single frames, so no write deadline is needed
+			// and IdleTimeout governs idle keep-alive connections.
+			ReadTimeout:    15 * time.Second,
+			IdleTimeout:    60 * time.Second,
+			MaxHeaderBytes: 32 << 10,
+		}
+		go func() {
+			if err := httpServer.Serve(listener); err != nil && ctx.Err() == nil {
+				slog.Error("sandbox Agent MCP endpoint", "error", err)
+			}
+		}()
+		worker.WithIdentitySlot(identitySlot)
+		slog.Info("sandbox Agent MCP endpoint listening", "address", *mcpListen)
+	}
 	ticker := time.NewTicker(*pollInterval)
 	defer ticker.Stop()
 	for {

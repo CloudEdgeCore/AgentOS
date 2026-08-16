@@ -65,6 +65,9 @@ type RuntimeAssignment struct {
 	Attempt          Attempt
 	Lease            Lease
 	ResumeCheckpoint *Checkpoint
+	// PendingApprovalID is the approval a WAITING_APPROVAL attempt must
+	// re-present to the Tool Gateway to resume execution.
+	PendingApprovalID *uuid.UUID
 }
 
 type CommitCheckpointInput struct {
@@ -212,10 +215,20 @@ type RecoveryResult struct {
 	Lease   AttemptLease
 }
 
+// HeartbeatStatus is the narrow state a lease renewal needs: whether the task
+// has a pending cancellation and the attempt's current resource version. It
+// lets the Runtime Protocol heartbeat answer cancel checks without
+// re-materializing the full assignment.
+type HeartbeatStatus struct {
+	CancelRequested bool
+	AttemptVersion  int64
+}
+
 type RuntimeStore interface {
 	KernelStore
 	PollRuntimeAssignment(context.Context, string, string) (RuntimeAssignment, error)
 	GetRuntimeAssignment(context.Context, string, uuid.UUID, int64) (RuntimeAssignment, error)
+	GetHeartbeatStatus(context.Context, string, uuid.UUID, int64) (HeartbeatStatus, error)
 	CommitCheckpoint(context.Context, CommitCheckpointInput) (Checkpoint, Attempt, error)
 	CompleteAttempt(context.Context, CompleteAttemptInput) (CompleteAttemptResult, error)
 	AcknowledgeCancellation(context.Context, CancelAttemptInput) (CancelAttemptResult, error)

@@ -177,7 +177,13 @@ func NewController(repository store.ControlStore, pools PoolSource, ownerID stri
 		claimTTL: claimTTL, leaseTTL: leaseTTL, newID: newUUIDv7}
 }
 
+// Reconcile claims and schedules admitted tasks. Transient transaction
+// conflicts are retried with bounded backoff (ADR-002).
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
+	return store.RetryRetryable(ctx, func() (int, error) { return c.reconcileOnce(ctx) })
+}
+
+func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	claims, err := c.store.ClaimTasks(ctx, store.ClaimTasksInput{
 		Kind: store.ControllerScheduling, Phase: "ADMITTED", OwnerID: c.ownerID, Limit: c.batch, TTL: c.claimTTL,
 	})
