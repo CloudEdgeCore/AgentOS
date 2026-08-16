@@ -71,13 +71,18 @@ func TestControlPlanePipelineCapacityBaseline(t *testing.T) {
 	drainPhase(t, ctx, pool, admissionController.Reconcile, "ADMITTED", taskCount)
 	admitDuration := time.Since(admitWall)
 
-	// Phase 3: scheduler controller places every task.
+	// Phase 3: scheduler controller places every task. The lease TTL must
+	// outlive the whole pipeline: completion starts only after the last task
+	// is scheduled, and the baseline measures pure control-plane throughput
+	// (lease renewal by a live worker is exercised by the runtime conformance
+	// suite, not here). A short TTL would fence the first tasks while the
+	// drain is still running.
 	pools := staticPools{{
 		ID: "capacity-pool", TenantIDs: []string{tenant}, RuntimeClass: "oci", RuntimeInstanceID: "capacity-worker-1",
 		Region: "cn-east", DataResidency: "cn", Ready: true,
 		AvailableCPU: 64_000, AvailableMemory: 262_144, AvailableLLMSlots: 128,
 	}}
-	schedulerController := scheduler.NewController(store, pools, "capacity/scheduler", 50, time.Minute, 30*time.Second)
+	schedulerController := scheduler.NewController(store, pools, "capacity/scheduler", 50, time.Minute, 30*time.Minute)
 	scheduleWall := time.Now()
 	drainPhase(t, ctx, pool, schedulerController.Reconcile, "RUNNING", taskCount)
 	scheduleDuration := time.Since(scheduleWall)
@@ -145,11 +150,13 @@ func enqueueLoad(t *testing.T, ctx context.Context, store *postgresstore.Store, 
 	return latencies
 }
 
-// drainPhase reconciles until count tasks reached the phase, with a hard
-// deadline so a stuck pipeline fails the test instead of hanging it.
+// drainPhase reconciles until count tasks reached the phase, with a deadline
+// so a stuck pipeline fails the test instead of hanging it. The deadline
+// scales with the load (phases must sustain at least 50 tasks/s), so large
+// baselines like 100k are not falsely failed by a fixed wall-clock bound.
 func drainPhase(t *testing.T, ctx context.Context, pool *pgxpool.Pool, reconcile func(context.Context) (int, error), phase string, count int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(2*time.Minute + time.Duration(count)*20*time.Millisecond)
 	for {
 		if _, err := reconcile(ctx); err != nil {
 			t.Fatalf("reconcile: %v", err)
