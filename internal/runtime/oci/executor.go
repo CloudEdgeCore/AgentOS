@@ -154,6 +154,7 @@ type ctrExecutor struct {
 	ctrPath     string
 	namespace   string
 	runtime     string
+	snapshotter string
 	skipPull    bool
 	pullTimeout time.Duration
 	outputLimit int64
@@ -171,6 +172,15 @@ func WithNamespace(namespace string) RunscOption {
 // WithRuntime sets the containerd runtime name (default "io.containerd.runsc.v1").
 func WithRuntime(runtime string) RunscOption {
 	return func(e *ctrExecutor) { e.runtime = runtime }
+}
+
+// WithSnapshotter sets the containerd snapshotter for sandbox rootfs mounts
+// (default "overlayfs"). Nested environments (containerd inside a container,
+// e.g. Docker Desktop/WSL2) cannot mount overlay-on-overlay and must use
+// "native"; the choice is passed to ctr explicitly because ctr hardcodes
+// overlayfs as its own default.
+func WithSnapshotter(snapshotter string) RunscOption {
+	return func(e *ctrExecutor) { e.snapshotter = snapshotter }
 }
 
 // WithSkipPull skips the image pull step (development images pre-loaded into

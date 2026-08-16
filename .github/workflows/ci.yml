@@ -121,3 +121,83 @@ jobs:
         run: |
           cargo +1.97.1 install cargo-audit --version 0.22.2 --locked
           cargo +1.97.1 audit
+
+  # v0.7 real-machine leg: containerd + runsc on a Linux host, environment
+  # fingerprint, the OCI/gVisor conformance leg, and the Firecracker KVM
+  # probe. GitHub-hosted runners have no /dev/kvm, so the probe reports
+  # KVM-absent there by design; a self-hosted runner with KVM (label
+  # agentos-kvm) runs the same leg without --allow-no-kvm.
+  #
+  # Version pinning follows deploy/ci/runtime-matrix.md: the exact
+  # containerd/runsc patch versions and sha256 sums are backfilled on the
+  # first runner bring-up (setup-containerd-runsc.sh prints them). Until then
+  # this job fails loudly instead of silently running unpinned runtimes.
+  runtime-linux-leg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: agentos_test
+          POSTGRES_USER: agentos
+          POSTGRES_PASSWORD: agentos-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos -d agentos_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
+      AGENTOS_OCI_CONTAINERD_NAMESPACE: agentos-ci
+      # Pinned runtime toolchain (verified URLs 2026-08-16; backfill sha256
+      # in deploy/ci/runtime-matrix.md).
+      CONTAINERD_VERSION: "2.0.2"
+      RUNSC_TAG: "20260810.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: go.sum
+
+      - name: Install pinned containerd and runsc
+        run: sudo -E bash deploy/ci/setup-containerd-runsc.sh
+
+      - name: Environment fingerprint
+        run: bash deploy/ci/env-fingerprint.sh | tee runtime-fingerprint.txt
+
+      - name: Upload runtime fingerprint
+        uses: actions/upload-artifact@v4 # TODO(v0.7): pin digest like the other actions
+        with:
+          name: runtime-fingerprint
+          path: runtime-fingerprint.txt
+
+      - name: Build OCI/gVisor provider
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/agentos-runtime-oci" ./cmd/agentos-runtime-oci
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Pin and pull the conformance workload image
+        run: |
+          docker pull alpine:latest
+          digest="$(docker image inspect --format '{{index .RepoDigests 0}}' alpine:latest)"
+          # RepoDigests[0] is of the form alpine@sha256:...; the conformance
+          # worker runs with --skip-image-pull, so the digest-pinned image
+          # must already live in the containerd namespace.
+          ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" images pull "docker.io/library/${digest}"
+          echo "AGENTOS_OCI_IMAGE=docker.io/library/${digest}" >> "$GITHUB_ENV"
+
+      - name: OCI/gVisor conformance leg
+        run: go test -race -tags=integration -count=1 -run 'TestSameAgentVersionRunsOnBothProviders/oci' ./internal/runtime/control/...
+
+      - name: Firecracker KVM probe
+        run: bash deploy/ci/firecracker-smoke.sh --allow-no-kvm

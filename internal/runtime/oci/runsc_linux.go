@@ -35,7 +35,7 @@ func NewRunscExecutor(options ...RunscOption) (Executor, error) {
 	}
 	executor := &ctrExecutor{
 		ctrPath: path, namespace: "agentos", runtime: "io.containerd.runsc.v1",
-		pullTimeout: 10 * time.Minute, outputLimit: 1 << 20,
+		snapshotter: "overlayfs", pullTimeout: 10 * time.Minute, outputLimit: 1 << 20,
 	}
 	for _, option := range options {
 		option(executor)
@@ -70,7 +70,7 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 	if !e.skipPull {
 		pullCtx, cancel := context.WithTimeout(ctx, e.pullTimeout)
 		defer cancel()
-		if err := e.run(pullCtx, "images", "pull", spec.ImageRef); err != nil {
+		if err := e.run(pullCtx, "images", "pull", "--snapshotter", e.snapshotter, spec.ImageRef); err != nil {
 			e.unregister(containerID)
 			return nil, fmt.Errorf("pull workload image %s: %w", spec.ImageRef, err)
 		}
@@ -88,7 +88,7 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 		return nil, fmt.Errorf("persist workload spec: %w", err)
 	}
 
-	args := []string{"run", "--runtime", e.runtime}
+	args := []string{"run", "--runtime", e.runtime, "--snapshotter", e.snapshotter}
 	for _, mount := range e.mounts(inputPath, spec.WorkspaceBytes) {
 		args = append(args, "--mount", mount)
 	}

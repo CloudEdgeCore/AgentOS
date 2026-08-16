@@ -172,6 +172,18 @@ $env:AGENTOS_WASMTIME_PACKAGE_ROOT = "tmp\conformance"
 go test -tags=integration -run TestSameAgentVersionRunsOnBothProviders -count=1 ./internal/runtime/control/...
 ```
 
+The OCI/gVisor real-machine leg (v0.7) runs only on a Linux host with
+containerd + runsc; CI executes it in the `runtime-linux-leg` job. The
+pinned toolchain, environment fingerprint contract and the isolation-item
+acceptance mapping live in
+[`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md); on a Linux
+host with the repo checked out and Go on PATH:
+
+```bash
+export AGENTOS_TEST_DATABASE_URL=postgres://agentos:...@127.0.0.1:5432/agentos_test?sslmode=disable
+sudo -E bash deploy/ci/leg-run.sh        # installs pinned containerd+runsc, fingerprints, runs the OCI leg
+```
+
 The conformance test skips the Wasmtime leg when
 `AGENTOS_WASMTIME_RUNTIME` and `AGENTOS_WASMTIME_PACKAGE_ROOT` are unset; CI
 builds the provider and component in the same job and always runs both legs.

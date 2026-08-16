@@ -29,6 +29,11 @@ func main() {
 	imageRef := flag.String("image-ref", "", "digest-pinned OCI image that runs the published AgentVersion")
 	namespace := flag.String("containerd-namespace", "agentos", "containerd namespace for sandboxed containers")
 	runtimeName := flag.String("containerd-runtime", "io.containerd.runsc.v1", "containerd runtime (runsc by default)")
+	// snapshotter selects the containerd snapshotter for sandbox rootfs
+	// mounts (v0.7): "overlayfs" on production hosts, "native" in nested
+	// environments (containerd inside a container cannot mount
+	// overlay-on-overlay).
+	snapshotter := flag.String("containerd-snapshotter", "overlayfs", "containerd snapshotter for sandbox rootfs (overlayfs or native)")
 	skipImagePull := flag.Bool("skip-image-pull", false, "assume the image is already loaded into containerd")
 	cpuQuotaMillis := flag.Int64("cpu-quota-millis", 0, "cgroup CPU quota in milliseconds (0 = Admission decides)")
 	memoryLimitMiB := flag.Int64("memory-limit-mib", 0, "cgroup memory limit in MiB (0 = Admission decides)")
@@ -58,7 +63,7 @@ func main() {
 		_ = shutdownTelemetry(shutdownCtx)
 	}()
 
-	options := []oci.RunscOption{oci.WithNamespace(*namespace), oci.WithRuntime(*runtimeName)}
+	options := []oci.RunscOption{oci.WithNamespace(*namespace), oci.WithRuntime(*runtimeName), oci.WithSnapshotter(*snapshotter)}
 	if *skipImagePull {
 		options = append(options, oci.WithSkipPull())
 	}

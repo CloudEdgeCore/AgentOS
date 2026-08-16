@@ -298,11 +298,15 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 	if runtimeName == "" {
 		runtimeName = "io.containerd.runsc.v1"
 	}
+	// Snapshotter for sandbox rootfs (v0.7): nested environments (containerd
+	// inside a container) cannot mount overlay-on-overlay and must set
+	// AGENTOS_OCI_SNAPSHOTTER=native.
+	snapshotter := os.Getenv("AGENTOS_OCI_SNAPSHOTTER")
 	binaryPath, err := exec.LookPath("agentos-runtime-oci")
 	if err != nil {
 		t.Skipf("agentos-runtime-oci binary not found in PATH (build cmd/agentos-runtime-oci first): %v", err)
 	}
-	command := exec.Command(binaryPath,
+	commandArgs := []string{
 		"--dev-mode", "true",
 		"--tenant", env.tenant,
 		"--runtime-instance-id", "worker-oci-1",
@@ -313,7 +317,11 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		"--containerd-runtime", runtimeName,
 		"--skip-image-pull",
 		"--heartbeat-ttl", "30s",
-	)
+	}
+	if snapshotter != "" {
+		commandArgs = append(commandArgs, "--containerd-snapshotter", snapshotter)
+	}
+	command := exec.Command(binaryPath, commandArgs...)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
