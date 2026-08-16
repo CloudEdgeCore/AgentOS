@@ -176,6 +176,50 @@ func TestControllerIsolatesPoisonedTask(t *testing.T) {
 	}
 }
 
+// TestControllerProcessesBatchConcurrently proves per-task parallelism (P1):
+// a batch of independent claims is processed by a bounded worker set, and
+// slow per-task commits overlap.
+func TestControllerProcessesBatchConcurrently(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	const claimsCount = 8
+	for i := 0; i < claimsCount; i++ {
+		repository.claims = append(repository.claims, store.TaskClaim{Task: taskClaim("agent@1", `{
+			"priority":1,"deadline":"2099-08-14T12:00:00Z",
+			"budget":{"tokens":1,"costUsd":1,"toolCalls":1,"wallSeconds":1},
+			"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+		}`)})
+	}
+	repository.slow = 50 * time.Millisecond
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 50, time.Minute)
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != claimsCount {
+		t.Fatalf("Reconcile() = %d, %v; want %d processed", processed, err, claimsCount)
+	}
+	if repository.maxConcurrent() < 2 {
+		t.Fatalf("max concurrent commits = %d, want >= 2 (claims processed serially)", repository.maxConcurrent())
+	}
+
+	// Serial mode processes the same batch without overlap.
+	repository2 := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	for i := 0; i < claimsCount; i++ {
+		repository2.claims = append(repository2.claims, store.TaskClaim{Task: taskClaim("agent@1", `{
+			"priority":1,"deadline":"2099-08-14T12:00:00Z",
+			"budget":{"tokens":1,"costUsd":1,"toolCalls":1,"wallSeconds":1},
+			"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+		}`)})
+	}
+	repository2.slow = 20 * time.Millisecond
+	serial := NewController(repository2, New(testLimits()), newTestPolicy(t, 100), "admission-1", 50, time.Minute)
+	WithParallelism(1)(serial)
+	if processed, err := serial.Reconcile(context.Background()); err != nil || processed != claimsCount {
+		t.Fatalf("serial Reconcile() = %d, %v", processed, err)
+	}
+	if repository2.maxConcurrent() > 1 {
+		t.Fatalf("serial mode overlapped commits: max=%d", repository2.maxConcurrent())
+	}
+}
+
 func newTestPolicy(t *testing.T, maxPriority int) *policy.Engine {
 	t.Helper()
 	engine, err := policy.New(policy.TenantPolicies{"tenant-a": {MaxPriority: maxPriority}})
@@ -217,6 +261,15 @@ type fakeControlStore struct {
 	decisions  []store.DecideAdmissionInput
 	failTaskID uuid.UUID
 	released   int
+	slow       time.Duration
+	active     int
+	peak       int
+}
+
+func (f *fakeControlStore) maxConcurrent() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.peak
 }
 
 func newFakeWithVersion(tenantID, ref, spec string) *fakeControlStore {
@@ -259,6 +312,20 @@ func (f *fakeControlStore) ClaimTasks(context.Context, store.ClaimTasksInput) ([
 }
 
 func (f *fakeControlStore) DecideAdmission(_ context.Context, in store.DecideAdmissionInput) (store.Task, error) {
+	f.mu.Lock()
+	f.active++
+	if f.active > f.peak {
+		f.peak = f.active
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
+	if f.slow > 0 {
+		time.Sleep(f.slow)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failTaskID != uuid.Nil && in.TaskID == f.failTaskID {

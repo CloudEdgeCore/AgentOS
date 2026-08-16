@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
@@ -121,10 +122,23 @@ type Controller struct {
 	ownerID  string
 	batch    int
 	claimTTL time.Duration
+	// parallel bounds concurrent per-task processing within one batch (P1);
+	// 1 disables parallelism.
+	parallel int
 }
 
 func NewController(repository store.ControlStore, engine *Engine, policyEngine *policy.Engine, ownerID string, batch int, claimTTL time.Duration) *Controller {
-	return &Controller{store: repository, engine: engine, policy: policyEngine, ownerID: ownerID, batch: batch, claimTTL: claimTTL}
+	return &Controller{store: repository, engine: engine, policy: policyEngine, ownerID: ownerID, batch: batch, claimTTL: claimTTL, parallel: 4}
+}
+
+// WithParallelism bounds concurrent per-task processing within one reconcile
+// batch (default 4; 1 = serial).
+func WithParallelism(workers int) func(*Controller) {
+	return func(c *Controller) {
+		if workers > 0 {
+			c.parallel = workers
+		}
+	}
 }
 
 // Reconcile claims and admits queued tasks. Transient transaction conflicts
@@ -141,41 +155,100 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	processed := 0
-	for _, claim := range claims {
-		decision, versionID, budget, err := c.decide(ctx, claim)
-		if err != nil {
-			if store.IsRetryableTransaction(err) {
-				return processed, err
-			}
-			// Per-task error isolation: a task that cannot be decided must
-			// not block the rest of the queue. The claim is released so the
-			// next round re-evaluates it, and the decision path that failed
-			// is recorded before continuing.
-			_ = c.store.ReleaseTaskClaim(ctx, claim)
-			slog.Error("admission decision failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
-			continue
-		}
-		_, err = c.store.DecideAdmission(ctx, store.DecideAdmissionInput{
-			TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
-			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
-			Admit: decision.Admit, ReasonCode: decision.ReasonCode, Reasons: decision.Reasons,
-			EvaluatorVersion: EvaluatorVersion, AgentVersionID: versionID, Budget: budget,
-			PolicyRevision: policy.Revision,
-		})
-		if err != nil {
-			if store.IsRetryableTransaction(err) {
-				return processed, err
-			}
-			// A stale claim (another controller moved the task) or an
-			// unexpected per-task failure: release and continue.
-			_ = c.store.ReleaseTaskClaim(ctx, claim)
-			slog.Error("admission commit failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
-			continue
-		}
-		processed++
+	// Per-task parallelism (P1): claims are independent rows, so a bounded
+	// worker set processes them concurrently; retryable errors abort the
+	// batch, non-retryable per-task failures are isolated per claim.
+	processed, err := c.processClaims(ctx, claims)
+	if err != nil {
+		return processed, err
 	}
 	return processed, nil
+}
+
+func (c *Controller) processClaims(ctx context.Context, claims []store.TaskClaim) (int, error) {
+	if c.parallel <= 1 || len(claims) <= 1 {
+		processed := 0
+		for _, claim := range claims {
+			ok, err := c.processClaim(ctx, claim)
+			if err != nil {
+				return processed, err
+			}
+			if ok {
+				processed++
+			}
+		}
+		return processed, nil
+	}
+	processed := 0
+	var mu sync.Mutex
+	var batchErr error
+	semaphore := make(chan struct{}, c.parallel)
+	var wg sync.WaitGroup
+	for _, claim := range claims {
+		claim := claim
+		mu.Lock()
+		aborted := batchErr != nil
+		mu.Unlock()
+		if aborted {
+			break
+		}
+		wg.Add(1)
+		semaphore <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+			ok, err := c.processClaim(ctx, claim)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if batchErr == nil {
+					batchErr = err
+				}
+				return
+			}
+			if ok {
+				processed++
+			}
+		}()
+	}
+	wg.Wait()
+	return processed, batchErr
+}
+
+// processClaim runs one claim through the decision chain, returning whether
+// the claim was processed. Non-retryable failures are isolated per claim
+// (claim released, logged); retryable failures abort the batch.
+func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (bool, error) {
+	decision, versionID, budget, err := c.decide(ctx, claim)
+	if err != nil {
+		if store.IsRetryableTransaction(err) {
+			return false, err
+		}
+		// Per-task error isolation: a task that cannot be decided must
+		// not block the rest of the queue. The claim is released so the
+		// next round re-evaluates it.
+		_ = c.store.ReleaseTaskClaim(ctx, claim)
+		slog.Error("admission decision failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+		return false, nil
+	}
+	_, err = c.store.DecideAdmission(ctx, store.DecideAdmissionInput{
+		TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
+		ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
+		Admit: decision.Admit, ReasonCode: decision.ReasonCode, Reasons: decision.Reasons,
+		EvaluatorVersion: EvaluatorVersion, AgentVersionID: versionID, Budget: budget,
+		PolicyRevision: policy.Revision,
+	})
+	if err != nil {
+		if store.IsRetryableTransaction(err) {
+			return false, err
+		}
+		// A stale claim (another controller moved the task) or an
+		// unexpected per-task failure: release and continue.
+		_ = c.store.ReleaseTaskClaim(ctx, claim)
+		slog.Error("admission commit failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+		return false, nil
+	}
+	return true, nil
 }
 
 // decide resolves the task's agent version reference and evaluates both the
