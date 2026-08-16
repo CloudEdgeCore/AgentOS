@@ -30,6 +30,11 @@ func main() {
 	poolsFile := flag.String("runtime-pools", "", "JSON runtime pool configuration")
 	tenantPoliciesFile := flag.String("tenant-policies", "", "JSON tenant policy data (absent tenants are denied by default)")
 	interval := flag.Duration("interval", 250*time.Millisecond, "reconciliation interval")
+	// poolHealthFreshness is the lease heartbeat freshness window for pool
+	// health (v0.6): a pool whose worker holds an unreleased lease that was
+	// not renewed within this window (or expired) is not ready for
+	// placement. Keep it comfortably above the scheduler lease TTL.
+	poolHealthFreshness := flag.Duration("pool-health-freshness", 90*time.Second, "lease heartbeat freshness window for pool health")
 	devMode := flag.Bool("dev-mode", false, "acknowledge static development pools and built-in limits")
 	flag.Parse()
 	if *databaseURL == "" || strings.TrimSpace(*controllerID) == "" || *poolsFile == "" || *interval <= 0 || !*devMode {
@@ -87,7 +92,11 @@ func main() {
 		ContainerClasses: []string{"oci"},
 	})
 	admissionController := admission.NewController(repository, engine, policyEngine, *controllerID+"/admission", 50, 30*time.Second)
-	schedulerController := scheduler.NewController(repository, scheduler.StaticPoolSource(pools), *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
+	// Runtime-aware pool health (v0.6): static pool configuration is
+	// overlaid with lease-derived instance liveness, so a pool whose worker
+	// stopped renewing its lease is rejected by placement.
+	poolSource := scheduler.NewLeaseAwarePoolSource(scheduler.StaticPoolSource(pools), repository, *poolHealthFreshness)
+	schedulerController := scheduler.NewController(repository, poolSource, *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
 	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()

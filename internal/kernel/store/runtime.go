@@ -235,3 +235,19 @@ type RuntimeStore interface {
 	ListExpiredAttempts(context.Context, time.Time, int) ([]RecoveryCandidate, error)
 	RecoverExpiredAttempt(context.Context, RecoverExpiredAttemptInput) (RecoveryResult, error)
 }
+
+// PoolHealthStore reports runtime instance liveness derived from lease
+// heartbeats (v0.6): placement consults it before scheduling so that pools
+// whose worker stopped renewing its lease are rejected instead of stranding
+// a new attempt until lease-expiry recovery.
+type PoolHealthStore interface {
+	// PoolInstanceHealth reports whether each runtime instance is presumed
+	// alive at now. An instance is unhealthy while it holds an unreleased
+	// lease whose heartbeat is stale: the lease expired (expires_at <= now)
+	// or was not renewed within the freshness window (heartbeat_at <= now -
+	// freshness). An instance with no unreleased leases is healthy — idling
+	// is not a failure signal. Every requested instance ID appears in the
+	// result; callers treat an ID missing from the map as unhealthy
+	// (fail-closed).
+	PoolInstanceHealth(context.Context, []string, time.Time, time.Duration) (map[string]bool, error)
+}

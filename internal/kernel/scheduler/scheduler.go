@@ -164,6 +164,50 @@ func (s StaticPoolSource) ListRuntimePools(_ context.Context, tenantID string) (
 	return pools, nil
 }
 
+// LeaseAwarePoolSource overlays lease-derived runtime health onto a static
+// pool configuration (v0.6): a pool is ready only when its static
+// configuration says ready AND its runtime instance is presumed alive by
+// recent lease heartbeats. Placement therefore rejects pools whose worker
+// stopped renewing its lease instead of scheduling a task that would be
+// stranded until lease-expiry recovery. An instance ID missing from the
+// health result is treated as unhealthy (fail-closed).
+type LeaseAwarePoolSource struct {
+	static    PoolSource
+	health    store.PoolHealthStore
+	freshness time.Duration
+}
+
+func NewLeaseAwarePoolSource(static PoolSource, health store.PoolHealthStore, freshness time.Duration) *LeaseAwarePoolSource {
+	return &LeaseAwarePoolSource{static: static, health: health, freshness: freshness}
+}
+
+func (s *LeaseAwarePoolSource) ListRuntimePools(ctx context.Context, tenantID string) ([]RuntimePool, error) {
+	pools, err := s.static.ListRuntimePools(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	var instanceIDs []string
+	for _, pool := range pools {
+		if pool.Ready {
+			instanceIDs = append(instanceIDs, pool.RuntimeInstanceID)
+		}
+	}
+	health, err := s.health.PoolInstanceHealth(ctx, instanceIDs, time.Now().UTC(), s.freshness)
+	if err != nil {
+		return nil, err
+	}
+	for i := range pools {
+		if !pools[i].Ready {
+			continue
+		}
+		alive, ok := health[pools[i].RuntimeInstanceID]
+		if !ok || !alive {
+			pools[i].Ready = false
+		}
+	}
+	return pools, nil
+}
+
 type Controller struct {
 	store    store.ControlStore
 	pools    PoolSource
