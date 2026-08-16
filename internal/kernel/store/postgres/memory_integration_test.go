@@ -170,6 +170,80 @@ func TestMemoryCanonicalStoreLifecycle(t *testing.T) {
 	t.Fatalf("kept record missing from search: %+v", retention)
 }
 
+// TestMemoryProjectionEvents verifies the OpenSearch projection feed
+// (ADR-013): every durable upsert and tombstone emits an outbox event in the
+// same transaction, and idempotent replays emit nothing.
+func TestMemoryProjectionEvents(t *testing.T) {
+	clock := newFakeClock()
+	pool, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+
+	countEvents := func(eventType string) int {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events
+			WHERE aggregate_type = 'Memory' AND event_type = $1`, eventType).Scan(&count); err != nil {
+			t.Fatalf("count outbox events: %v", err)
+		}
+		return count
+	}
+
+	created, existing, err := repository.PutMemory(ctx, kernelstore.PutMemoryInput{
+		TenantID: "tenant-a", Namespace: "default", Key: "k1",
+		ContentType: "text/plain", Content: "first version",
+		Embedding: testEmbedding(0.9), EmbeddingProvider: "test", Sensitivity: "internal",
+	})
+	if err != nil || existing {
+		t.Fatalf("put: existing=%v err=%v", existing, err)
+	}
+	if countEvents("MemoryUpserted") != 1 {
+		t.Fatalf("MemoryUpserted count = %d, want 1", countEvents("MemoryUpserted"))
+	}
+
+	// Idempotent replay emits no event (nothing changed).
+	if _, existing, err := repository.PutMemory(ctx, kernelstore.PutMemoryInput{
+		TenantID: "tenant-a", Namespace: "default", Key: "k1",
+		ContentType: "text/plain", Content: "first version",
+		Embedding: testEmbedding(0.9), EmbeddingProvider: "test", Sensitivity: "internal",
+	}); err != nil || !existing {
+		t.Fatalf("replay: existing=%v err=%v", existing, err)
+	}
+	if countEvents("MemoryUpserted") != 1 {
+		t.Fatalf("replay emitted a MemoryUpserted event")
+	}
+
+	// A correction is a new version and emits again.
+	if _, existing, err := repository.PutMemory(ctx, kernelstore.PutMemoryInput{
+		TenantID: "tenant-a", Namespace: "default", Key: "k1",
+		ContentType: "text/plain", Content: "corrected version",
+		Embedding: testEmbedding(0.9), EmbeddingProvider: "test", Sensitivity: "internal",
+	}); err != nil || existing {
+		t.Fatalf("correction: existing=%v err=%v", existing, err)
+	}
+	if countEvents("MemoryUpserted") != 2 {
+		t.Fatalf("MemoryUpserted count after correction = %d, want 2", countEvents("MemoryUpserted"))
+	}
+
+	// The tombstone emits MemoryTombstoned with the bumped version.
+	tombstoned, err := repository.TombstoneMemory(ctx, "tenant-a", created.ID, 2)
+	if err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+	if tombstoned.ResourceVersion != 3 {
+		t.Fatalf("tombstone version = %d, want 3", tombstoned.ResourceVersion)
+	}
+	if countEvents("MemoryTombstoned") != 1 {
+		t.Fatalf("MemoryTombstoned count = %d, want 1", countEvents("MemoryTombstoned"))
+	}
+	var payload map[string]any
+	if err := pool.QueryRow(ctx, `SELECT payload FROM outbox_events
+		WHERE aggregate_type = 'Memory' AND event_type = 'MemoryTombstoned'`).Scan(&payload); err != nil {
+		t.Fatalf("read tombstone payload: %v", err)
+	}
+	if payload["memoryId"] != created.ID.String() || payload["tenantId"] != "tenant-a" || payload["resourceVersion"] != float64(3) {
+		t.Fatalf("tombstone payload = %+v", payload)
+	}
+}
+
 func TestMemoryValidation(t *testing.T) {
 	clock := newFakeClock()
 	_, repository := prepare(t, clock.Now)

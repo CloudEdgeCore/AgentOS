@@ -91,6 +91,13 @@ func (s *Store) PutMemory(ctx context.Context, in kernelstore.PutMemoryInput) (k
 	if err != nil {
 		return zero, false, classify(err)
 	}
+	// Projection feed (ADR-013): every durable upsert emits a MemoryUpserted
+	// event in the same transaction so the OpenSearch projector can apply it
+	// idempotently by resource version.
+	if err := insertEvent(ctx, tx, in.TenantID, "Memory", updated.ID, updated.ResourceVersion, "MemoryUpserted",
+		memoryEventPayload(updated), now, s.newID()); err != nil {
+		return zero, false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return zero, false, classify(err)
 	}
@@ -162,13 +169,18 @@ func (s *Store) TombstoneMemory(ctx context.Context, tenantID string, id uuid.UU
 		return zero, fmt.Errorf("tenant, memory ID, and expected version are required")
 	}
 	now := s.now()
-	updated, err := scanMemory(s.pool.QueryRow(ctx, `UPDATE memory_records
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return zero, err
+	}
+	defer rollback(ctx, tx)
+	updated, err := scanMemory(tx.QueryRow(ctx, `UPDATE memory_records
 		SET tombstone_at = $1, resource_version = resource_version + 1, updated_at = $1
 		WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 AND tombstone_at IS NULL
 		RETURNING `+memoryColumns, now, tenantID, id.String(), expectedVersion))
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Distinguish a stale CAS from an already-tombstoned or missing row.
-		current, lookupErr := scanMemory(s.pool.QueryRow(ctx, `SELECT `+memoryColumns+`
+		current, lookupErr := scanMemory(tx.QueryRow(ctx, `SELECT `+memoryColumns+`
 			FROM memory_records WHERE tenant_id = $1 AND id = $2`, tenantID, id.String()))
 		if lookupErr != nil {
 			if errors.Is(lookupErr, pgx.ErrNoRows) {
@@ -184,7 +196,27 @@ func (s *Store) TombstoneMemory(ctx context.Context, tenantID string, id uuid.UU
 	if err != nil {
 		return zero, classify(err)
 	}
+	// Projection feed (ADR-013): the tombstone emits a MemoryTombstoned event
+	// in the same transaction so the OpenSearch projector propagates the
+	// deletion.
+	if err := insertEvent(ctx, tx, tenantID, "Memory", updated.ID, updated.ResourceVersion, "MemoryTombstoned",
+		memoryEventPayload(updated), now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return zero, classify(err)
+	}
 	return updated, nil
+}
+
+// memoryEventPayload is the projection event payload: identity plus the
+// version the projector applies idempotently. Content is not embedded; the
+// projector fetches the canonical record from the store.
+func memoryEventPayload(record kernelstore.MemoryRecord) map[string]any {
+	return map[string]any{
+		"tenantId": record.TenantID, "memoryId": record.ID.String(),
+		"namespace": record.Namespace, "key": record.Key, "resourceVersion": record.ResourceVersion,
+	}
 }
 
 // vectorOrNil renders an embedding as a pgvector literal or nil.
