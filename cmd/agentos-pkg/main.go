@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
 )
@@ -36,8 +37,12 @@ func main() {
 		err = runSign(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
+	case "sbom":
+		err = runSBOM(os.Args[2:])
+	case "verify-sbom":
+		err = runVerifySBOM(os.Args[2:])
 	default:
-		fail(nil, "unknown command %q; want genkey, sign or verify", os.Args[1])
+		fail(nil, "unknown command %q; want genkey, sign, verify, sbom or verify-sbom", os.Args[1])
 	}
 	if err != nil {
 		fail(err, "")
@@ -79,6 +84,7 @@ func runSign(args []string) error {
 	keyID := flags.String("key-id", "", "signing key identity")
 	privateKey := flags.String("private-key", "", "base64 raw std ed25519 private key")
 	outPath := flags.String("out", "", "output package JSON file (default stdout)")
+	imageDigest := flags.String("image-digest", "", "digest-pinned OCI image (sha256:<64 hex>) to sign and embed in the manifest (cosign-style)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -97,11 +103,86 @@ func runSign(args []string) error {
 	if err != nil {
 		return err
 	}
-	pkg, err := agentpkg.Sign(manifest, &agentpkg.SigningKey{ID: *keyID, PrivateKey: decodedKey})
+	signingKey := &agentpkg.SigningKey{ID: *keyID, PrivateKey: decodedKey}
+	if *imageDigest != "" {
+		signature, err := agentpkg.SignImage(agentpkg.Digest{Algorithm: "sha256", Hex: strings.TrimPrefix(*imageDigest, "sha256:")}, signingKey)
+		if err != nil {
+			return err
+		}
+		manifest.SignedImageDigest = agentpkg.Digest{Algorithm: "sha256", Hex: strings.TrimPrefix(*imageDigest, "sha256:")}
+		manifest.ImageSignature = signature
+	}
+	pkg, err := agentpkg.Sign(manifest, signingKey)
 	if err != nil {
 		return err
 	}
 	return writePackage(*outPath, pkg)
+}
+
+// runSBOM generates a CycloneDX SBOM for the manifest and prints the digest
+// to pin into the manifest's sbom field.
+func runSBOM(args []string) error {
+	flags := flag.NewFlagSet("sbom", flag.ExitOnError)
+	manifestPath := flags.String("manifest", "", "canonical manifest JSON file")
+	outPath := flags.String("out", "", "output SBOM JSON file (default stdout)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" {
+		return errors.New("-manifest is required")
+	}
+	raw, err := os.ReadFile(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	var manifest agentpkg.Manifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return fmt.Errorf("decode manifest: %w", err)
+	}
+	document, err := agentpkg.GenerateSBOM(manifest)
+	if err != nil {
+		return err
+	}
+	if *outPath != "" {
+		if err := os.WriteFile(*outPath, document, 0o600); err != nil {
+			return fmt.Errorf("write sbom: %w", err)
+		}
+	} else {
+		fmt.Println(string(document))
+	}
+	digest := agentpkg.SBOMDigest(document)
+	fmt.Printf("sbom digest: %s (pin into the manifest sbom field)\n", digest.String())
+	return nil
+}
+
+// runVerifySBOM checks an SBOM document against the manifest's sbom pin.
+func runVerifySBOM(args []string) error {
+	flags := flag.NewFlagSet("verify-sbom", flag.ExitOnError)
+	manifestPath := flags.String("manifest", "", "canonical manifest JSON file")
+	sbomPath := flags.String("sbom", "", "SBOM JSON file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || *sbomPath == "" {
+		return errors.New("-manifest and -sbom are required")
+	}
+	raw, err := os.ReadFile(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("read manifest: %w", err)
+	}
+	var manifest agentpkg.Manifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return fmt.Errorf("decode manifest: %w", err)
+	}
+	document, err := os.ReadFile(*sbomPath)
+	if err != nil {
+		return fmt.Errorf("read sbom: %w", err)
+	}
+	if err := agentpkg.VerifySBOM(document, manifest.SBOM); err != nil {
+		return fmt.Errorf("SBOM verification FAILED: %w", err)
+	}
+	fmt.Printf("SBOM OK: specVersion=%s digest=%s\n", agentpkg.SBOMSpecVersion, manifest.SBOM.String())
+	return nil
 }
 
 func runVerify(args []string) error {

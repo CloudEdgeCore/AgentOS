@@ -73,6 +73,11 @@ type Manifest struct {
 	MemorySchema    Digest          `json:"memorySchema"`
 	SBOM            Digest          `json:"sbom"`
 	Provenance      Provenance      `json:"provenance"`
+	// SignedImageDigest is the digest-pinned OCI image this package ships
+	// (ADR-010 cosign-style binding); ImageSignature is its signature. When
+	// either is set both must be set and the signature must verify.
+	SignedImageDigest Digest    `json:"signedImageDigest,omitempty"`
+	ImageSignature    *Signature `json:"imageSignature,omitempty"`
 }
 
 // Validate checks shape constraints; digest correctness is verified by the
@@ -92,6 +97,13 @@ func (m Manifest) Validate() error {
 	}
 	if strings.TrimSpace(m.Provenance.Builder) == "" {
 		return fmt.Errorf("%w: provenance builder is required", ErrPackageManifestInvalid)
+	}
+	if (m.SignedImageDigest.Algorithm == "" && m.ImageSignature != nil) ||
+		(m.SignedImageDigest.Algorithm != "" && m.ImageSignature == nil) {
+		return fmt.Errorf("%w: signedImageDigest and imageSignature must be set together", ErrPackageManifestInvalid)
+	}
+	if m.SignedImageDigest.Algorithm != "" && m.SignedImageDigest.Algorithm != "sha256" {
+		return fmt.Errorf("%w: signedImageDigest must be a sha256 digest", ErrPackageManifestInvalid)
 	}
 	return nil
 }
@@ -179,6 +191,12 @@ func Verify(pkg *Package, keys map[string]ed25519.PublicKey) error {
 	}
 	if !ed25519.Verify(trusted, digest[:], signature) {
 		return ErrPackageSignatureInvalid
+	}
+	// Cosign-style image binding (ADR-010): when the manifest declares a
+	// signed image digest, it must verify fail-closed under the same trust
+	// registry.
+	if err := VerifyImageSignature(pkg.Manifest, keys); err != nil {
+		return err
 	}
 	return nil
 }

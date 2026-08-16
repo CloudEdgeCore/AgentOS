@@ -540,6 +540,12 @@ components:
             permissions: { $ref: '#/components/schemas/Digest' }
             memorySchema: { $ref: '#/components/schemas/Digest' }
             sbom: { $ref: '#/components/schemas/Digest' }
+            signedImageDigest:
+              $ref: '#/components/schemas/Digest'
+              description: 'Digest-pinned OCI image the package ships (cosign-style binding); requires imageSignature.'
+            imageSignature:
+              $ref: '#/components/schemas/PackageSignature'
+              description: ed25519 signature over the namespaced image digest.
             provenance:
               type: object
               additionalProperties: false
@@ -550,13 +556,15 @@ components:
                 gitCommit: { type: string }
                 builtAt: { type: string, format: date-time }
         signature:
-          type: object
-          additionalProperties: false
-          required: [keyId, ed25519, createdAt]
-          properties:
-            keyId: { type: string, description: Signing key identity in the control plane trust registry. }
-            ed25519: { type: string, description: Base64 raw std ed25519 signature over the manifest digest. }
-            createdAt: { type: string, format: date-time }
+          $ref: '#/components/schemas/PackageSignature'
+    PackageSignature:
+      type: object
+      additionalProperties: false
+      required: [keyId, ed25519, createdAt]
+      properties:
+        keyId: { type: string, description: Signing key identity in the control plane trust registry. }
+        ed25519: { type: string, description: Base64 raw std ed25519 signature over the signed payload. }
+        createdAt: { type: string, format: date-time }
     Digest:
       type: object
       additionalProperties: false
