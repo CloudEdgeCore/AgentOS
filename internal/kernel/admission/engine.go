@@ -125,6 +125,9 @@ type Controller struct {
 	// parallel bounds concurrent per-task processing within one batch (P1);
 	// 1 disables parallelism.
 	parallel int
+	// quotas is the optional tenant aggregate consumption quota store
+	// (v0.6). When nil, tenant quotas are not enforced by this controller.
+	quotas store.TenantQuotaStore
 }
 
 func NewController(repository store.ControlStore, engine *Engine, policyEngine *policy.Engine, ownerID string, batch int, claimTTL time.Duration) *Controller {
@@ -139,6 +142,15 @@ func WithParallelism(workers int) func(*Controller) {
 			c.parallel = workers
 		}
 	}
+}
+
+// WithTenantQuotas installs the tenant aggregate consumption quota gate
+// (v0.6): a task is admitted only while the tenant's current window usage
+// plus the task's own budget ceiling stays within every configured limit.
+// The store re-checks the same gate atomically at commit time, so concurrent
+// settlements cannot slip past the read-only check here.
+func WithTenantQuotas(quotaStore store.TenantQuotaStore) func(*Controller) {
+	return func(c *Controller) { c.quotas = quotaStore }
 }
 
 // Reconcile claims and admits queued tasks. Transient transaction conflicts
@@ -298,6 +310,35 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 			reasons = append(reasons, reason(code, "policy", "rego policy denied the task"))
 		}
 		return Decision{ReasonCode: "POLICY_DENIED", Reasons: reasons}, &version.ID, budget, nil
+	}
+	// Tenant aggregate consumption quota (v0.6): with a configured window
+	// quota, the task is admitted only while the current window's settled
+	// consumption plus the task's own ceiling stays within every limit. This
+	// read-only pass produces the recorded rejection; the store re-checks
+	// the gate atomically at commit so a concurrent settlement cannot slip
+	// in between the read and the decision.
+	if c.quotas != nil {
+		quota, err := c.quotas.GetTenantQuota(ctx, claim.Task.TenantID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// No quota configured: unlimited.
+		case err != nil:
+			return Decision{}, nil, nil, err
+		default:
+			usage, err := c.quotas.GetTenantQuotaUsage(ctx, claim.Task.TenantID, time.Now().UTC())
+			if err != nil {
+				return Decision{}, nil, nil, err
+			}
+			var ceiling store.TaskBudget
+			if budget != nil {
+				ceiling = *budget
+			}
+			if store.QuotaExceeded(quota.Limits, usage.Consumed, ceiling) {
+				return Decision{ReasonCode: "TENANT_QUOTA_EXCEEDED", Reasons: []store.AdmissionReason{
+					reason("TENANT_QUOTA_EXCEEDED", "tenant", "tenant aggregate consumption quota would be exceeded"),
+				}}, &version.ID, budget, nil
+			}
+		}
 	}
 	return decision, &version.ID, budget, nil
 }

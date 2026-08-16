@@ -532,6 +532,7 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
 		audit_events,
+		tenant_consumption_windows, tenant_quotas,
 		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}

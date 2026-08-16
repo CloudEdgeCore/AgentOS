@@ -131,6 +131,15 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	to := domain.TaskRejected
 	decision := "REJECT"
 	if in.Admit {
+		// Tenant aggregate consumption quota gate (v0.6): authoritative,
+		// atomic re-check under the window row lock at commit time. The
+		// admission controller records a proper TENANT_QUOTA_EXCEEDED
+		// decision on the next claim round; this rejects the admission
+		// without recording anything when the read-only check raced a
+		// concurrent settlement.
+		if err := s.enforceTenantQuota(ctx, tx, in.TenantID, in.Budget, now); err != nil {
+			return kernelstore.Task{}, err
+		}
 		to = domain.TaskAdmitted
 		decision = "ADMIT"
 	}

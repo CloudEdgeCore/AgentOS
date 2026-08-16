@@ -90,6 +90,7 @@ func main() {
 		slog.Warn("publish admission is OFF: unsigned agent version publications are allowed (dev mode)")
 	}
 	options = append(options, controlapi.WithAuditStore(repository))
+	options = append(options, controlapi.WithTenantQuotaStore(repository))
 	if strings.TrimSpace(*auditSigningKey) != "" {
 		decoded, err := agentpkg.DecodePrivateKey(*auditSigningKey)
 		if err != nil {

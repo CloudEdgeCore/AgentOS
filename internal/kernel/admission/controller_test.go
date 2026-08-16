@@ -247,6 +247,113 @@ func TestControllerPassesNoBudgetForUnboundedTasks(t *testing.T) {
 	}
 }
 
+// --- tenant aggregate consumption quota (v0.6) ---
+
+func TestControllerRejectsTenantOverQuota(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	quotas := &fakeQuotaStore{
+		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 100, CostUSD: 2}},
+		usage: store.TenantWindowUsage{TenantID: "tenant-a", Consumed: store.TaskBudget{Tokens: 90, CostUSD: 1}},
+	}
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	WithTenantQuotas(quotas)(controller)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	decision := repository.lastDecision()
+	if decision.Admit || decision.ReasonCode != "TENANT_QUOTA_EXCEEDED" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if decision.Budget == nil || decision.Budget.Tokens != 500 {
+		t.Fatalf("quota rejection lost the task budget: %+v", decision.Budget)
+	}
+}
+
+func TestControllerAdmitsWithinTenantQuota(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	quotas := &fakeQuotaStore{
+		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 1000, CostUSD: 10}},
+		usage: store.TenantWindowUsage{TenantID: "tenant-a", Consumed: store.TaskBudget{Tokens: 90, CostUSD: 1}},
+	}
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	WithTenantQuotas(quotas)(controller)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	if decision := repository.lastDecision(); !decision.Admit || decision.ReasonCode != "ADMISSION_PASSED" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
+// TestControllerAdmitsWithoutConfiguredQuota proves the quota gate is a
+// no-op when the quota store reports no configuration for the tenant.
+func TestControllerAdmitsWithoutConfiguredQuota(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	quotas := &fakeQuotaStore{noQuota: true}
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	WithTenantQuotas(quotas)(controller)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	if decision := repository.lastDecision(); !decision.Admit || decision.ReasonCode != "ADMISSION_PASSED" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
+// fakeQuotaStore is a scriptable store.TenantQuotaStore for controller tests.
+type fakeQuotaStore struct {
+	mu       sync.Mutex
+	quota    store.TenantQuota
+	usage    store.TenantWindowUsage
+	noQuota  bool
+	usageErr error
+}
+
+func (f *fakeQuotaStore) SetTenantQuota(context.Context, store.SetTenantQuotaInput) (store.TenantQuota, error) {
+	return store.TenantQuota{}, nil
+}
+
+func (f *fakeQuotaStore) GetTenantQuota(context.Context, string) (store.TenantQuota, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noQuota {
+		return store.TenantQuota{}, store.ErrNotFound
+	}
+	return f.quota, nil
+}
+
+func (f *fakeQuotaStore) DeleteTenantQuota(context.Context, string) error { return nil }
+
+func (f *fakeQuotaStore) GetTenantQuotaUsage(context.Context, string, time.Time) (store.TenantWindowUsage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.usageErr != nil {
+		return store.TenantWindowUsage{}, f.usageErr
+	}
+	return f.usage, nil
+}
+
 func taskClaim(ref, spec string) store.Task {
 	return store.Task{
 		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: ref,

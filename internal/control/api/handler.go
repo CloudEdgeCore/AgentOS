@@ -91,6 +91,16 @@ type AuditStore interface {
 	ExportAuditChain(context.Context, string) ([]store.AuditEvent, error)
 }
 
+// TenantQuotaStore is the v0.6 tenant aggregate consumption quota surface.
+// The endpoints always operate on the authenticated principal's own tenant,
+// so no cross-tenant identifier ever appears in a quota URL.
+type TenantQuotaStore interface {
+	SetTenantQuota(context.Context, store.SetTenantQuotaInput) (store.TenantQuota, error)
+	GetTenantQuota(context.Context, string) (store.TenantQuota, error)
+	DeleteTenantQuota(context.Context, string) error
+	GetTenantQuotaUsage(context.Context, string, time.Time) (store.TenantWindowUsage, error)
+}
+
 type Handler struct {
 	tasks        TaskStore
 	agentVersion AgentVersionStore
@@ -104,6 +114,9 @@ type Handler struct {
 	packages *agentpkg.Registry
 	// audit is the ADR-014 ledger; when nil the audit endpoints answer 404.
 	audit AuditStore
+	// quotas is the v0.6 tenant aggregate consumption quota surface; when
+	// nil the quota endpoints answer 404.
+	quotas TenantQuotaStore
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
@@ -130,6 +143,12 @@ func WithPackageAdmission(registry *agentpkg.Registry) Option {
 // it the audit endpoints are disabled.
 func WithAuditStore(audit AuditStore) Option {
 	return func(h *Handler) { h.audit = audit }
+}
+
+// WithTenantQuotaStore installs the tenant aggregate consumption quota
+// surface (v0.6); without it the quota endpoints are disabled.
+func WithTenantQuotaStore(quotas TenantQuotaStore) Option {
+	return func(h *Handler) { h.quotas = quotas }
 }
 
 // WithAuditSigningKey configures the key that signs exported audit archives.
@@ -188,6 +207,9 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("GET /v1/audit", handler.listAudit)
 	mux.HandleFunc("GET /v1/audit/verify", handler.verifyAudit)
 	mux.HandleFunc("GET /v1/audit/export", handler.exportAudit)
+	mux.HandleFunc("GET /v1/quota", handler.getTenantQuota)
+	mux.HandleFunc("PUT /v1/quota", handler.setTenantQuota)
+	mux.HandleFunc("DELETE /v1/quota", handler.deleteTenantQuota)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("/v1/tasks", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}", handler.methodNotAllowed)
@@ -201,6 +223,7 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("/v1/audit", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/audit/verify", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/audit/export", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/quota", handler.methodNotAllowed)
 	mux.HandleFunc("/healthz", handler.methodNotAllowed)
 	mux.HandleFunc("/", handler.notFound)
 	return handler.requestContext(mux)
@@ -1436,6 +1459,171 @@ func (h *Handler) exportAudit(writer http.ResponseWriter, request *http.Request)
 		response.Signature = &auditSignature{KeyID: h.auditKeyID, Ed25519: base64.RawStdEncoding.EncodeToString(signature)}
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+// --- tenant aggregate consumption quota (v0.6) ---
+
+// tenantQuotaResponse reports a tenant's configured window limits and the
+// current window's settled usage. All quota endpoints operate on the
+// authenticated principal's own tenant: the tenant never appears in the URL,
+// so the tenant boundary is enforced by identity, not by path scoping.
+type tenantQuotaResponse struct {
+	APIVersion      string       `json:"apiVersion"`
+	Kind            string       `json:"kind"`
+	TenantID        string       `json:"tenantId"`
+	WindowSeconds   int64        `json:"windowSeconds"`
+	WindowStart     *time.Time   `json:"windowStart,omitempty"`
+	Limits          usageSummary `json:"limits"`
+	Usage           usageSummary `json:"usage"`
+	ResourceVersion int64        `json:"resourceVersion"`
+	UpdatedAt       time.Time    `json:"updatedAt"`
+	TraceID         string       `json:"traceId"`
+}
+
+type setTenantQuotaRequest struct {
+	WindowSeconds int64        `json:"windowSeconds"`
+	Limits        usageSummary `json:"limits"`
+}
+
+func (h *Handler) getTenantQuota(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	if h.quotas == nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "QUOTA_DISABLED", "tenant quotas are not configured on this endpoint", traceID)
+		return
+	}
+	quota, err := h.quotas.GetTenantQuota(request.Context(), principal.TenantID)
+	if err != nil {
+		h.writeQuotaProblem(writer, request, err, traceID)
+		return
+	}
+	usage, err := h.quotas.GetTenantQuotaUsage(request.Context(), principal.TenantID, time.Now().UTC())
+	if err != nil {
+		h.writeQuotaProblem(writer, request, err, traceID)
+		return
+	}
+	h.writeQuota(writer, http.StatusOK, quota, usage, traceID)
+}
+
+// setTenantQuota configures or replaces the principal tenant's quota
+// (PUT /v1/quota). Existing window consumption is preserved; only the limits
+// and window length change.
+func (h *Handler) setTenantQuota(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	if h.quotas == nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "QUOTA_DISABLED", "tenant quotas are not configured on this endpoint", traceID)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		h.writeProblem(writer, request, http.StatusUnsupportedMediaType, "CONTENT_TYPE_REQUIRED", "Content-Type must be application/json", traceID)
+		return
+	}
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBody)
+	encoded, err := io.ReadAll(request.Body)
+	if err != nil {
+		h.writeDecodeProblem(writer, request, err, traceID)
+		return
+	}
+	if err := rejectDuplicateJSONKeys(encoded); err != nil {
+		h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_JSON", err.Error(), traceID)
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var body setTenantQuotaRequest
+	if err := decoder.Decode(&body); err != nil {
+		h.writeDecodeProblem(writer, request, err, traceID)
+		return
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_JSON", err.Error(), traceID)
+		return
+	}
+	input := store.SetTenantQuotaInput{
+		TenantID: principal.TenantID, WindowSeconds: body.WindowSeconds,
+		Limits: store.TaskBudget{
+			Tokens: body.Limits.Tokens, CostUSD: body.Limits.CostUSD,
+			ToolCalls: body.Limits.ToolCalls, WallSeconds: body.Limits.WallSeconds,
+		},
+	}
+	if !input.Valid() {
+		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_QUOTA",
+			"windowSeconds must be at least 60 and limits must be non-negative", traceID)
+		return
+	}
+	quota, err := h.quotas.SetTenantQuota(request.Context(), input)
+	if err != nil {
+		h.writeQuotaProblem(writer, request, err, traceID)
+		return
+	}
+	usage, err := h.quotas.GetTenantQuotaUsage(request.Context(), principal.TenantID, time.Now().UTC())
+	if err != nil {
+		h.writeQuotaProblem(writer, request, err, traceID)
+		return
+	}
+	h.writeQuota(writer, http.StatusOK, quota, usage, traceID)
+}
+
+// deleteTenantQuota removes the principal tenant's quota configuration
+// (DELETE /v1/quota). Window consumption rows become inert and future
+// admissions are unlimited; the operation is idempotent.
+func (h *Handler) deleteTenantQuota(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	if h.quotas == nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "QUOTA_DISABLED", "tenant quotas are not configured on this endpoint", traceID)
+		return
+	}
+	if err := h.quotas.DeleteTenantQuota(request.Context(), principal.TenantID); err != nil {
+		h.writeQuotaProblem(writer, request, err, traceID)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) writeQuota(writer http.ResponseWriter, status int, quota store.TenantQuota, usage store.TenantWindowUsage, traceID string) {
+	response := tenantQuotaResponse{
+		APIVersion: "agentos.dev/v1alpha1", Kind: "TenantQuota", TenantID: quota.TenantID,
+		WindowSeconds: quota.WindowSeconds,
+		Limits: usageSummary{
+			Tokens: quota.Limits.Tokens, CostUSD: quota.Limits.CostUSD,
+			ToolCalls: quota.Limits.ToolCalls, WallSeconds: quota.Limits.WallSeconds,
+		},
+		Usage: usageSummary{
+			Tokens: usage.Consumed.Tokens, CostUSD: usage.Consumed.CostUSD,
+			ToolCalls: usage.Consumed.ToolCalls, WallSeconds: usage.Consumed.WallSeconds,
+		},
+		ResourceVersion: quota.ResourceVersion, UpdatedAt: quota.UpdatedAt.UTC(), TraceID: traceID,
+	}
+	if !usage.WindowStart.IsZero() {
+		value := usage.WindowStart.UTC()
+		response.WindowStart = &value
+	}
+	writer.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, quota.ResourceVersion))
+	writeJSON(writer, status, response)
+}
+
+func (h *Handler) writeQuotaProblem(writer http.ResponseWriter, request *http.Request, err error, traceID string) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		h.writeProblem(writer, request, http.StatusNotFound, "TENANT_QUOTA_NOT_FOUND", "tenant has no configured consumption quota", traceID)
+	default:
+		h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be completed", traceID)
+	}
 }
 
 func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Request, err error, traceID string) {

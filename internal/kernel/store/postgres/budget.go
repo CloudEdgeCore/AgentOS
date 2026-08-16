@@ -108,13 +108,24 @@ func (s *Store) settleUsageInTx(ctx context.Context, tx pgx.Tx, tenantID string,
 	}
 
 	now := s.now()
-	if _, err := tx.Exec(ctx, `INSERT INTO task_budget_settlements (
+	command, err := tx.Exec(ctx, `INSERT INTO task_budget_settlements (
 		id, tenant_id, task_id, idempotency_key, tokens, cost_usd, tool_calls, wall_seconds, occurred_at
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	ON CONFLICT (tenant_id, task_id, idempotency_key) DO NOTHING`,
 		s.newID().String(), tenantID, taskID.String(), idempotencyKey,
-		usage.Tokens, usage.CostUSD, usage.ToolCalls, usage.WallSeconds, now); err != nil {
+		usage.Tokens, usage.CostUSD, usage.ToolCalls, usage.WallSeconds, now)
+	if err != nil {
 		return status, consumed, classify(err)
+	}
+	// Tenant aggregate consumption (v0.6): a newly appended settlement bumps
+	// the tenant's current window in the same transaction, so the window
+	// counters are exact with the settlement ledger. Replays (rows affected
+	// 0) never double-count, and tenants without a configured quota track no
+	// windows.
+	if command.RowsAffected() == 1 {
+		if err := s.bumpTenantWindow(ctx, tx, tenantID, usage, now); err != nil {
+			return status, consumed, err
+		}
 	}
 	// Keep the rolling counters exact with the append, under the same row
 	// lock that serializes every settlement for this task.
