@@ -44,16 +44,26 @@ func (s *Store) ClaimTasks(ctx context.Context, in kernelstore.ClaimTasksInput) 
 	if in.Kind == kernelstore.ControllerScheduling {
 		scheduleEligible = ` AND (t.next_schedule_attempt_at IS NULL OR t.next_schedule_attempt_at <= $3)`
 	}
+	// Tenant-consistent sharding (ADR-016): when ShardCount > 0, only tasks
+	// whose tenant maps to ShardIndex are claimable. The expression mirrors
+	// store.TenantShard: first 32 bits of md5(tenant_id) modulo count. md5
+	// keeps the mapping deterministic across PostgreSQL versions.
+	shardEligible := ""
+	args := []any{in.Phase, in.Kind, now, in.Limit}
+	if in.ShardCount > 0 {
+		shardEligible = ` AND ('x' || substr(md5(t.tenant_id), 1, 8))::bit(32)::bigint % $5 = $6`
+		args = append(args, in.ShardCount, in.ShardIndex)
+	}
 	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t
 		WHERE t.phase = $1
 		  AND NOT EXISTS (
 			SELECT 1 FROM task_controller_claims c
 			WHERE c.tenant_id = t.tenant_id AND c.task_id = t.id
 			  AND c.controller_kind = $2 AND c.expires_at > $3
-		  )`+scheduleEligible+`
+		  )`+scheduleEligible+shardEligible+`
 		ORDER BY t.created_at, t.id
 		FOR UPDATE OF t SKIP LOCKED
-		LIMIT $4`, in.Phase, in.Kind, now, in.Limit)
+		LIMIT $4`, args...)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -137,14 +147,18 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	}
 	to := domain.TaskRejected
 	decision := "REJECT"
+	var quotaWindowStart *time.Time
 	if in.Admit {
-		// Tenant aggregate consumption quota gate (v0.6): authoritative,
-		// atomic re-check under the window row lock at commit time. The
-		// admission controller records a proper TENANT_QUOTA_EXCEEDED
-		// decision on the next claim round; this rejects the admission
-		// without recording anything when the read-only check raced a
-		// concurrent settlement.
-		if err := s.enforceTenantQuota(ctx, tx, in.TenantID, in.Budget, now); err != nil {
+		// Tenant aggregate consumption quota gate (v0.8 reservation): the
+		// authoritative, atomic check under the window row lock at commit
+		// time reserves the task's ceiling on admission. The admission
+		// controller records a proper TENANT_QUOTA_EXCEEDED decision on the
+		// next claim round; this rejects the admission without recording
+		// anything when the read-only check raced a concurrent admission or
+		// settlement.
+		var err error
+		quotaWindowStart, err = s.enforceTenantQuota(ctx, tx, in.TenantID, in.Budget, now)
+		if err != nil {
 			return kernelstore.Task{}, err
 		}
 		to = domain.TaskAdmitted
@@ -179,14 +193,21 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	}
 	// The budget reservation commits atomically with the admission decision:
 	// only admitted tasks hold a ledger, and rejected tasks never reserve.
+	// quotaWindowStart pins which tenant window the reservation was taken
+	// from, so the terminal release decrements the exact row even when the
+	// task spans window boundaries.
 	if to == domain.TaskAdmitted && in.Budget != nil && !in.Budget.Zero() {
+		var windowStart any
+		if quotaWindowStart != nil {
+			windowStart = *quotaWindowStart
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO task_budget_ledgers (
 			tenant_id, task_id, reserved_tokens, reserved_cost_usd,
-			reserved_tool_calls, reserved_wall_seconds, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+			reserved_tool_calls, reserved_wall_seconds, quota_reserved_window_start, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		ON CONFLICT (tenant_id, task_id) DO NOTHING`,
 			in.TenantID, in.TaskID.String(), in.Budget.Tokens, in.Budget.CostUSD,
-			in.Budget.ToolCalls, in.Budget.WallSeconds, now); err != nil {
+			in.Budget.ToolCalls, in.Budget.WallSeconds, windowStart, now); err != nil {
 			return kernelstore.Task{}, classify(err)
 		}
 	}
@@ -472,6 +493,19 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, eventID uuid.UUID, dispatc
 func validateClaimInput(in kernelstore.ClaimTasksInput) error {
 	if strings.TrimSpace(in.OwnerID) == "" || in.Limit < 1 || in.Limit > 100 || in.TTL <= 0 {
 		return fmt.Errorf("claim owner, limit 1..100, and positive TTL are required")
+	}
+	// ADR-016: sharding is either fully off (0,0) or a valid index within a
+	// positive count. The count is a deployment-wide invariant: every
+	// controller instance must share it.
+	if in.ShardCount < 0 || in.ShardIndex < 0 {
+		return fmt.Errorf("shard index and count must not be negative")
+	}
+	if in.ShardCount == 0 {
+		if in.ShardIndex != 0 {
+			return fmt.Errorf("shard index without a shard count is invalid")
+		}
+	} else if in.ShardIndex >= in.ShardCount {
+		return fmt.Errorf("shard index %d must be below shard count %d", in.ShardIndex, in.ShardCount)
 	}
 	valid := (in.Kind == kernelstore.ControllerAdmission && in.Phase == domain.TaskQueued) ||
 		(in.Kind == kernelstore.ControllerScheduling && in.Phase == domain.TaskAdmitted)

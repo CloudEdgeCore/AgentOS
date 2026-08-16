@@ -36,12 +36,14 @@ func (in SetTenantQuotaInput) Valid() bool {
 	return strings.TrimSpace(in.TenantID) != "" && in.WindowSeconds >= 60 && in.Limits.Valid()
 }
 
-// TenantWindowUsage is the settled aggregate consumption of one tenant in one
-// fixed window.
+// TenantWindowUsage is the settled and reserved aggregate consumption of one
+// tenant in one fixed window (v0.8: reservation holds the ceilings of
+// admitted-but-not-terminal tasks).
 type TenantWindowUsage struct {
 	TenantID        string
 	WindowStart     time.Time
 	Consumed        TaskBudget
+	Reserved        TaskBudget
 	ResourceVersion int64
 	UpdatedAt       time.Time
 }
@@ -54,6 +56,17 @@ func QuotaExceeded(limits, consumed, additional TaskBudget) bool {
 		(limits.CostUSD > 0 && consumed.CostUSD+additional.CostUSD > limits.CostUSD) ||
 		(limits.ToolCalls > 0 && consumed.ToolCalls+additional.ToolCalls > limits.ToolCalls) ||
 		(limits.WallSeconds > 0 && consumed.WallSeconds+additional.WallSeconds > limits.WallSeconds)
+}
+
+// QuotaReservationExceeded is the v0.8 admission gate: additional usage is
+// rejected when consumed plus the reserved ceilings of in-flight tasks plus
+// the additional ceiling would exceed any limit. Reservation closes the
+// concurrent-admission overshoot of the v0.6 consumed-only gate.
+func QuotaReservationExceeded(limits, consumed, reserved, additional TaskBudget) bool {
+	return (limits.Tokens > 0 && consumed.Tokens+reserved.Tokens+additional.Tokens > limits.Tokens) ||
+		(limits.CostUSD > 0 && consumed.CostUSD+reserved.CostUSD+additional.CostUSD > limits.CostUSD) ||
+		(limits.ToolCalls > 0 && consumed.ToolCalls+reserved.ToolCalls+additional.ToolCalls > limits.ToolCalls) ||
+		(limits.WallSeconds > 0 && consumed.WallSeconds+reserved.WallSeconds+additional.WallSeconds > limits.WallSeconds)
 }
 
 // TenantQuotaStore is the persistence contract for tenant aggregate

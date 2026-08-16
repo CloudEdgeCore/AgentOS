@@ -35,6 +35,12 @@ func main() {
 	// not renewed within this window (or expired) is not ready for
 	// placement. Keep it comfortably above the scheduler lease TTL.
 	poolHealthFreshness := flag.Duration("pool-health-freshness", 90*time.Second, "lease heartbeat freshness window for pool health")
+	// Tenant-consistent sharding (ADR-016): with -shard-count N > 0, this
+	// instance claims only tenants whose md5 hash maps to -shard-index.
+	// Every instance must use the same count; mismatch stalls tasks
+	// fail-visibly instead of misprocessing them.
+	shardIndex := flag.Int("shard-index", 0, "tenant-consistent claim shard index (ADR-016)")
+	shardCount := flag.Int("shard-count", 0, "tenant-consistent claim shard count; 0 disables sharding")
 	devMode := flag.Bool("dev-mode", false, "acknowledge static development pools and built-in limits")
 	flag.Parse()
 	if *databaseURL == "" || strings.TrimSpace(*controllerID) == "" || *poolsFile == "" || *interval <= 0 || !*devMode {
@@ -97,6 +103,19 @@ func main() {
 	// stopped renewing its lease is rejected by placement.
 	poolSource := scheduler.NewLeaseAwarePoolSource(scheduler.StaticPoolSource(pools), repository, *poolHealthFreshness)
 	schedulerController := scheduler.NewController(repository, poolSource, *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
+	// Tenant-consistent sharding (ADR-016): admission and scheduling must
+	// share the same shard so one instance owns a tenant's whole pipeline.
+	if *shardCount > 0 {
+		if *shardIndex < 0 || *shardIndex >= *shardCount {
+			slog.Error("shard index must satisfy 0 <= index < count", "shardIndex", *shardIndex, "shardCount", *shardCount)
+			os.Exit(2)
+		}
+		admission.WithShard(*shardIndex, *shardCount)(admissionController)
+		scheduler.WithShard(*shardIndex, *shardCount)(schedulerController)
+		slog.Info("controller instance is sharded", "shardIndex", *shardIndex, "shardCount", *shardCount, "controllerID", *controllerID)
+	} else {
+		slog.Warn("controller instance is NOT sharded (claims every tenant; ADR-016)", "controllerID", *controllerID)
+	}
 	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()

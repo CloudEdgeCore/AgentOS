@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/binary"
 	"encoding/json"
 	"time"
 
@@ -30,6 +32,25 @@ type ClaimTasksInput struct {
 	OwnerID string
 	Limit   int
 	TTL     time.Duration
+	// ShardIndex / ShardCount are the tenant-consistent shard filter
+	// (ADR-016): when ShardCount > 0, only tasks whose tenant maps to
+	// ShardIndex are claimable. Zero values mean no sharding (every instance
+	// claims every tenant). All instances must share the same shard count.
+	ShardIndex int
+	ShardCount int
+}
+
+// TenantShard returns the ADR-016 shard for a tenant: the first 32 bits of
+// md5(tenant_id) modulo count. It mirrors the SQL expression used by
+// ClaimTasks exactly, so tests can assert the filter deterministically.
+// md5 is used instead of hashing functions like hashtext, which PostgreSQL
+// does not guarantee stable across major versions.
+func TenantShard(tenantID string, count int) int {
+	if count <= 0 {
+		return 0
+	}
+	sum := md5.Sum([]byte(tenantID))
+	return int(binary.BigEndian.Uint32(sum[:4]) % uint32(count))
 }
 
 type AdmissionReason struct {

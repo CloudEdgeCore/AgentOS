@@ -219,6 +219,10 @@ type Controller struct {
 	// parallel bounds concurrent per-task processing within one batch (P1);
 	// 1 disables parallelism.
 	parallel int
+	// shardIndex / shardCount are the tenant-consistent claim shard
+	// (ADR-016); zero count disables sharding.
+	shardIndex int
+	shardCount int
 }
 
 func NewController(repository store.ControlStore, pools PoolSource, ownerID string, batch int, claimTTL, leaseTTL time.Duration) *Controller {
@@ -236,6 +240,14 @@ func WithParallelism(workers int) func(*Controller) {
 	}
 }
 
+// WithShard confines this instance to one tenant-consistent claim shard
+// (ADR-016): it claims only tasks whose tenant maps to index of count.
+// Count 0 disables sharding. Every controller instance must share the same
+// count.
+func WithShard(index, count int) func(*Controller) {
+	return func(c *Controller) { c.shardIndex, c.shardCount = index, count }
+}
+
 // Reconcile claims and schedules admitted tasks. Transient transaction
 // conflicts are retried with bounded backoff (ADR-002).
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
@@ -245,6 +257,7 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	claims, err := c.store.ClaimTasks(ctx, store.ClaimTasksInput{
 		Kind: store.ControllerScheduling, Phase: "ADMITTED", OwnerID: c.ownerID, Limit: c.batch, TTL: c.claimTTL,
+		ShardIndex: c.shardIndex, ShardCount: c.shardCount,
 	})
 	if err != nil {
 		return 0, err

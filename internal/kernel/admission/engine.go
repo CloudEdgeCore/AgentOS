@@ -128,6 +128,10 @@ type Controller struct {
 	// quotas is the optional tenant aggregate consumption quota store
 	// (v0.6). When nil, tenant quotas are not enforced by this controller.
 	quotas store.TenantQuotaStore
+	// shardIndex / shardCount are the tenant-consistent claim shard
+	// (ADR-016); zero count disables sharding.
+	shardIndex int
+	shardCount int
 }
 
 func NewController(repository store.ControlStore, engine *Engine, policyEngine *policy.Engine, ownerID string, batch int, claimTTL time.Duration) *Controller {
@@ -153,6 +157,14 @@ func WithTenantQuotas(quotaStore store.TenantQuotaStore) func(*Controller) {
 	return func(c *Controller) { c.quotas = quotaStore }
 }
 
+// WithShard confines this instance to one tenant-consistent claim shard
+// (ADR-016): it claims only tasks whose tenant maps to index of count.
+// Count 0 disables sharding. Every controller instance must share the same
+// count.
+func WithShard(index, count int) func(*Controller) {
+	return func(c *Controller) { c.shardIndex, c.shardCount = index, count }
+}
+
 // Reconcile claims and admits queued tasks. Transient transaction conflicts
 // are retried with bounded backoff (ADR-002); the claim TTL covers permanent
 // failures.
@@ -163,6 +175,7 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	claims, err := c.store.ClaimTasks(ctx, store.ClaimTasksInput{
 		Kind: store.ControllerAdmission, Phase: "QUEUED", OwnerID: c.ownerID, Limit: c.batch, TTL: c.claimTTL,
+		ShardIndex: c.shardIndex, ShardCount: c.shardCount,
 	})
 	if err != nil {
 		return 0, err
@@ -311,12 +324,13 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 		}
 		return Decision{ReasonCode: "POLICY_DENIED", Reasons: reasons}, &version.ID, budget, nil
 	}
-	// Tenant aggregate consumption quota (v0.6): with a configured window
-	// quota, the task is admitted only while the current window's settled
-	// consumption plus the task's own ceiling stays within every limit. This
-	// read-only pass produces the recorded rejection; the store re-checks
-	// the gate atomically at commit so a concurrent settlement cannot slip
-	// in between the read and the decision.
+	// Tenant aggregate consumption quota (v0.6/v0.8): with a configured
+	// window quota, the task is admitted only while the current window's
+	// settled consumption plus the reserved ceilings of in-flight tasks plus
+	// the task's own ceiling stays within every limit. This read-only pass
+	// produces the recorded rejection; the store re-checks and reserves
+	// atomically at commit, so a concurrent admission or settlement cannot
+	// slip in between the read and the decision.
 	if c.quotas != nil {
 		quota, err := c.quotas.GetTenantQuota(ctx, claim.Task.TenantID)
 		switch {
@@ -333,7 +347,7 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 			if budget != nil {
 				ceiling = *budget
 			}
-			if store.QuotaExceeded(quota.Limits, usage.Consumed, ceiling) {
+			if store.QuotaReservationExceeded(quota.Limits, usage.Consumed, usage.Reserved, ceiling) {
 				return Decision{ReasonCode: "TENANT_QUOTA_EXCEEDED", Reasons: []store.AdmissionReason{
 					reason("TENANT_QUOTA_EXCEEDED", "tenant", "tenant aggregate consumption quota would be exceeded"),
 				}}, &version.ID, budget, nil

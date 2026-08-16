@@ -61,6 +61,11 @@ func (s *Store) RequestTaskCancellation(ctx context.Context, tenantID string, ta
 		if err != nil {
 			return zero, classifyCAS(err, "task", task.ID, expectedVersion)
 		}
+		// Quota reservation release (v0.8): an admitted task cancelled before
+		// scheduling returns its reserved ceiling.
+		if err := s.releaseTenantReservation(ctx, tx, tenantID, task.ID); err != nil {
+			return zero, err
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM task_controller_claims WHERE tenant_id = $1 AND task_id = $2`, tenantID, task.ID.String()); err != nil {
 			return zero, classify(err)
 		}
@@ -593,6 +598,10 @@ func (s *Store) AcknowledgeCancellation(ctx context.Context, in kernelstore.Canc
 		WHERE id = $2 AND released_at IS NULL`, now, lease.ID.String()); err != nil {
 		return result, classify(err)
 	}
+	// Quota reservation release (v0.8): the task is terminal.
+	if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+		return result, err
+	}
 	for _, event := range []struct {
 		typeName string
 		id       uuid.UUID
@@ -719,6 +728,10 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 		if err != nil {
 			return result, classifyCAS(err, "task", task.ID, task.ResourceVersion)
 		}
+		// Quota reservation release (v0.8): the task is terminal.
+		if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+			return result, err
+		}
 		for _, event := range []struct {
 			typeName string
 			id       uuid.UUID
@@ -773,6 +786,10 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 			now, in.TenantID, task.ID.String(), task.ResourceVersion))
 		if err != nil {
 			return result, classifyCAS(err, "task", task.ID, task.ResourceVersion)
+		}
+		// Quota reservation release (v0.8): the task is terminal.
+		if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+			return result, err
 		}
 		if err := insertEvent(ctx, tx, in.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunFailed", map[string]any{
 			"runId": run.ID, "failureCode": "ATTEMPTS_EXHAUSTED",

@@ -47,8 +47,18 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 		t.Fatalf("unexpected fresh usage: %+v", usage)
 	}
 
-	// Settling task usage bumps the window exactly once.
+	// Settling task usage bumps the window exactly once. The admission of
+	// the budgeted task reserved its ceiling first (v0.8 reservation), and
+	// settlements leave the reservation untouched.
 	task := createBudgetedTask(t, ctx, repository, "quota-accounting", 200, 20, 120, 2.0)
+	usage, err = repository.GetTenantQuotaUsage(ctx, "tenant-a", clock.Now())
+	if err != nil {
+		t.Fatalf("get usage after admission: %v", err)
+	}
+	if usage.Reserved.Tokens != 200 || usage.Reserved.CostUSD != 2.0 ||
+		usage.Reserved.ToolCalls != 20 || usage.Reserved.WallSeconds != 120 {
+		t.Fatalf("reservation not recorded: %+v", usage.Reserved)
+	}
 	if _, err := repository.SettleTaskUsage(ctx, kernelstore.SettleTaskUsageInput{
 		TenantID: "tenant-a", TaskID: task.ID, IdempotencyKey: "quota-usage-1",
 		Usage: kernelstore.TaskBudget{Tokens: 40, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 60},
@@ -62,6 +72,9 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 	if usage.Consumed.Tokens != 40 || usage.Consumed.CostUSD != 0.5 ||
 		usage.Consumed.ToolCalls != 4 || usage.Consumed.WallSeconds != 60 {
 		t.Fatalf("unexpected window consumption: %+v", usage.Consumed)
+	}
+	if usage.Reserved.Tokens != 200 {
+		t.Fatalf("settlement changed the reservation: %+v", usage.Reserved)
 	}
 
 	// Replaying the same settlement must not double-count the window.
@@ -138,10 +151,12 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 	}
 }
 
-// TestTenantQuotaAdmissionGate proves the atomic admission gate: an admit is
-// rejected with ErrTenantQuotaExceeded when the current window's consumption
-// plus the task's ceiling exceeds any limit, and the rejection records
-// nothing (task stays queued). Window rollover reopens the tenant.
+// TestTenantQuotaAdmissionGate proves the atomic admission gate with
+// reservation semantics (v0.8): admission reserves the task's ceiling under
+// the window row lock, so concurrent admissions cannot collectively overshoot
+// the limit; the reservation is released when the task reaches a terminal
+// state, re-opening headroom. A rejected admit records nothing (task stays
+// queued).
 func TestTenantQuotaAdmissionGate(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)
@@ -186,41 +201,29 @@ func TestTenantQuotaAdmissionGate(t *testing.T) {
 		})
 	}
 
-	// The gate is exact against settled consumption: three budgeted tasks of
-	// 60 are all admitted while nothing is settled (the burst may overshoot;
-	// the window closes once consumption catches up).
+	// Reservation semantics: 60 fits (0 reserved + 60 <= 100), so t1 is
+	// admitted and its ceiling is reserved; a second 60-ceiling task is
+	// rejected even though nothing is settled yet (the v0.6 burst overshoot
+	// is closed).
 	t1, err := admitWith("quota-gate-t1", &kernelstore.TaskBudget{Tokens: 60})
 	if err != nil {
 		t.Fatalf("admit t1: %v", err)
 	}
-	t2, err := admitWith("quota-gate-t2", &kernelstore.TaskBudget{Tokens: 60})
+	if _, err := admitWith("quota-gate-t2", &kernelstore.TaskBudget{Tokens: 60}); !errors.Is(err, kernelstore.ErrTenantQuotaExceeded) {
+		t.Fatalf("expected reservation rejection for t2, got %v", err)
+	}
+	usage, err := repository.GetTenantQuotaUsage(ctx, "tenant-a", clock.Now())
 	if err != nil {
-		t.Fatalf("admit t2: %v", err)
+		t.Fatalf("get usage: %v", err)
 	}
-	if _, err := admitWith("quota-gate-t3", &kernelstore.TaskBudget{Tokens: 60}); err != nil {
-		t.Fatalf("admit t3: %v", err)
-	}
-
-	// Settle 40 on t1 (its ledger ceiling is 60): the window now shows 40.
-	if _, err := repository.SettleTaskUsage(ctx, kernelstore.SettleTaskUsageInput{
-		TenantID: "tenant-a", TaskID: t1.ID, IdempotencyKey: "quota-gate-u1",
-		Usage: kernelstore.TaskBudget{Tokens: 40},
-	}); err != nil {
-		t.Fatalf("settle t1: %v", err)
+	if usage.Reserved.Tokens != 60 || !usage.Consumed.Zero() {
+		t.Fatalf("window after t1: reserved=%d consumed=%d, want 60/0", usage.Reserved.Tokens, usage.Consumed.Tokens)
 	}
 
-	// 40 + 60 = 100: exactly at the limit, still admitted.
-	if _, err := admitWith("quota-gate-t4", &kernelstore.TaskBudget{Tokens: 60}); err != nil {
-		t.Fatalf("admit t4 at the limit: %v", err)
-	}
-	// A 61-ceiling task no longer fits (40+61 > 100): rejected at the gate,
-	// task stays queued, nothing recorded.
-	if _, err := admitWith("quota-gate-t3b", &kernelstore.TaskBudget{Tokens: 61}); !errors.Is(err, kernelstore.ErrTenantQuotaExceeded) {
-		t.Fatalf("expected quota rejection for t3b, got %v", err)
-	}
+	// The rejected task stays queued and nothing was recorded.
 	var rejectedID uuid.UUID
 	if err := pool.QueryRow(ctx, `SELECT id FROM tasks WHERE tenant_id = $1 AND idempotency_key = $2`,
-		"tenant-a", "quota-gate-t3b").Scan(&rejectedID); err != nil {
+		"tenant-a", "quota-gate-t2").Scan(&rejectedID); err != nil {
 		t.Fatalf("read rejected task: %v", err)
 	}
 	rejected, err := repository.GetTask(ctx, "tenant-a", rejectedID)
@@ -236,43 +239,49 @@ func TestTenantQuotaAdmissionGate(t *testing.T) {
 		t.Fatalf("quota rejection recorded %d decisions", decisions)
 	}
 
-	// Settle t2 to its ceiling (window 100): an unbudgeted task is still
-	// admitted at the limit, but any positive ceiling is not.
+	// Settlement does not free reserved headroom (conservative model): with
+	// consumed 40 and reserved 60 the window is at its limit, so only an
+	// unbudgeted task fits and any positive ceiling is rejected.
 	if _, err := repository.SettleTaskUsage(ctx, kernelstore.SettleTaskUsageInput{
-		TenantID: "tenant-a", TaskID: t2.ID, IdempotencyKey: "quota-gate-u2",
-		Usage: kernelstore.TaskBudget{Tokens: 60},
+		TenantID: "tenant-a", TaskID: t1.ID, IdempotencyKey: "quota-gate-u1",
+		Usage: kernelstore.TaskBudget{Tokens: 40},
 	}); err != nil {
-		t.Fatalf("settle t2: %v", err)
+		t.Fatalf("settle t1: %v", err)
 	}
-	if _, err := admitWith("quota-gate-t5", nil); err != nil {
+	if _, err := admitWith("quota-gate-t3", nil); err != nil {
 		t.Fatalf("unbudgeted task rejected at the limit: %v", err)
 	}
-	if _, err := admitWith("quota-gate-t6", &kernelstore.TaskBudget{Tokens: 1}); !errors.Is(err, kernelstore.ErrTenantQuotaExceeded) {
-		t.Fatalf("expected quota rejection for t6, got %v", err)
+	if _, err := admitWith("quota-gate-t4", &kernelstore.TaskBudget{Tokens: 1}); !errors.Is(err, kernelstore.ErrTenantQuotaExceeded) {
+		t.Fatalf("expected reservation rejection for t4, got %v", err)
 	}
 
-	// Settle t1 to its ceiling (window 110, over the limit): now even an
-	// unbudgeted task is rejected.
-	if _, err := repository.SettleTaskUsage(ctx, kernelstore.SettleTaskUsageInput{
-		TenantID: "tenant-a", TaskID: t1.ID, IdempotencyKey: "quota-gate-u3",
-		Usage: kernelstore.TaskBudget{Tokens: 20},
-	}); err != nil {
-		t.Fatalf("settle t1 to ceiling: %v", err)
+	// Terminal release (v0.8): cancelling t1 returns its reserved ceiling,
+	// re-opening headroom for new admissions.
+	if _, err := repository.TransitionTask(ctx, t1.ID, t1.ResourceVersion, domain.TaskCancelled); err != nil {
+		t.Fatalf("cancel t1: %v", err)
 	}
-	if _, err := admitWith("quota-gate-t7", nil); !errors.Is(err, kernelstore.ErrTenantQuotaExceeded) {
-		t.Fatalf("expected quota rejection for over-limit unbudgeted task, got %v", err)
+	usage, err = repository.GetTenantQuotaUsage(ctx, "tenant-a", clock.Now())
+	if err != nil {
+		t.Fatalf("get usage after release: %v", err)
+	}
+	if usage.Reserved.Tokens != 0 || usage.Consumed.Tokens != 40 {
+		t.Fatalf("window after release: reserved=%d consumed=%d, want 0/40", usage.Reserved.Tokens, usage.Consumed.Tokens)
+	}
+	if _, err := admitWith("quota-gate-t5", &kernelstore.TaskBudget{Tokens: 60}); err != nil {
+		t.Fatalf("admit t5 after reservation release: %v", err)
 	}
 
 	// Window rollover reopens the tenant with a fresh window.
 	clock.Advance(24 * time.Hour)
-	if _, err := admitWith("quota-gate-t8", &kernelstore.TaskBudget{Tokens: 60}); err != nil {
-		t.Fatalf("admit t8 in the new window: %v", err)
+	if _, err := admitWith("quota-gate-t6", &kernelstore.TaskBudget{Tokens: 60}); err != nil {
+		t.Fatalf("admit t6 in the new window: %v", err)
 	}
-	usage, err := repository.GetTenantQuotaUsage(ctx, "tenant-a", clock.Now())
+	usage, err = repository.GetTenantQuotaUsage(ctx, "tenant-a", clock.Now())
 	if err != nil {
 		t.Fatalf("get new window usage: %v", err)
 	}
-	if usage.WindowStart != clock.Now().Truncate(24*time.Hour) || !usage.Consumed.Zero() {
+	// The DB returns window_start in the session timezone; compare instants.
+	if !usage.WindowStart.Equal(clock.Now().UTC().Truncate(24*time.Hour)) || !usage.Consumed.Zero() || usage.Reserved.Tokens != 60 {
 		t.Fatalf("unexpected new window usage: %+v", usage)
 	}
 }

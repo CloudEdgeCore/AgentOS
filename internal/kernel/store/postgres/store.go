@@ -149,6 +149,13 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 	if err != nil {
 		return zero, classifyCAS(err, "task", id, expectedVersion)
 	}
+	// Quota reservation release (v0.8): a terminal task returns its reserved
+	// ceiling to the tenant window.
+	if to == domain.TaskFailed || to == domain.TaskCancelled {
+		if err := s.releaseTenantReservation(ctx, tx, updated.TenantID, updated.ID); err != nil {
+			return zero, err
+		}
+	}
 	if err := insertEvent(ctx, tx, updated.TenantID, "Task", updated.ID, updated.ResourceVersion, "Task"+title(string(to)), map[string]any{
 		"taskId": updated.ID, "phase": updated.Phase,
 	}, now, s.newID()); err != nil {
@@ -500,6 +507,11 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = 'COMPLETED'
 		WHERE attempt_id = $2 AND fencing_token = $3 AND released_at IS NULL`, now, attempt.ID.String(), in.FencingToken); err != nil {
 		return zeroRun, zeroTask, classify(err)
+	}
+	// Quota reservation release (v0.8): the task is terminal, so its reserved
+	// ceiling is returned to the tenant window it was admitted in.
+	if err := s.releaseTenantReservation(ctx, tx, task.TenantID, task.ID); err != nil {
+		return zeroRun, zeroTask, err
 	}
 	if err := insertEvent(ctx, tx, run.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunCompleted", map[string]any{
 		"runId": run.ID, "attemptId": attempt.ID, "resultRef": in.ResultRef,

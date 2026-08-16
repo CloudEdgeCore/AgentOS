@@ -2,11 +2,13 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -82,46 +84,102 @@ func (s *Store) GetTenantQuotaUsage(ctx context.Context, tenantID string, at tim
 }
 
 // enforceTenantQuota is the atomic admission gate for tenant aggregate
-// consumption quotas. Inside the DecideAdmission transaction it locks the
-// tenant's current window row and rejects the admission when the window's
-// settled consumption plus the task's own ceiling would exceed any configured
-// limit. The admission controller performs the same check read-only to record
-// a proper TENANT_QUOTA_EXCEEDED decision; this gate closes the race between
-// that read and the commit (concurrent settlements cannot slip in). A tenant
-// without a configured quota is never gated. Under concurrent admissions the
-// gate is exact against settled consumption; a burst admitted in the same
-// instant may overshoot by the sum of their ceilings, after which the window
-// stays closed until it rolls over (consumption only grows within a window).
-func (s *Store) enforceTenantQuota(ctx context.Context, tx pgx.Tx, tenantID string, budget *kernelstore.TaskBudget, now time.Time) error {
+// consumption quotas (v0.8: reservation semantics). Inside the DecideAdmission
+// transaction it upserts and locks the tenant's current window row and
+// rejects the admission when consumed plus the reserved ceilings of in-flight
+// tasks plus the task's own ceiling would exceed any configured limit; on
+// admission it reserves the ceiling in the same locked row, so concurrent
+// admissions serialize and cannot collectively overshoot. The returned
+// window start is recorded on the task's ledger so the reservation is
+// released against the exact window at task terminal. A tenant without a
+// configured quota is never gated. Unbudgeted tasks reserve nothing but are
+// still rejected once consumed plus reserved is already over a limit.
+func (s *Store) enforceTenantQuota(ctx context.Context, tx pgx.Tx, tenantID string, budget *kernelstore.TaskBudget, now time.Time) (*time.Time, error) {
 	var limits kernelstore.TaskBudget
 	var windowSeconds int64
 	err := tx.QueryRow(ctx, `SELECT window_seconds, tokens, cost_usd, tool_calls, wall_seconds
 		FROM tenant_quotas WHERE tenant_id = $1`, tenantID).Scan(
 		&windowSeconds, &limits.Tokens, &limits.CostUSD, &limits.ToolCalls, &limits.WallSeconds)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return classify(err)
+		return nil, classify(err)
 	}
 	windowStart := windowStartAt(now, windowSeconds)
-	var consumed kernelstore.TaskBudget
-	err = tx.QueryRow(ctx, `SELECT consumed_tokens, consumed_cost_usd, consumed_tool_calls, consumed_wall_seconds
+	// Create the window row when it does not exist yet, so every admission
+	// (even the first for a fresh tenant) serializes on the row lock.
+	if _, err := tx.Exec(ctx, `INSERT INTO tenant_consumption_windows (
+		tenant_id, window_start, created_at, updated_at
+	) VALUES ($1, $2, $3, $3)
+	ON CONFLICT (tenant_id, window_start) DO NOTHING`,
+		tenantID, windowStart, now); err != nil {
+		return nil, classify(err)
+	}
+	var consumed, reserved kernelstore.TaskBudget
+	err = tx.QueryRow(ctx, `SELECT consumed_tokens, consumed_cost_usd, consumed_tool_calls, consumed_wall_seconds,
+		reserved_tokens, reserved_cost_usd, reserved_tool_calls, reserved_wall_seconds
 		FROM tenant_consumption_windows WHERE tenant_id = $1 AND window_start = $2 FOR UPDATE`,
 		tenantID, windowStart).Scan(
-		&consumed.Tokens, &consumed.CostUSD, &consumed.ToolCalls, &consumed.WallSeconds)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return classify(err)
+		&consumed.Tokens, &consumed.CostUSD, &consumed.ToolCalls, &consumed.WallSeconds,
+		&reserved.Tokens, &reserved.CostUSD, &reserved.ToolCalls, &reserved.WallSeconds)
+	if err != nil {
+		return nil, classify(err)
 	}
 	var ceiling kernelstore.TaskBudget
 	if budget != nil {
 		ceiling = *budget
 	}
-	if kernelstore.QuotaExceeded(limits, consumed, ceiling) {
-		return fmt.Errorf("%w: tenant=%s window_start=%s limits=%+v consumed=%+v additional=%+v",
-			kernelstore.ErrTenantQuotaExceeded, tenantID, windowStart.Format(time.RFC3339), limits, consumed, ceiling)
+	if kernelstore.QuotaReservationExceeded(limits, consumed, reserved, ceiling) {
+		return nil, fmt.Errorf("%w: tenant=%s window_start=%s limits=%+v consumed=%+v reserved=%+v additional=%+v",
+			kernelstore.ErrTenantQuotaExceeded, tenantID, windowStart.Format(time.RFC3339), limits, consumed, reserved, ceiling)
 	}
-	return nil
+	if ceiling.Zero() {
+		return &windowStart, nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE tenant_consumption_windows SET
+		reserved_tokens = reserved_tokens + $1,
+		reserved_cost_usd = reserved_cost_usd + $2,
+		reserved_tool_calls = reserved_tool_calls + $3,
+		reserved_wall_seconds = reserved_wall_seconds + $4,
+		resource_version = resource_version + 1, updated_at = $5
+		WHERE tenant_id = $6 AND window_start = $7`,
+		ceiling.Tokens, ceiling.CostUSD, ceiling.ToolCalls, ceiling.WallSeconds, now, tenantID, windowStart); err != nil {
+		return nil, classify(err)
+	}
+	return &windowStart, nil
+}
+
+// releaseTenantReservation releases a task's reserved ceiling from the window
+// the task was admitted in, when the task reaches a terminal state (v0.8).
+// It runs inside the caller's transaction. Tasks without a ledger (unbudgeted
+// or rejected) reserve nothing and are no-ops.
+func (s *Store) releaseTenantReservation(ctx context.Context, tx pgx.Tx, tenantID string, taskID uuid.UUID) error {
+	var windowStart sql.NullTime
+	var ceiling kernelstore.TaskBudget
+	err := tx.QueryRow(ctx, `SELECT quota_reserved_window_start,
+		reserved_tokens, reserved_cost_usd, reserved_tool_calls, reserved_wall_seconds
+		FROM task_budget_ledgers WHERE tenant_id = $1 AND task_id = $2`,
+		tenantID, taskID.String()).Scan(
+		&windowStart, &ceiling.Tokens, &ceiling.CostUSD, &ceiling.ToolCalls, &ceiling.WallSeconds)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return classify(err)
+	}
+	if !windowStart.Valid || ceiling.Zero() {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `UPDATE tenant_consumption_windows SET
+		reserved_tokens = GREATEST(0, reserved_tokens - $1),
+		reserved_cost_usd = GREATEST(0, reserved_cost_usd - $2),
+		reserved_tool_calls = GREATEST(0, reserved_tool_calls - $3),
+		reserved_wall_seconds = GREATEST(0, reserved_wall_seconds - $4),
+		resource_version = resource_version + 1, updated_at = $5
+		WHERE tenant_id = $6 AND window_start = $7`,
+		ceiling.Tokens, ceiling.CostUSD, ceiling.ToolCalls, ceiling.WallSeconds, s.now(), tenantID, windowStart.Time)
+	return classify(err)
 }
 
 // bumpTenantWindow appends one usage settlement to the tenant's current
@@ -180,12 +238,15 @@ func scanTenantQuota(row scanner) (kernelstore.TenantQuota, error) {
 
 const tenantWindowUsageColumns = `
 	tenant_id, window_start, consumed_tokens, consumed_cost_usd,
-	consumed_tool_calls, consumed_wall_seconds, resource_version, updated_at`
+	consumed_tool_calls, consumed_wall_seconds,
+	reserved_tokens, reserved_cost_usd, reserved_tool_calls, reserved_wall_seconds,
+	resource_version, updated_at`
 
 func scanTenantWindowUsage(row scanner) (kernelstore.TenantWindowUsage, error) {
 	var usage kernelstore.TenantWindowUsage
 	if err := row.Scan(&usage.TenantID, &usage.WindowStart,
 		&usage.Consumed.Tokens, &usage.Consumed.CostUSD, &usage.Consumed.ToolCalls, &usage.Consumed.WallSeconds,
+		&usage.Reserved.Tokens, &usage.Reserved.CostUSD, &usage.Reserved.ToolCalls, &usage.Reserved.WallSeconds,
 		&usage.ResourceVersion, &usage.UpdatedAt); err != nil {
 		return usage, err
 	}

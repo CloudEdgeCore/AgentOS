@@ -1475,6 +1475,7 @@ type tenantQuotaResponse struct {
 	WindowStart     *time.Time   `json:"windowStart,omitempty"`
 	Limits          usageSummary `json:"limits"`
 	Usage           usageSummary `json:"usage"`
+	Reserved        usageSummary `json:"reserved"`
 	ResourceVersion int64        `json:"resourceVersion"`
 	UpdatedAt       time.Time    `json:"updatedAt"`
 	TraceID         string       `json:"traceId"`
@@ -1606,6 +1607,10 @@ func (h *Handler) writeQuota(writer http.ResponseWriter, status int, quota store
 		Usage: usageSummary{
 			Tokens: usage.Consumed.Tokens, CostUSD: usage.Consumed.CostUSD,
 			ToolCalls: usage.Consumed.ToolCalls, WallSeconds: usage.Consumed.WallSeconds,
+		},
+		Reserved: usageSummary{
+			Tokens: usage.Reserved.Tokens, CostUSD: usage.Reserved.CostUSD,
+			ToolCalls: usage.Reserved.ToolCalls, WallSeconds: usage.Reserved.WallSeconds,
 		},
 		ResourceVersion: quota.ResourceVersion, UpdatedAt: quota.UpdatedAt.UTC(), TraceID: traceID,
 	}

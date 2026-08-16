@@ -299,6 +299,53 @@ func TestControllerAdmitsWithinTenantQuota(t *testing.T) {
 	}
 }
 
+// TestControllerRejectsWhenReservedCeilingsFillTheWindow proves the v0.8
+// reservation gate at the controller level: reserved ceilings of in-flight
+// tasks count against the limit exactly like consumed usage.
+func TestControllerRejectsWhenReservedCeilingsFillTheWindow(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	quotas := &fakeQuotaStore{
+		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 100}},
+		usage: store.TenantWindowUsage{
+			TenantID: "tenant-a",
+			Consumed: store.TaskBudget{Tokens: 0},
+			Reserved: store.TaskBudget{Tokens: 60},
+		},
+	}
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	WithTenantQuotas(quotas)(controller)
+	repository.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":60,"costUsd":1,"toolCalls":1,"wallSeconds":1},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("Reconcile() = %d, %v", processed, err)
+	}
+	if decision := repository.lastDecision(); decision.Admit || decision.ReasonCode != "TENANT_QUOTA_EXCEEDED" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+
+	// The same window admits when the reservation leaves room.
+	quotas.usage.Reserved = store.TaskBudget{Tokens: 30}
+	repository2 := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	controller2 := NewController(repository2, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	WithTenantQuotas(quotas)(controller2)
+	repository2.claims = []store.TaskClaim{{Task: taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":60,"costUsd":1,"toolCalls":1,"wallSeconds":1},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)}}
+	if _, err := controller2.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if decision := repository2.lastDecision(); !decision.Admit {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
 // TestControllerAdmitsWithoutConfiguredQuota proves the quota gate is a
 // no-op when the quota store reports no configuration for the tenant.
 func TestControllerAdmitsWithoutConfiguredQuota(t *testing.T) {
