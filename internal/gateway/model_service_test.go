@@ -24,7 +24,7 @@ func TestModelServiceBeginSettleFinish(t *testing.T) {
 
 	begun, err := client.Begin(context.Background(), &modelv1alpha1.BeginRequest{
 		Identity: &modelv1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: call.AttemptID.String(), FencingToken: 1},
-		TaskId: uuid.New().String(), RunId: uuid.New().String(), AgentVersionRef: "agent@1",
+		TaskId:   uuid.New().String(), RunId: uuid.New().String(), AgentVersionRef: "agent@1",
 		ModelRef: "openai/gpt-4o", IdempotencyKey: "model-1",
 	})
 	if err != nil || begun.GetCallId() != call.ID.String() {
@@ -33,14 +33,14 @@ func TestModelServiceBeginSettleFinish(t *testing.T) {
 
 	if _, err := client.Settle(context.Background(), &modelv1alpha1.SettleRequest{
 		Identity: &modelv1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: call.AttemptID.String(), FencingToken: 1},
-		CallId: call.ID.String(), Sequence: 1, OutputTokens: 100,
+		CallId:   call.ID.String(), Sequence: 1, OutputTokens: 100,
 	}); err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
 
 	finished, err := client.Finish(context.Background(), &modelv1alpha1.FinishRequest{
 		Identity: &modelv1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: call.AttemptID.String(), FencingToken: 1},
-		CallId: call.ID.String(), ExpectedVersion: 1, Status: "COMPLETED",
+		CallId:   call.ID.String(), ExpectedVersion: 1, Status: "COMPLETED",
 		InputTokens: 100, OutputTokens: 200, ProviderRequestId: "req-1", FinishReason: "stop",
 	})
 	if err != nil {
@@ -60,7 +60,7 @@ func TestModelServiceMapsBudgetHardStop(t *testing.T) {
 	client := newModelTestClient(t, &fakeModelInvoker{call: call, hardStop: true})
 	_, err := client.Settle(context.Background(), &modelv1alpha1.SettleRequest{
 		Identity: &modelv1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: call.AttemptID.String(), FencingToken: 1},
-		CallId: call.ID.String(), Sequence: 1, OutputTokens: 999,
+		CallId:   call.ID.String(), Sequence: 1, OutputTokens: 999,
 	})
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("hard stop: %v, want ResourceExhausted", err)
@@ -80,9 +80,9 @@ func TestModelServiceRejectsForeignTenant(t *testing.T) {
 }
 
 type fakeModelInvoker struct {
-	call      store.ModelCall
-	hardStop  bool
-	finished  bool
+	call     store.ModelCall
+	hardStop bool
+	finished bool
 }
 
 func (f *fakeModelInvoker) Begin(context.Context, model.BeginInput) (model.BeginResult, error) {

@@ -43,15 +43,15 @@ type Options struct {
 type Keeper struct {
 	opts Options
 
-	mu            sync.Mutex
-	leaseVersion  int64
+	mu             sync.Mutex
+	leaseVersion   int64
 	attemptVersion int64
-	cancelled     bool
-	fenceErr      error
+	cancelled      bool
+	fenceErr       error
 
-	stop  chan struct{}
-	done  chan struct{}
-	once  sync.Once
+	stop chan struct{}
+	done chan struct{}
+	once sync.Once
 }
 
 // Start begins renewing the lease and returns the keeper plus the execution
@@ -62,11 +62,11 @@ type Keeper struct {
 func Start(parent context.Context, opts Options, initialLeaseVersion, initialAttemptVersion int64) (*Keeper, context.Context) {
 	execCtx, cancelExec := context.WithCancel(parent)
 	k := &Keeper{
-		opts:          opts,
-		leaseVersion:  initialLeaseVersion,
+		opts:           opts,
+		leaseVersion:   initialLeaseVersion,
 		attemptVersion: initialAttemptVersion,
-		stop:          make(chan struct{}),
-		done:          make(chan struct{}),
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	go k.loop(parent, cancelExec)
 	return k, execCtx

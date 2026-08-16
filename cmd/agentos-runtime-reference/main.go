@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
 	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
 	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
 	"github.com/bian-cloud-skill/agentos/internal/mcp"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"

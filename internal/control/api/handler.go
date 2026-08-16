@@ -431,10 +431,10 @@ func (h *Handler) readUsage(ctx context.Context, tenantID string, id uuid.UUID) 
 }
 
 type createAgentVersionRequest struct {
-	Name      string            `json:"name"`
-	Version   string            `json:"version"`
-	Namespace string            `json:"namespace"`
-	Spec      json.RawMessage   `json:"spec"`
+	Name      string          `json:"name"`
+	Version   string          `json:"version"`
+	Namespace string          `json:"namespace"`
+	Spec      json.RawMessage `json:"spec"`
 	// Package is the signed Agent Package (ADR-010). With publish admission
 	// installed it is required; without it, a presented package is still
 	// verified fail-closed.
@@ -442,21 +442,21 @@ type createAgentVersionRequest struct {
 }
 
 type agentVersionResponse struct {
-	APIVersion      string          `json:"apiVersion"`
-	Kind            string          `json:"kind"`
-	ID              string          `json:"id"`
-	TenantID        string          `json:"tenantId"`
-	Namespace       string          `json:"namespace"`
-	Name            string          `json:"name"`
-	Version         string          `json:"version"`
-	Ref             string          `json:"ref"`
-	Spec            json.RawMessage `json:"spec"`
-	SpecDigest      string          `json:"specDigest"`
-	ResourceVersion int64           `json:"resourceVersion"`
-	CreatedAt       time.Time       `json:"createdAt"`
-	TraceID         string          `json:"traceId"`
-	PackageKeyID    string          `json:"packageKeyId,omitempty"`
-	PackageManifestDigest string    `json:"packageManifestDigest,omitempty"`
+	APIVersion            string          `json:"apiVersion"`
+	Kind                  string          `json:"kind"`
+	ID                    string          `json:"id"`
+	TenantID              string          `json:"tenantId"`
+	Namespace             string          `json:"namespace"`
+	Name                  string          `json:"name"`
+	Version               string          `json:"version"`
+	Ref                   string          `json:"ref"`
+	Spec                  json.RawMessage `json:"spec"`
+	SpecDigest            string          `json:"specDigest"`
+	ResourceVersion       int64           `json:"resourceVersion"`
+	CreatedAt             time.Time       `json:"createdAt"`
+	TraceID               string          `json:"traceId"`
+	PackageKeyID          string          `json:"packageKeyId,omitempty"`
+	PackageManifestDigest string          `json:"packageManifestDigest,omitempty"`
 }
 
 func (h *Handler) createAgentVersion(writer http.ResponseWriter, request *http.Request) {

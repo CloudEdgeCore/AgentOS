@@ -26,9 +26,9 @@ type Spec struct {
 // ModelCallScript is one deterministic model invocation with pre-declared
 // usage, metered and hard-stopped by the Model Gateway.
 type ModelCallScript struct {
-	ModelRef      string `json:"modelRef"`
-	InputTokens   int64  `json:"inputTokens,omitempty"`
-	OutputTokens  int64  `json:"outputTokens,omitempty"`
+	ModelRef       string `json:"modelRef"`
+	InputTokens    int64  `json:"inputTokens,omitempty"`
+	OutputTokens   int64  `json:"outputTokens,omitempty"`
 	IdempotencyKey string `json:"idempotencyKey"`
 }
 

@@ -56,7 +56,7 @@ func (s *ModelService) Begin(ctx context.Context, request *modelv1alpha1.BeginRe
 	}
 	result, err := s.invoker.Begin(ctx, model.BeginInput{
 		TenantID: request.GetIdentity().GetTenantId(), TaskID: taskID, RunID: runID, AttemptID: attemptID,
-		FencingToken: request.GetIdentity().GetFencingToken(),
+		FencingToken:    request.GetIdentity().GetFencingToken(),
 		AgentVersionRef: request.GetAgentVersionRef(), ModelRef: request.GetModelRef(),
 		IdempotencyKey: request.GetIdempotencyKey(),
 	})

@@ -55,24 +55,24 @@ func (d Digest) Verify(content []byte) bool {
 // shape, v0.3 subset): the build workflow identity, the git commit, and the
 // builder. Production admission checks workflow allow-listing on this field.
 type Provenance struct {
-	Builder         string    `json:"builder"`
-	BuildWorkflow   string    `json:"buildWorkflow"`
-	GitCommit       string    `json:"gitCommit"`
-	BuiltAt         time.Time `json:"builtAt"`
+	Builder       string    `json:"builder"`
+	BuildWorkflow string    `json:"buildWorkflow"`
+	GitCommit     string    `json:"gitCommit"`
+	BuiltAt       time.Time `json:"builtAt"`
 }
 
 // Manifest is the canonical, signed package document.
 type Manifest struct {
-	Schema          string         `json:"schema"`
-	AgentVersionRef string         `json:"agentVersionRef"`
-	SpecDigest      Digest         `json:"specDigest"`
+	Schema          string          `json:"schema"`
+	AgentVersionRef string          `json:"agentVersionRef"`
+	SpecDigest      Digest          `json:"specDigest"`
 	Spec            json.RawMessage `json:"spec"`
-	RuntimeLock     []Digest       `json:"runtimeLock"`
-	ToolLock        []Digest       `json:"toolLock"`
-	Permissions     Digest         `json:"permissions"`
-	MemorySchema    Digest         `json:"memorySchema"`
-	SBOM            Digest         `json:"sbom"`
-	Provenance      Provenance     `json:"provenance"`
+	RuntimeLock     []Digest        `json:"runtimeLock"`
+	ToolLock        []Digest        `json:"toolLock"`
+	Permissions     Digest          `json:"permissions"`
+	MemorySchema    Digest          `json:"memorySchema"`
+	SBOM            Digest          `json:"sbom"`
+	Provenance      Provenance      `json:"provenance"`
 }
 
 // Validate checks shape constraints; digest correctness is verified by the

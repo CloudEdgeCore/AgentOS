@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
+	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
 	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
