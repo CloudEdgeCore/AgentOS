@@ -58,29 +58,37 @@ type cacheEntry struct {
 	attempts int
 }
 
-// Option configures the broker.
-type Option func(*Broker)
+// sharedOptions are the settings both broker flavors accept.
+type sharedOptions struct {
+	namespace string
+	mount     string
+	cacheTTL  time.Duration
+	client    *http.Client
+}
+
+// Option configures a broker.
+type Option func(*sharedOptions)
 
 // WithNamespace sets the OpenBao namespace header (enterprise namespaces /
 // OpenBao namespaces when enabled).
 func WithNamespace(namespace string) Option {
-	return func(b *Broker) { b.namespace = namespace }
+	return func(o *sharedOptions) { o.namespace = namespace }
 }
 
 // WithMount overrides the KV v2 mount path (default "secret").
 func WithMount(mount string) Option {
-	return func(b *Broker) { b.mount = strings.Trim(mount, "/") }
+	return func(o *sharedOptions) { o.mount = strings.Trim(mount, "/") }
 }
 
 // WithCacheTTL bounds how long an issued handle is reused for the same scope
 // (default 30 seconds). Zero disables caching.
 func WithCacheTTL(ttl time.Duration) Option {
-	return func(b *Broker) { b.cacheTTL = ttl }
+	return func(o *sharedOptions) { o.cacheTTL = ttl }
 }
 
 // WithHTTPClient injects the HTTP client (tests and custom transport).
 func WithHTTPClient(client *http.Client) Option {
-	return func(b *Broker) { b.client = client }
+	return func(o *sharedOptions) { o.client = client }
 }
 
 // NewBroker connects the broker to an OpenBao endpoint with the given token.
@@ -91,17 +99,19 @@ func NewBroker(addr, token string, options ...Option) (*Broker, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("openbao token is required")
 	}
-	broker := &Broker{
-		addr:     strings.TrimRight(addr, "/"),
-		token:    token,
-		mount:    DefaultMount,
-		client:   &http.Client{Timeout: 10 * time.Second},
-		cacheTTL: 30 * time.Second,
-		now:      time.Now,
-		cache:    map[string]cacheEntry{},
-	}
+	config := sharedOptions{mount: DefaultMount, cacheTTL: 30 * time.Second, client: &http.Client{Timeout: 10 * time.Second}}
 	for _, option := range options {
-		option(broker)
+		option(&config)
+	}
+	broker := &Broker{
+		addr:      strings.TrimRight(addr, "/"),
+		token:     token,
+		namespace: config.namespace,
+		mount:     config.mount,
+		client:    config.client,
+		cacheTTL:  config.cacheTTL,
+		now:       time.Now,
+		cache:     map[string]cacheEntry{},
 	}
 	if broker.client == nil {
 		broker.client = &http.Client{Timeout: 10 * time.Second}

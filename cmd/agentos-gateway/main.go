@@ -43,6 +43,7 @@ func main() {
 	baoMount := flag.String("bao-mount", bao.DefaultMount, "OpenBao KV v2 mount (default secret)")
 	baoNamespace := flag.String("bao-namespace", "", "optional OpenBao namespace header")
 	baoCacheTTL := flag.Duration("bao-cache-ttl", 30*time.Second, "issued secret handle cache TTL")
+	baoDynamicRole := flag.String("bao-dynamic-role", "", "OpenBao database role for dynamic credentials (database/creds/<role>); takes precedence over KV reads")
 	flag.Parse()
 	if *databaseURL == "" || strings.TrimSpace(*tenantID) == "" || !*devMode {
 		slog.Error("database URL, fixed tenant, and explicit -dev-mode are required")
@@ -121,20 +122,54 @@ func main() {
 		if *baoCacheTTL > 0 {
 			options = append(options, bao.WithCacheTTL(*baoCacheTTL))
 		}
-		broker, err := bao.NewBroker(*baoAddr, *baoToken, options...)
-		if err != nil {
-			slog.Error("configure OpenBao Secret Broker", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
-		if err := broker.Ping(pingCtx); err != nil {
+		if strings.TrimSpace(*baoDynamicRole) != "" {
+			broker, err := bao.NewDynamicBroker(*baoAddr, *baoToken, *baoDynamicRole, options...)
+			if err != nil {
+				slog.Error("configure OpenBao dynamic Secret Broker", "error", err)
+				os.Exit(1)
+			}
+			secrets = broker
+			// The janitor keeps leases alive while the gateway runs and
+			// revokes them on shutdown; credentials never outlive the
+			// gateway process.
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						revokeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+						defer cancel()
+						if err := broker.Close(revokeCtx); err != nil {
+							slog.Error("revoke OpenBao leases on shutdown", "error", err)
+						}
+						return
+					case <-ticker.C:
+						janitorCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+						if err := broker.Janitor(janitorCtx); err != nil {
+							slog.Error("OpenBao lease janitor", "error", err)
+						}
+						cancel()
+					}
+				}
+			}()
+			slog.Info("OpenBao dynamic Secret Broker active", "address", *baoAddr, "role", *baoDynamicRole, "cacheTtl", *baoCacheTTL)
+		} else {
+			broker, err := bao.NewBroker(*baoAddr, *baoToken, options...)
+			if err != nil {
+				slog.Error("configure OpenBao Secret Broker", "error", err)
+				os.Exit(1)
+			}
+			pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+			if err := broker.Ping(pingCtx); err != nil {
+				cancelPing()
+				slog.Error("OpenBao Secret Broker is not reachable", "error", err)
+				os.Exit(1)
+			}
 			cancelPing()
-			slog.Error("OpenBao Secret Broker is not reachable", "error", err)
-			os.Exit(1)
+			secrets = broker
+			slog.Info("OpenBao Secret Broker active", "address", *baoAddr, "mount", *baoMount, "cacheTtl", *baoCacheTTL)
 		}
-		cancelPing()
-		secrets = broker
-		slog.Info("OpenBao Secret Broker active", "address", *baoAddr, "mount", *baoMount, "cacheTtl", *baoCacheTTL)
 	} else {
 		secrets = &gateway.DevSecretBroker{}
 		slog.Warn("Secret Broker is the development stub: no real credentials are issued")
