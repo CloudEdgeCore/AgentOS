@@ -2,7 +2,7 @@
 
 Agent OS is a system software layer for securely publishing, scheduling, executing, recovering, governing, and auditing heterogeneous AI agents.
 
-The project is in its v0.5 Runtime Hardening & Scale-Readiness phase. The
+The project is in its v0.6 Multi-tenant Scale & Capacity Evidence phase. The
 v0.1 kernel establishes the invariants that every later runtime provider and
 gateway must preserve — persistent `Task`/`Run`/`Attempt` lifecycles, an
 immutable `AgentVersion` registry, budget ledgers, lease/fencing tokens,
@@ -37,6 +37,26 @@ the OCI/gVisor checklist code surface and the scale-readiness items:
   in the signed Agent Package pipeline;
 - artifact store aggregate quotas and retention garbage collection;
 - parallel Reconcile with bounded worker sets in all three controllers.
+
+The v0.6 Multi-tenant Scale & Capacity Evidence phase (delivery notes in
+[`docs/v0.6-multi-tenant-scale.md`](docs/v0.6-multi-tenant-scale.md)) adds
+the multi-tenant scaling surface and its capacity evidence:
+
+- per-tenant aggregate consumption quotas: windowed token/cost/tool-call/
+  wall-time limits settled exactly from the task settlement stream, with an
+  atomic admission gate (`TENANT_QUOTA_EXCEEDED`) and a `GET/PUT/DELETE
+  /v1/quota` control API scoped to the principal tenant;
+- runtime-aware pool health: placement derives pool readiness from lease
+  heartbeat freshness, so pools whose worker stopped renewing are rejected
+  (`POOL_NOT_READY`) instead of stranding attempts;
+- O6 scheduling backoff: a task no pool can place releases its claim
+  immediately and defers the next attempt with exponential backoff recorded
+  on the task (shared across controller instances);
+- dual-instance controller and outbox concurrency regression tests proving
+  zero re-processing and zero dropped events under real Postgres contention;
+- a repeatable 1,000-task control-plane pipeline capacity baseline
+  (enqueue → admit → schedule → complete) reporting per-phase throughput and
+  latency percentiles as the evidence for v0.6+ middleware decisions.
 
 The complete architecture and technology baseline live in [`docs/`](./docs/).
 
