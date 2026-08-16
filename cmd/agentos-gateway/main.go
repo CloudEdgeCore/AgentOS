@@ -19,6 +19,7 @@ import (
 	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
 	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/gateway"
+	"github.com/bian-cloud-skill/agentos/internal/gateway/bao"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/model"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
@@ -37,6 +38,11 @@ func main() {
 	tenantID := flag.String("tenant", "", "fixed development tenant")
 	seedDevTools := flag.Bool("seed-dev-tools", false, "idempotently register the development echo.dev tool")
 	devMode := flag.Bool("dev-mode", false, "acknowledge the development executor and fixed tenant")
+	baoAddr := flag.String("bao-addr", "", "OpenBao address for the Secret Broker (e.g. http://127.0.0.1:58200)")
+	baoToken := flag.String("bao-token", "", "OpenBao token with read access to the agentos KV v2 paths")
+	baoMount := flag.String("bao-mount", bao.DefaultMount, "OpenBao KV v2 mount (default secret)")
+	baoNamespace := flag.String("bao-namespace", "", "optional OpenBao namespace header")
+	baoCacheTTL := flag.Duration("bao-cache-ttl", 30*time.Second, "issued secret handle cache TTL")
 	flag.Parse()
 	if *databaseURL == "" || strings.TrimSpace(*tenantID) == "" || !*devMode {
 		slog.Error("database URL, fixed tenant, and explicit -dev-mode are required")
@@ -99,7 +105,40 @@ func main() {
 	}
 
 	executor := &gateway.DevExecutor{MaxOutputBytes: 1 << 20}
-	secrets := &gateway.DevSecretBroker{}
+	var secrets tool.SecretBroker
+	if strings.TrimSpace(*baoAddr) != "" {
+		if strings.TrimSpace(*baoToken) == "" {
+			slog.Error("-bao-addr requires -bao-token")
+			os.Exit(2)
+		}
+		var options []bao.Option
+		if *baoMount != bao.DefaultMount {
+			options = append(options, bao.WithMount(*baoMount))
+		}
+		if strings.TrimSpace(*baoNamespace) != "" {
+			options = append(options, bao.WithNamespace(*baoNamespace))
+		}
+		if *baoCacheTTL > 0 {
+			options = append(options, bao.WithCacheTTL(*baoCacheTTL))
+		}
+		broker, err := bao.NewBroker(*baoAddr, *baoToken, options...)
+		if err != nil {
+			slog.Error("configure OpenBao Secret Broker", "error", err)
+			os.Exit(1)
+		}
+		pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+		if err := broker.Ping(pingCtx); err != nil {
+			cancelPing()
+			slog.Error("OpenBao Secret Broker is not reachable", "error", err)
+			os.Exit(1)
+		}
+		cancelPing()
+		secrets = broker
+		slog.Info("OpenBao Secret Broker active", "address", *baoAddr, "mount", *baoMount, "cacheTtl", *baoCacheTTL)
+	} else {
+		secrets = &gateway.DevSecretBroker{}
+		slog.Warn("Secret Broker is the development stub: no real credentials are issued")
+	}
 	decisionGateway := tool.NewGateway(policyEngine, repository, repository, repository, executor, secrets)
 	modelGateway := model.NewGateway(policyEngine, repository, repository, repository)
 	server := grpc.NewServer(grpcx.ServerOptions()...)
