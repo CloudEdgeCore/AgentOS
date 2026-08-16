@@ -61,14 +61,20 @@ runsc 本身提供 syscall 隔离,但 Provider 层仍需完成:
 
 1. Admission 强制:image 必须 digest 固定;`RuntimeClass=oci` 的 workload
    必须有显式 CPU/内存/工作区限制(本代码零值 = 无限制,Admission 不得放行)。
+   **v0.5 已落地**:`ContainerClasses` 准入拒绝零值限额,worker 独立强制
+   spec 驱动限额,runsc 经 ctr `--cpu-quota`/`--memory` 应用(命令面待
+   Linux CI 复核)。
 2. runsc/containerd 配置:user namespace、只读 rootfs、capability drop、
    seccomp、cgroup v2 限额、NetworkPolicy/egress proxy。
+   **状态:未落地,必须在 Linux CI 验证。**
 3. 孤儿容器回收:worker 崩溃后遗留的 `agentos-*` 容器由启动时预检清理,
-   并配合 lease 过期恢复(ADR-007)。
+   并配合 lease 过期恢复(ADR-007)。**v0.5 已落地**(代码面,ctr 命令面待
+   Linux CI 复核)。
 4. 输出治理:stdout 有界丢弃 → spool 到 Artifact;结果文档只含结构化字段,
-   不携带 Secret 或未脱敏输出。
+   不携带 Secret 或未脱敏输出。**v0.5 已落地**:`OutputSpooler` +
+   `SpoolCap` 有界 spool,结果文档记录 `stdoutRef`/`stdoutTruncated`。
 5. 开发传输仅 loopback + 固定 tenant(与 reference Provider 相同约束);
-   生产暴露依赖 SPIFFE mTLS(ADR-006)。
+   生产暴露依赖 SPIFFE mTLS(ADR-006)。**v0.3 已落地**。
 
 ## 5. 验收标准(接入 Linux CI 后)
 
