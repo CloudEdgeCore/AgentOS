@@ -126,6 +126,141 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '401': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/memories:
+    post:
+      operationId: createMemory
+      summary: Persist one canonical memory record
+      description: >-
+        Writes a memory entry under a stable (namespace, key) pair. An
+        identical document replays idempotently; a different document under
+        the same key is a correction (new resource version) and resurrects a
+        tombstoned record. Content is embedded by the server unless an
+        embedding is supplied.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMemoryRequest'
+      responses:
+        '201':
+          description: A new memory record was persisted.
+          headers:
+            Location:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '200':
+          description: The identical document already exists.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, const: 'true' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: searchMemory
+      summary: Hybrid keyword/vector search over the tenant's memory
+      description: >-
+        Retrieves live (non-tombstoned, unexpired) records scored by FTS and
+        trigram similarity for the keyword query and cosine distance for the
+        optional embedding. The tenant scope and sensitivity filter are
+        applied before scoring (ADR-009).
+      parameters:
+        - name: query
+          in: query
+          required: false
+          description: Keyword query (FTS + trigram).
+          schema: { type: string }
+        - name: embedding
+          in: query
+          required: false
+          description: Optional JSON array of 384 floats; vector search component.
+          schema: { type: string }
+        - name: namespace
+          in: query
+          required: false
+          schema: { type: string }
+        - name: sensitivity
+          in: query
+          required: false
+          schema: { type: string, enum: [internal, confidential, restricted] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: Ranked memory records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryList'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /v1/memories/{memoryId}:
+    get:
+      operationId: getMemory
+      summary: Read one memory record (tombstone state included)
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The current memory record.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: tombstoneMemory
+      summary: Soft-delete one memory record (deletion intent survives)
+      description: >-
+        CAS-versioned tombstone: the record disappears from search while its
+        deletion intent remains observable and auditable (ADR-009).
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The tombstoned memory record.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
   /v1/agent-versions:
     post:
       operationId: createAgentVersion
@@ -404,6 +539,69 @@ components:
           description: Resource version of the emitted snapshot.
         data:
           $ref: '#/components/schemas/Task'
+    CreateMemoryRequest:
+      type: object
+      additionalProperties: false
+      required: [namespace, key, contentType, content]
+      properties:
+        namespace: { type: string, minLength: 1, maxLength: 255 }
+        key: { type: string, minLength: 1, maxLength: 255, description: 'Stable logical key; identical documents replay, different documents correct.' }
+        contentType: { type: string, minLength: 1, maxLength: 255 }
+        content: { type: string, minLength: 1, maxLength: 262144 }
+        sensitivity:
+          type: string
+          enum: [internal, confidential, restricted]
+          default: internal
+        provenance:
+          type: object
+          additionalProperties: true
+          description: Free-form provenance document (e.g. source agent version).
+        retentionUntil: { type: [string, 'null'], format: date-time, description: Optional retention deadline; expired records are excluded from retrieval. }
+        embedding:
+          type: array
+          items: { type: number }
+          description: Optional caller-supplied 384-dimension embedding; the server embeds content otherwise.
+        sourceTaskId: { type: [string, 'null'], format: uuid }
+        sourceRunId: { type: [string, 'null'], format: uuid }
+        sourceAttemptId: { type: [string, 'null'], format: uuid }
+    Memory:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, id, tenantId, namespace, key, contentType, content, embeddingProvider, sensitivity, resourceVersion, createdAt, updatedAt, traceId]
+      properties:
+        apiVersion: { type: string, const: agentos.dev/v1alpha1 }
+        kind: { type: string, const: Memory }
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        namespace: { type: string }
+        key: { type: string }
+        contentType: { type: string }
+        content: { type: string }
+        embeddingProvider: { type: string, description: Which embedding service produced the vector. }
+        sensitivity: { type: string, enum: [internal, confidential, restricted] }
+        provenance: { type: object, additionalProperties: true }
+        sourceTaskId: { type: [string, 'null'], format: uuid }
+        sourceRunId: { type: [string, 'null'], format: uuid }
+        sourceAttemptId: { type: [string, 'null'], format: uuid }
+        retentionUntil: { type: [string, 'null'], format: date-time }
+        tombstoneAt: { type: [string, 'null'], format: date-time, description: Soft-deletion timestamp; the record is excluded from search. }
+        supersededBy: { type: [string, 'null'], format: uuid }
+        resourceVersion: { type: integer, format: int64, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
+    MemoryList:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, memories, traceId]
+      properties:
+        apiVersion: { type: string, const: 'agentos.dev/v1alpha1' }
+        kind: { type: string, const: MemoryList }
+        memories:
+          type: array
+          items:
+            $ref: '#/components/schemas/Memory'
+        traceId: { type: string, format: uuid }
     ToolDescriptor:
       type: object
       additionalProperties: false

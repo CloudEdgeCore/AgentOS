@@ -17,12 +17,13 @@ import (
 	"github.com/bian-cloud-skill/agentos/internal/control/auth"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/google/uuid"
 )
 
 func TestCreateTaskRequiresIdentityAndIdempotency(t *testing.T) {
-	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore(), newMemoryStore())
+	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore(), newMemoryStore(), newMemoryStore())
 	body := []byte(`{"agentVersionRef":"agent@1","goal":"test","namespace":"default","spec":{}}`)
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/tasks", bytes.NewReader(body))
@@ -49,7 +50,7 @@ func TestCreateTaskIsStrictAndIdempotent(t *testing.T) {
 	backend := newMemoryStore()
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend, backend),
+		controlapi.NewHandler(backend, backend, backend, backend),
 	)
 	body := []byte(`{"agentVersionRef":"agent@1","goal":"test","namespace":"default","spec":{"runtimeClass":"oci"}}`)
 
@@ -107,7 +108,7 @@ func TestGetTaskDoesNotCrossTenantBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	handler := controlapi.NewHandler(backend, backend, backend)
+	handler := controlapi.NewHandler(backend, backend, backend, backend)
 
 	owner := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, handler)
 	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String(), nil)
@@ -135,7 +136,7 @@ func TestCancelTaskRequiresCurrentETag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend))
+	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend, backend))
 	request := httptest.NewRequest(http.MethodPost, "/v1/tasks/"+created.Task.ID.String()+":cancel", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -163,7 +164,7 @@ func TestPublishAgentVersionIsStrictAndIdempotent(t *testing.T) {
 	backend := newMemoryStore()
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend, backend),
+		controlapi.NewHandler(backend, backend, backend, backend),
 	)
 	spec := []byte(`{"runtimeClassPolicy":{"allowed":["oci"],"preferred":"oci"},"lifecycle":{"maxAttempts":5}}`)
 	first := performPublish(handler, spec, "publish-1")
@@ -230,7 +231,7 @@ func TestGetAgentVersionDoesNotCrossTenantBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed agent version: %v", err)
 	}
-	handler := controlapi.NewHandler(backend, backend, backend)
+	handler := controlapi.NewHandler(backend, backend, backend, backend)
 
 	owner := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, handler)
 	request := httptest.NewRequest(http.MethodGet, "/v1/agent-versions/"+published.AgentVersion.ID.String(), nil)
@@ -286,7 +287,7 @@ func TestGetTaskReportsBudgetUsage(t *testing.T) {
 		Consumed:  store.TaskBudget{Tokens: 60, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 30},
 		Exhausted: true, ResourceVersion: 2, UpdatedAt: now,
 	})
-	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend))
+	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend, backend))
 	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+created.Task.ID.String(), nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -316,7 +317,7 @@ type usageResponse struct {
 }
 
 func TestRoutingFailuresRemainStructured(t *testing.T) {
-	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore(), newMemoryStore())
+	handler := controlapi.NewHandler(newMemoryStore(), newMemoryStore(), newMemoryStore(), newMemoryStore())
 	request := httptest.NewRequest(http.MethodDelete, "/v1/tasks", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -365,6 +366,7 @@ type memoryStore struct {
 	budgets   map[uuid.UUID]store.TaskBudgetStatus
 	tools     []store.ToolDescriptor
 	approvals map[uuid.UUID]store.ToolApproval
+	memories  map[uuid.UUID]store.MemoryRecord
 }
 
 func newMemoryStore() *memoryStore {
@@ -372,6 +374,7 @@ func newMemoryStore() *memoryStore {
 		byID: map[uuid.UUID]store.Task{}, byKey: map[string]uuid.UUID{},
 		hashes: map[string][32]byte{}, budgets: map[uuid.UUID]store.TaskBudgetStatus{},
 		approvals: map[uuid.UUID]store.ToolApproval{},
+		memories:  map[uuid.UUID]store.MemoryRecord{},
 	}
 }
 
@@ -536,6 +539,111 @@ func (m *memoryStore) setBudget(id uuid.UUID, status store.TaskBudgetStatus) {
 	m.budgets[id] = status
 }
 
+// MemoryAPI methods: the fake mirrors the canonical store semantics —
+// idempotent (tenant, namespace, key) writes, corrections as new versions,
+// tenant-scoped retrieval and CAS tombstones.
+
+func (m *memoryStore) Put(_ context.Context, in memory.PutInput) (store.MemoryRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC()
+	embedding := in.Embedding
+	if len(embedding) == 0 {
+		embedding = make([]float32, store.MemoryEmbeddingDimension)
+		embedding[0] = 1
+	}
+	provenance, _ := json.Marshal(in.Provenance)
+	for _, record := range m.memories {
+		if record.TenantID != in.TenantID || record.Namespace != in.Namespace || record.Key != in.Key {
+			continue
+		}
+		existingHash, _ := record.ContentHash()
+		candidate := store.MemoryRecord{
+			Namespace: in.Namespace, Key: in.Key, ContentType: in.ContentType,
+			Content: in.Content, Embedding: embedding, Sensitivity: in.Sensitivity,
+			Provenance: provenance, RetentionUntil: in.RetentionUntil,
+		}
+		candidateHash, _ := candidate.ContentHash()
+		if existingHash == candidateHash {
+			return record, true, nil
+		}
+		record.Content, record.ContentType = in.Content, in.ContentType
+		record.Embedding = embedding
+		record.Sensitivity = in.Sensitivity
+		record.Provenance = provenance
+		record.RetentionUntil = in.RetentionUntil
+		record.TombstoneAt = nil
+		record.ResourceVersion++
+		record.UpdatedAt = now
+		m.memories[record.ID] = record
+		return record, false, nil
+	}
+	record := store.MemoryRecord{
+		ID: uuid.New(), TenantID: in.TenantID, Namespace: in.Namespace, Key: in.Key,
+		ContentType: in.ContentType, Content: in.Content, Embedding: embedding,
+		EmbeddingProvider: "test", Sensitivity: in.Sensitivity,
+		Provenance: provenance, RetentionUntil: in.RetentionUntil,
+		SourceTaskID: in.SourceTaskID, SourceRunID: in.SourceRunID, SourceAttemptID: in.SourceAttemptID,
+		ResourceVersion: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	m.memories[record.ID] = record
+	return record, false, nil
+}
+
+func (m *memoryStore) Get(_ context.Context, tenantID string, id uuid.UUID) (store.MemoryRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.memories[id]
+	if !ok || record.TenantID != tenantID {
+		return store.MemoryRecord{}, store.ErrMemoryNotFound
+	}
+	return record, nil
+}
+
+func (m *memoryStore) Search(_ context.Context, in memory.SearchInput) ([]store.MemoryRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var records []store.MemoryRecord
+	for _, record := range m.memories {
+		if record.TenantID != in.TenantID || record.TombstoneAt != nil {
+			continue
+		}
+		if in.Namespace != "" && record.Namespace != in.Namespace {
+			continue
+		}
+		if in.Sensitivity != "" && record.Sensitivity != in.Sensitivity {
+			continue
+		}
+		if in.Query != "" && !strings.Contains(record.Content, in.Query) && !strings.Contains(record.Key, in.Query) {
+			continue
+		}
+		records = append(records, record)
+	}
+	slices.SortFunc(records, func(a, b store.MemoryRecord) int { return strings.Compare(a.Key, b.Key) })
+	return records, nil
+}
+
+func (m *memoryStore) Tombstone(_ context.Context, tenantID string, id uuid.UUID, expectedVersion int64) (store.MemoryRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.memories[id]
+	if !ok || record.TenantID != tenantID {
+		return store.MemoryRecord{}, store.ErrMemoryNotFound
+	}
+	if record.ResourceVersion != expectedVersion {
+		return store.MemoryRecord{}, store.ErrVersionConflict
+	}
+	if record.TombstoneAt != nil {
+		return store.MemoryRecord{}, store.ErrInvalidTransition
+	}
+	now := time.Now().UTC()
+	record.TombstoneAt = &now
+	record.ResourceVersion++
+	record.UpdatedAt = now
+	m.memories[id] = record
+	return record, nil
+}
+
 func TestListToolsReturnsRegisteredDescriptors(t *testing.T) {
 	backend := newMemoryStore()
 	backend.tools = []store.ToolDescriptor{
@@ -545,7 +653,7 @@ func TestListToolsReturnsRegisteredDescriptors(t *testing.T) {
 	}
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend, backend),
+		controlapi.NewHandler(backend, backend, backend, backend),
 	)
 	request := httptest.NewRequest(http.MethodGet, "/v1/tools", nil)
 	response := httptest.NewRecorder()
@@ -576,7 +684,7 @@ func TestDecideApprovalRequiresBindingAndIfMatch(t *testing.T) {
 	}
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend, backend),
+		controlapi.NewHandler(backend, backend, backend, backend),
 	)
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+approvalID.String()+":decide",
@@ -644,7 +752,7 @@ func TestTaskEventsStreamsLifecycle(t *testing.T) {
 	}
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend, backend),
+		controlapi.NewHandler(backend, backend, backend, backend),
 	)
 	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String()+"/events?poll=100ms", nil)
 	response := httptest.NewRecorder()
@@ -720,7 +828,7 @@ func TestTaskEventsClosesImmediatelyForTerminalTask(t *testing.T) {
 	}
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
-		controlapi.NewHandler(backend, backend, backend),
+		controlapi.NewHandler(backend, backend, backend, backend),
 	)
 	request := httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.Task.ID.String()+"/events", nil)
 	response := httptest.NewRecorder()
@@ -744,7 +852,7 @@ func TestTaskEventsRejectsInvalidRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	handler := controlapi.NewHandler(backend, backend, backend)
+	handler := controlapi.NewHandler(backend, backend, backend, backend)
 
 	// Cross-tenant observation must fail closed.
 	other := auth.StaticMiddleware(auth.Principal{Subject: "other", TenantID: "tenant-b"}, handler)
@@ -779,5 +887,194 @@ func TestTaskEventsRejectsInvalidRequests(t *testing.T) {
 	owner.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unknown task status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func performMemoryCreate(handler http.Handler, body []byte, idempotencyKey string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/v1/memories", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", idempotencyKey)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// TestMemoryCRUDAndSearchProves the memory control-plane surface: idempotent
+// writes, corrections, tenant isolation, hybrid search and CAS tombstones.
+func TestMemoryCRUDAndSearch(t *testing.T) {
+	backend := newMemoryStore()
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend, backend),
+	)
+	body := []byte(`{"namespace":"default","key":"k1","contentType":"text/plain","content":"the quick brown fox"}`)
+
+	created := performMemoryCreate(handler, body, "mem-1")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", created.Code, created.Body.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &record); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if record["key"] != "k1" || record["sensitivity"] != "internal" || record["resourceVersion"] != float64(1) {
+		t.Fatalf("unexpected memory response: %+v", record)
+	}
+	if created.Header().Get("Location") == "" || created.Header().Get("ETag") != `W/"1"` {
+		t.Fatalf("missing resource headers: %+v", created.Header())
+	}
+
+	// Identical resubmission replays idempotently.
+	replayed := performMemoryCreate(handler, body, "mem-1")
+	if replayed.Code != http.StatusOK || replayed.Header().Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("replay status=%d headers=%v body=%s", replayed.Code, replayed.Header(), replayed.Body.String())
+	}
+
+	// A different document under the same key is a correction (new version).
+	corrected := performMemoryCreate(handler, []byte(`{"namespace":"default","key":"k1","contentType":"text/plain","content":"the quick brown fox runs"}`), "mem-2")
+	if corrected.Code != http.StatusCreated {
+		t.Fatalf("correction status = %d: %s", corrected.Code, corrected.Body.String())
+	}
+	var correctedRecord map[string]any
+	_ = json.Unmarshal(corrected.Body.Bytes(), &correctedRecord)
+	if correctedRecord["resourceVersion"] != float64(2) {
+		t.Fatalf("correction version = %v, want 2", correctedRecord["resourceVersion"])
+	}
+
+	// Search by keyword.
+	search := httptest.NewRequest(http.MethodGet, "/v1/memories?query=quick+brown", nil)
+	searchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(searchResponse, search)
+	if searchResponse.Code != http.StatusOK {
+		t.Fatalf("search status = %d: %s", searchResponse.Code, searchResponse.Body.String())
+	}
+	var searchBody struct {
+		Memories []map[string]any `json:"memories"`
+	}
+	if err := json.Unmarshal(searchResponse.Body.Bytes(), &searchBody); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if len(searchBody.Memories) != 1 || searchBody.Memories[0]["key"] != "k1" {
+		t.Fatalf("unexpected search results: %+v", searchBody)
+	}
+
+	// An empty search (no query, no embedding) is rejected.
+	empty := httptest.NewRequest(http.MethodGet, "/v1/memories", nil)
+	emptyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(emptyResponse, empty)
+	if emptyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("empty search status = %d: %s", emptyResponse.Code, emptyResponse.Body.String())
+	}
+	assertReason(t, emptyResponse, "INVALID_SEARCH")
+
+	// An invalid embedding parameter is rejected.
+	badVector := httptest.NewRequest(http.MethodGet, "/v1/memories?embedding=not-json", nil)
+	badVectorResponse := httptest.NewRecorder()
+	handler.ServeHTTP(badVectorResponse, badVector)
+	if badVectorResponse.Code != http.StatusBadRequest {
+		t.Fatalf("bad embedding status = %d: %s", badVectorResponse.Code, badVectorResponse.Body.String())
+	}
+	assertReason(t, badVectorResponse, "INVALID_EMBEDDING")
+
+	// Get by ID, then tombstone with CAS.
+	id := record["id"].(string)
+	get := httptest.NewRequest(http.MethodGet, "/v1/memories/"+id, nil)
+	getResponse := httptest.NewRecorder()
+	handler.ServeHTTP(getResponse, get)
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("get status = %d: %s", getResponse.Code, getResponse.Body.String())
+	}
+
+	// Missing If-Match is rejected before any mutation.
+	noMatch := httptest.NewRequest(http.MethodDelete, "/v1/memories/"+id, nil)
+	noMatchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(noMatchResponse, noMatch)
+	if noMatchResponse.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing If-Match status = %d: %s", noMatchResponse.Code, noMatchResponse.Body.String())
+	}
+
+	// Stale If-Match conflicts.
+	stale := httptest.NewRequest(http.MethodDelete, "/v1/memories/"+id, nil)
+	stale.Header.Set("If-Match", `W/"1"`)
+	staleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(staleResponse, stale)
+	if staleResponse.Code != http.StatusConflict {
+		t.Fatalf("stale tombstone status = %d: %s", staleResponse.Code, staleResponse.Body.String())
+	}
+
+	tombstone := httptest.NewRequest(http.MethodDelete, "/v1/memories/"+id, nil)
+	tombstone.Header.Set("If-Match", `W/"2"`)
+	tombstoneResponse := httptest.NewRecorder()
+	handler.ServeHTTP(tombstoneResponse, tombstone)
+	if tombstoneResponse.Code != http.StatusOK {
+		t.Fatalf("tombstone status = %d: %s", tombstoneResponse.Code, tombstoneResponse.Body.String())
+	}
+	var tombstoned map[string]any
+	_ = json.Unmarshal(tombstoneResponse.Body.Bytes(), &tombstoned)
+	if tombstoned["tombstoneAt"] == nil {
+		t.Fatalf("tombstone response: %+v", tombstoned)
+	}
+
+	// Tombstoned records disappear from search.
+	after := httptest.NewRequest(http.MethodGet, "/v1/memories?query=quick+brown", nil)
+	afterResponse := httptest.NewRecorder()
+	handler.ServeHTTP(afterResponse, after)
+	var afterBody struct {
+		Memories []map[string]any `json:"memories"`
+	}
+	_ = json.Unmarshal(afterResponse.Body.Bytes(), &afterBody)
+	if len(afterBody.Memories) != 0 {
+		t.Fatalf("tombstoned record still searchable: %+v", afterBody)
+	}
+
+	// Cross-tenant reads fail closed.
+	other := auth.StaticMiddleware(auth.Principal{Subject: "other", TenantID: "tenant-b"},
+		controlapi.NewHandler(backend, backend, backend, backend))
+	otherGet := httptest.NewRequest(http.MethodGet, "/v1/memories/"+id, nil)
+	otherResponse := httptest.NewRecorder()
+	other.ServeHTTP(otherResponse, otherGet)
+	if otherResponse.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant status = %d: %s", otherResponse.Code, otherResponse.Body.String())
+	}
+}
+
+// TestMemoryValidationRejectsBadBodies proves the strict request contract.
+func TestMemoryValidationRejectsBadBodies(t *testing.T) {
+	backend := newMemoryStore()
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend, backend),
+	)
+
+	// Unknown fields are rejected.
+	unknown := performMemoryCreate(handler, []byte(`{"namespace":"n","key":"k","contentType":"text/plain","content":"x","status":"SUCCEEDED"}`), "mem-1")
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field status = %d: %s", unknown.Code, unknown.Body.String())
+	}
+	assertReason(t, unknown, "INVALID_JSON")
+
+	// Missing key is unprocessable.
+	missing := performMemoryCreate(handler, []byte(`{"namespace":"n","contentType":"text/plain","content":"x"}`), "mem-2")
+	if missing.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing key status = %d: %s", missing.Code, missing.Body.String())
+	}
+	assertReason(t, missing, "INVALID_MEMORY")
+
+	// A malformed source reference is unprocessable.
+	badRef := performMemoryCreate(handler, []byte(`{"namespace":"n","key":"k","contentType":"text/plain","content":"x","sourceTaskId":"not-a-uuid"}`), "mem-3")
+	if badRef.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad source status = %d: %s", badRef.Code, badRef.Body.String())
+	}
+	assertReason(t, badRef, "INVALID_MEMORY")
+
+	// Unauthenticated requests fail.
+	anonymous := controlapi.NewHandler(backend, backend, backend, backend)
+	request := httptest.NewRequest(http.MethodPost, "/v1/memories", bytes.NewReader([]byte(`{"namespace":"n","key":"k","contentType":"text/plain","content":"x"}`)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "mem-anon")
+	response := httptest.NewRecorder()
+	anonymous.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d: %s", response.Code, response.Body.String())
 	}
 }

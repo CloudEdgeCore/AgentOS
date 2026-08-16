@@ -18,6 +18,7 @@ import (
 	"github.com/bian-cloud-skill/agentos/internal/mcp"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
+	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
 	"github.com/bian-cloud-skill/agentos/internal/runtime/reference"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -42,6 +43,16 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownTelemetry, err := otel.Init(ctx)
+	if err != nil {
+		slog.Error("initialize OpenTelemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
 	connection, err := grpc.NewClient(*controlAddress,
 		append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
 	if err != nil {

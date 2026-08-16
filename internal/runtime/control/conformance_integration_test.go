@@ -51,6 +51,9 @@ const (
 	wasmtimeProvider    = "wasmtime"
 	wasmtimeABI         = "agentos.wasm-component/v1"
 	wasmtimeSchema      = "agentos.wasm-logical-state/v1"
+	ociProvider         = "oci-gvisor"
+	ociABI              = "agentos.oci/v1"
+	ociSchema           = "agentos.oci-logical/v1"
 	terminalWaitTimeout = 60 * time.Second
 )
 
@@ -97,6 +100,26 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 		}
 		env.prepareScenario(t, scenario)
 		env.driveWasmtimeWorker(t)
+		env.assertConformance(t, scenario)
+	})
+
+	// The OCI/gVisor leg runs only on a host with containerd + runsc: point
+	// AGENTOS_OCI_CONTAINERD_NAMESPACE (and optionally AGENTOS_OCI_IMAGE /
+	// AGENTOS_OCI_RUNTIME) at the sandbox host. CI hosts without the sandbox
+	// skip the leg; the provider binary itself is built and unit-tested in CI
+	// regardless.
+	t.Run("oci", func(t *testing.T) {
+		namespace := os.Getenv("AGENTOS_OCI_CONTAINERD_NAMESPACE")
+		if namespace == "" {
+			t.Skip("AGENTOS_OCI_CONTAINERD_NAMESPACE is not set (requires a containerd + runsc host)")
+		}
+		scenario := scenario{
+			key: "conformance-oci", runtimeClass: "oci", instanceID: "worker-oci-1",
+			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}}`,
+			provider: ociProvider, runtimeABI: ociABI, checkpoint: ociSchema,
+		}
+		env.prepareScenario(t, scenario)
+		env.driveOCIWorker(t, namespace)
 		env.assertConformance(t, scenario)
 	})
 }
@@ -256,6 +279,73 @@ func (env *conformanceEnv) driveWasmtimeWorker(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("Wasmtime provider did not finish: phase=%s\nstderr:\n%s", task.Phase, stderr.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// driveOCIWorker spawns the OCI/gVisor provider process against a
+// containerd + runsc host. The image reference defaults to
+// docker.io/library/alpine:latest (a shellable image the workload spec can
+// use); CI sandbox hosts override it with a digest-pinned image.
+func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
+	t.Helper()
+	imageRef := os.Getenv("AGENTOS_OCI_IMAGE")
+	if imageRef == "" {
+		imageRef = "docker.io/library/alpine:latest"
+	}
+	runtimeName := os.Getenv("AGENTOS_OCI_RUNTIME")
+	if runtimeName == "" {
+		runtimeName = "io.containerd.runsc.v1"
+	}
+	binaryPath, err := exec.LookPath("agentos-runtime-oci")
+	if err != nil {
+		t.Skipf("agentos-runtime-oci binary not found in PATH (build cmd/agentos-runtime-oci first): %v", err)
+	}
+	command := exec.Command(binaryPath,
+		"--dev-mode", "true",
+		"--tenant", env.tenant,
+		"--runtime-instance-id", "worker-oci-1",
+		"--control-address", env.grpcAddr,
+		"--artifact-root", t.TempDir(),
+		"--image-ref", imageRef,
+		"--containerd-namespace", namespace,
+		"--containerd-runtime", runtimeName,
+		"--skip-image-pull",
+		"--heartbeat-ttl", "30s",
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatalf("start OCI provider: %v", err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- command.Wait() }()
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		select {
+		case <-exited:
+		default:
+		}
+	})
+
+	ctx := context.Background()
+	deadline := time.Now().Add(terminalWaitTimeout)
+	for {
+		select {
+		case err := <-exited:
+			t.Fatalf("OCI provider exited early: %v\nstderr:\n%s", err, stderr.String())
+		default:
+		}
+		task, err := env.store.GetTask(ctx, env.tenant, env.taskID)
+		if err != nil {
+			t.Fatalf("read task: %v", err)
+		}
+		if task.Phase.Terminal() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("OCI provider did not finish: phase=%s\nstderr:\n%s", task.Phase, stderr.String())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

@@ -1,0 +1,22 @@
+# Tempo reference configuration: single-binary backend receiving OTLP traces
+# from the OpenTelemetry Collector. The distributor's OTLP receiver owns
+# 4317; Tempo's own API gRPC moves to 9097 to avoid the bind conflict.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9097
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http: {}
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal

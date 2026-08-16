@@ -2,13 +2,15 @@
 // uses: message size ceilings above the largest payloads (assignments embed
 // the full workload spec and receipt lists), keepalive so long-lived worker
 // connections detect dead peers promptly instead of hanging on a half-open
-// transport, and bounded connect attempts so a down endpoint surfaces
-// quickly instead of wedging the first call.
+// transport, bounded connect attempts so a down endpoint surfaces quickly
+// instead of wedging the first call, and OpenTelemetry interceptors so every
+// boundary participates in the reference observability stack.
 package grpcx
 
 import (
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -29,12 +31,13 @@ func ServerOptions() []grpc.ServerOption {
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime: 10 * time.Second, PermitWithoutStream: true,
 		}),
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	}
 }
 
 // ClientOptions configures a fenced gRPC client: keepalive pings every 30s
-// (idle workers have no streams), bounded connect attempts, and a receive
-// ceiling matching the servers.
+// (idle workers have no streams), bounded connect attempts, a receive
+// ceiling matching the servers, and OTel span propagation.
 func ClientOptions() []grpc.DialOption {
 	return []grpc.DialOption{
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -42,5 +45,6 @@ func ClientOptions() []grpc.DialOption {
 		}),
 		grpc.WithConnectParams(grpc.ConnectParams{MinConnectTimeout: 5 * time.Second}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MaxMessageBytes)),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	}
 }

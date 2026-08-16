@@ -13,6 +13,7 @@ import (
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
+	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
 	"github.com/bian-cloud-skill/agentos/internal/runtime/oci"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -41,6 +42,16 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownTelemetry, err := otel.Init(ctx)
+	if err != nil {
+		slog.Error("initialize OpenTelemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
 
 	options := []oci.RunscOption{oci.WithNamespace(*namespace), oci.WithRuntime(*runtimeName)}
 	if *skipImagePull {

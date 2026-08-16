@@ -20,6 +20,7 @@ import (
 	"github.com/bian-cloud-skill/agentos/internal/kernel/recovery"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
+	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -56,6 +57,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownTelemetry, err := otel.Init(ctx)
+	if err != nil {
+		slog.Error("initialize OpenTelemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
 	pool, err := pgxpool.New(ctx, *databaseURL)
 	if err != nil {
 		slog.Error("create PostgreSQL pool", "error", err)

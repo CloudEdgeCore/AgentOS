@@ -30,7 +30,8 @@ Requirements:
 
 - Go 1.26.x;
 - Rust 1.97.1 for the Wasmtime Provider;
-- PostgreSQL 18 for integration tests;
+- PostgreSQL 18 with the pgvector extension for integration tests
+  (the dev compose and CI use the `pgvector/pgvector:pg18` image);
 - Docker for local PostgreSQL and NATS integration services.
 
 Run unit tests:
@@ -64,6 +65,33 @@ go run ./cmd/agentos-outbox -database-url $databaseUrl -nats-url nats://127.0.0.
 go run ./cmd/agentos-runtime-control -database-url $databaseUrl -listen 127.0.0.1:9090 -dev-tenant dev -dev-mode
 go run ./cmd/agentos-runtime-reference -control-address 127.0.0.1:9090 -gateway-address 127.0.0.1:9091 -mcp-listen 127.0.0.1:9092 -tenant dev -runtime-instance-id dev-worker-1 -artifact-root tmp/artifacts -dev-mode
 go run ./cmd/agentos-gateway -database-url $databaseUrl -tenant-policies deploy/dev/tenant-policies.json -tenant dev -seed-dev-tools -dev-mode
+```
+
+The control API authenticates in one of two modes (exactly one required):
+
+- Development: `-dev-tenant dev` (static identity, loopback listener only).
+- Verified identity: `-oidc-issuer https://idp.example -oidc-client-id agentos-control
+  -oidc-tenant-claim tenant` (OIDC ID tokens; the token's `sub` becomes the
+  principal and the tenant claim scopes every store query).
+
+The Memory API (ADR-009) is served by the control API:
+
+```powershell
+# write a memory (idempotent by namespace+key; corrections bump the version)
+curl -X POST http://127.0.0.1:8080/v1/memories -H "Content-Type: application/json" `
+  -H "Idempotency-Key: mem-1" -d '{"namespace":"default","key":"facts","contentType":"text/plain","content":"..."}'
+# hybrid search: FTS + trigram + optional embedding
+curl "http://127.0.0.1:8080/v1/memories?query=keyword&namespace=default&limit=10"
+# soft delete (CAS tombstone, deletion intent survives)
+curl -X DELETE http://127.0.0.1:8080/v1/memories/<id> -H "If-Match: `"W/`"1`""
+```
+
+The reference observability stack (tech baseline §15) is opt-in:
+
+```powershell
+docker compose --profile observability up -d
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = "127.0.0.1:4317"   # traces/metrics/logs -> OTLP
+# Grafana: http://127.0.0.1:3300 (Prometheus/Tempo/Loki datasources provisioned)
 ```
 
 The reference Runtime exposes a loopback MCP endpoint (`-mcp-listen`) while an

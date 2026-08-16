@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
 	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
@@ -24,6 +25,7 @@ import (
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
+	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 )
@@ -61,6 +63,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownTelemetry, err := otel.Init(ctx)
+	if err != nil {
+		slog.Error("initialize OpenTelemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
 	pool, err := pgxpool.New(ctx, *databaseURL)
 	if err != nil {
 		slog.Error("create PostgreSQL pool", "error", err)

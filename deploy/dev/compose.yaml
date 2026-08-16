@@ -2,7 +2,9 @@ name: agentos-dev
 
 services:
   postgres:
-    image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+    # pgvector image: the v0.1 Memory slice (ADR-009) requires the vector
+    # extension alongside FTS/pg_trgm.
+    image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
     environment:
       POSTGRES_DB: agentos
       POSTGRES_USER: agentos
@@ -24,6 +26,61 @@ services:
       - "127.0.0.1:54222:4222"
     volumes:
       - nats-data:/data
+
+  # Reference observability stack (tech baseline §15). Opt in with:
+  #   docker compose --profile observability up -d
+  # Agent processes export OTLP to 127.0.0.1:4317 when
+  # OTEL_EXPORTER_OTLP_ENDPOINT is set; Grafana runs on http://127.0.0.1:3300.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.135.0
+    profiles: ["observability"]
+    command: ["--config", "/etc/otel/collector.yaml"]
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    volumes:
+      - ./otel/collector.yaml:/etc/otel/collector.yaml:ro
+    depends_on:
+      - tempo
+      - loki
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["observability"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    ports:
+      - "127.0.0.1:9093:9090"
+    volumes:
+      - ./otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  tempo:
+    image: grafana/tempo:2.7.1
+    profiles: ["observability"]
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "127.0.0.1:3320:3200"
+    volumes:
+      - ./otel/tempo.yaml:/etc/tempo.yaml:ro
+
+  loki:
+    image: grafana/loki:3.5.0
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "127.0.0.1:3310:3100"
+    volumes:
+      - ./otel/loki.yaml:/etc/loki/loki.yaml:ro
+
+  grafana:
+    image: grafana/grafana:11.6.2
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "127.0.0.1:3300:3000"
+    volumes:
+      - ./otel/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
 
 volumes:
   postgres-data:

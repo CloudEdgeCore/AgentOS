@@ -18,7 +18,9 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        # pgvector image: the v0.1 Memory slice (ADR-009) requires the vector
+        # extension alongside FTS/pg_trgm.
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
         env:
           POSTGRES_DB: agentos_test
           POSTGRES_USER: agentos
@@ -94,6 +96,17 @@ jobs:
 
       - name: Build control-plane commands
         run: go build ./cmd/...
+
+      # The OCI/gVisor provider is Linux-only at the executor layer and its
+      # conformance leg needs a containerd + runsc host; this step guarantees
+      # the linux build and unit tests (already run above with -race), and
+      # puts the binary on PATH so an opt-in sandbox job can enable the
+      # conformance leg with AGENTOS_OCI_CONTAINERD_NAMESPACE.
+      - name: Build OCI/gVisor provider
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/agentos-runtime-oci" ./cmd/agentos-runtime-oci
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Check Rust formatting
         run: cargo +1.97.1 fmt --all -- --check
