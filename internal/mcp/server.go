@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // Handler implements the MCP methods beyond the core lifecycle. Params are
@@ -25,19 +26,39 @@ type Handler interface {
 // text/event-stream depending on the client's Accept header. Notifications
 // are acknowledged with 204. There is no session state.
 type Server struct {
-	name         string
-	version      string
-	handler      Handler
-	maxBodyBytes int64
+	name          string
+	version       string
+	handler       Handler
+	maxBodyBytes  int64
+	maxConcurrent int
+	active        atomic.Int64
 }
 
 // NewServer constructs the MCP boundary. name/version identify the server in
-// the initialize handshake.
+// the initialize handshake. Concurrent in-flight requests are capped (O8);
+// NewServerWithConcurrencyLimit overrides the default.
 func NewServer(name, version string, handler Handler) *Server {
-	return &Server{name: name, version: version, handler: handler, maxBodyBytes: 1 << 20}
+	return NewServerWithConcurrencyLimit(name, version, handler, 16)
+}
+
+// NewServerWithConcurrencyLimit constructs the MCP boundary with an explicit
+// cap on concurrent in-flight requests; excess requests answer 503.
+func NewServerWithConcurrencyLimit(name, version string, handler Handler, maxConcurrent int) *Server {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 16
+	}
+	return &Server{name: name, version: version, handler: handler, maxBodyBytes: 1 << 20, maxConcurrent: maxConcurrent}
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	// Bounded concurrency (O8): the MCP endpoint sits on the agent's loopback
+	// boundary; a flood of calls must not exhaust the runtime.
+	if s.maxConcurrent > 0 && s.active.Add(1) > int64(s.maxConcurrent) {
+		s.active.Add(-1)
+		http.Error(writer, "concurrency limit reached", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.active.Add(-1)
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", "POST")
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)

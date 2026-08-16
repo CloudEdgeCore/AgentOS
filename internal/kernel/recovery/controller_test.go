@@ -54,3 +54,22 @@ func TestControllerIgnoresLostRecoveryRace(t *testing.T) {
 		t.Fatal("test repository lost sentinel")
 	}
 }
+
+// TestControllerIsolatesPoisonedCandidate proves per-task error isolation: an
+// expired attempt whose task spec cannot be decoded must not block the
+// recovery of other attempts.
+func TestControllerIsolatesPoisonedCandidate(t *testing.T) {
+	healthy := store.RecoveryCandidate{TenantID: "tenant-a", AttemptID: uuid.New(), FencingToken: 1, TaskSpec: json.RawMessage(`{"retryPolicy":{"maxAttempts":3}}`)}
+	poisoned := store.RecoveryCandidate{TenantID: "tenant-a", AttemptID: uuid.New(), FencingToken: 2, TaskSpec: json.RawMessage(`not-json`)}
+	repository := &fakeRepository{candidates: []store.RecoveryCandidate{poisoned, healthy}}
+	processed, err := NewController(repository, 10, time.Second).Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (poisoned candidate must be isolated)", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1 (only the healthy candidate)", processed)
+	}
+	if len(repository.inputs) != 1 || repository.inputs[0].AttemptID != healthy.AttemptID {
+		t.Fatalf("recovery inputs = %+v, want only the healthy attempt", repository.inputs)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"sort"
@@ -194,13 +195,24 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	for _, claim := range claims {
 		spec, err := workload.Decode(claim.Task.Spec)
 		if err != nil {
+			if store.IsRetryableTransaction(err) {
+				return processed, err
+			}
+			// Per-task error isolation: an undecodable admitted task must not
+			// block the rest of the batch. The claim is released so the task
+			// is re-evaluated (or handled by lifecycle timeout) later.
 			_ = c.store.ReleaseTaskClaim(ctx, claim)
-			return processed, fmt.Errorf("decode admitted task %s: %w", claim.Task.ID, err)
+			slog.Error("schedule decode failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+			continue
 		}
 		pools, err := c.pools.ListRuntimePools(ctx, claim.Task.TenantID)
 		if err != nil {
+			if store.IsRetryableTransaction(err) {
+				return processed, err
+			}
 			_ = c.store.ReleaseTaskClaim(ctx, claim)
-			return processed, err
+			slog.Error("runtime pool list failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+			continue
 		}
 		selection, err := Select(spec, pools)
 		if err != nil {
@@ -209,10 +221,9 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 				// pools are full. Another controller may retry after the TTL.
 				continue
 			}
-			if releaseErr := c.store.ReleaseTaskClaim(ctx, claim); releaseErr != nil {
-				return processed, releaseErr
-			}
-			return processed, err
+			_ = c.store.ReleaseTaskClaim(ctx, claim)
+			slog.Error("placement selection failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+			continue
 		}
 		pool := selection.Placement.Pool
 		_, err = c.store.ScheduleTask(ctx, store.ScheduleTaskInput{
@@ -222,7 +233,14 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 			RuntimeClass: pool.RuntimeClass, RuntimeInstanceID: pool.RuntimeInstanceID, LeaseTTL: c.leaseTTL,
 		})
 		if err != nil {
-			return processed, err
+			if store.IsRetryableTransaction(err) {
+				return processed, err
+			}
+			// A stale claim or a per-task schedule failure: release and
+			// continue so one task cannot starve the batch.
+			_ = c.store.ReleaseTaskClaim(ctx, claim)
+			slog.Error("schedule commit failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+			continue
 		}
 		processed++
 	}

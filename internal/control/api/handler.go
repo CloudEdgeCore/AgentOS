@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/control/auth"
@@ -29,6 +30,16 @@ import (
 
 const maxRequestBody = 1 << 20
 const requestTimeout = 10 * time.Second
+
+// Route budgets (N9): reads answer quickly, mutations get the full budget,
+// streams are unbounded. Overridable with WithRequestTimeouts.
+const (
+	defaultReadTimeout  = 5 * time.Second
+	defaultWriteTimeout = 10 * time.Second
+	// defaultMaxSSESubscribers bounds concurrent event streams so slow
+	// clients cannot exhaust the server (O5).
+	defaultMaxSSESubscribers = 64
+)
 
 // Task event stream configuration. Polling keeps PostgreSQL as the source of
 // truth (ADR-002): the stream observes resource-version changes instead of
@@ -96,6 +107,13 @@ type Handler struct {
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
+	// readTimeout / writeTimeout are the per-route request budgets (N9).
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+	// sseSlots bounds concurrent event streams so slow clients cannot
+	// exhaust the server (O5); activeSSE is the live stream count.
+	sseSlots  int
+	activeSSE atomic.Int64
 }
 
 // Option configures the control handler.
@@ -119,12 +137,30 @@ func WithAuditSigningKey(keyID string, key ed25519.PrivateKey) Option {
 	return func(h *Handler) { h.auditKeyID, h.auditSigningKey = keyID, key }
 }
 
+// WithRequestTimeouts overrides the per-route read and write budgets (N9);
+// non-positive values disable the bound for that class.
+func WithRequestTimeouts(readTimeout, writeTimeout time.Duration) Option {
+	return func(h *Handler) { h.readTimeout, h.writeTimeout = readTimeout, writeTimeout }
+}
+
+// WithMaxSSESubscribers bounds concurrent task event streams (O5).
+func WithMaxSSESubscribers(limit int) Option {
+	return func(h *Handler) {
+		if limit > 0 {
+			h.sseSlots = limit
+		}
+	}
+}
+
 func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals ApprovalStore, memories MemoryAPI, options ...Option) http.Handler {
 	handler := &Handler{
 		tasks:        taskStore,
 		agentVersion: agentVersions,
 		approvals:    approvals,
 		memories:     memories,
+		readTimeout:  defaultReadTimeout,
+		writeTimeout: defaultWriteTimeout,
+		sseSlots:     defaultMaxSSESubscribers,
 		newID: func() uuid.UUID {
 			id, err := uuid.NewV7()
 			if err != nil {
@@ -344,6 +380,15 @@ func (h *Handler) taskEvents(writer http.ResponseWriter, request *http.Request) 
 		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
 		return
 	}
+	// Bounded concurrency (O5): streams are long-lived, so a flood of slow
+	// clients must not exhaust the server.
+	if h.sseSlots > 0 && h.activeSSE.Add(1) > int64(h.sseSlots) {
+		h.activeSSE.Add(-1)
+		h.writeProblem(writer, request, http.StatusServiceUnavailable, "STREAM_CAPACITY_EXCEEDED",
+			"too many concurrent event streams; retry later", traceID)
+		return
+	}
+	defer h.activeSSE.Add(-1)
 	id, err := uuid.Parse(request.PathValue("taskID"))
 	if err != nil {
 		h.writeProblem(writer, request, http.StatusNotFound, "TASK_NOT_FOUND", "task was not found", traceID)
@@ -1121,12 +1166,29 @@ func (h *Handler) notFound(writer http.ResponseWriter, request *http.Request) {
 func (h *Handler) requestContext(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		ctx := request.Context()
-		if !strings.HasSuffix(request.URL.Path, "/events") {
-			// Ordinary requests are bounded; event streams live until the
-			// client disconnects or the task reaches a terminal phase.
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(request.Context(), requestTimeout)
-			defer cancel()
+		path := request.URL.Path
+		if strings.HasSuffix(path, "/events") {
+			// Event streams live until the client disconnects or the task
+			// reaches a terminal phase; no request budget applies.
+		} else if strings.HasSuffix(path, "/audit/export") {
+			// Exports walk the whole ledger: give them the write budget.
+			if h.writeTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(request.Context(), h.writeTimeout)
+				defer cancel()
+			}
+		} else {
+			// Per-route budgets (N9): reads answer quickly, mutations get
+			// the full budget.
+			budget := h.writeTimeout
+			if request.Method == http.MethodGet || request.Method == http.MethodHead {
+				budget = h.readTimeout
+			}
+			if budget > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(request.Context(), budget)
+				defer cancel()
+			}
 		}
 		traceID := request.Header.Get("X-Request-ID")
 		if _, err := uuid.Parse(traceID); err != nil {
@@ -1378,6 +1440,8 @@ func (h *Handler) exportAudit(writer http.ResponseWriter, request *http.Request)
 
 func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Request, err error, traceID string) {
 	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		h.writeProblem(writer, request, http.StatusGatewayTimeout, "REQUEST_TIMEOUT", "request exceeded its route budget", traceID)
 	case errors.Is(err, store.ErrNotFound):
 		h.writeProblem(writer, request, http.StatusNotFound, "TASK_NOT_FOUND", "task was not found", traceID)
 	case errors.Is(err, store.ErrIdempotencyConflict):

@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -142,6 +143,39 @@ func TestControllerDeniesTenantWithoutPolicyData(t *testing.T) {
 	}
 }
 
+// TestControllerIsolatesPoisonedTask proves per-task error isolation: a task
+// whose admission commit fails must not block the rest of the batch.
+func TestControllerIsolatesPoisonedTask(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	good := taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)
+	poisoned := taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)
+	poisoned.ID = uuid.New()
+	repository.claims = []store.TaskClaim{{Task: poisoned}, {Task: good}}
+	repository.failTaskID = poisoned.ID
+
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (poisoned task must be isolated)", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1 (only the healthy task)", processed)
+	}
+	decision := repository.lastDecision()
+	if decision.TaskID != good.ID {
+		t.Fatalf("last decision was for the poisoned task: %s", decision.TaskID)
+	}
+	if repository.released != 1 {
+		t.Fatalf("released claims = %d, want 1 (poisoned claim released)", repository.released)
+	}
+}
+
 func newTestPolicy(t *testing.T, maxPriority int) *policy.Engine {
 	t.Helper()
 	engine, err := policy.New(policy.TenantPolicies{"tenant-a": {MaxPriority: maxPriority}})
@@ -177,10 +211,12 @@ func taskClaim(ref, spec string) store.Task {
 }
 
 type fakeControlStore struct {
-	mu        sync.Mutex
-	versions  map[string]store.AgentVersion
-	claims    []store.TaskClaim
-	decisions []store.DecideAdmissionInput
+	mu          sync.Mutex
+	versions    map[string]store.AgentVersion
+	claims      []store.TaskClaim
+	decisions   []store.DecideAdmissionInput
+	failTaskID  uuid.UUID
+	released    int
 }
 
 func newFakeWithVersion(tenantID, ref, spec string) *fakeControlStore {
@@ -225,11 +261,19 @@ func (f *fakeControlStore) ClaimTasks(context.Context, store.ClaimTasksInput) ([
 func (f *fakeControlStore) DecideAdmission(_ context.Context, in store.DecideAdmissionInput) (store.Task, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failTaskID != uuid.Nil && in.TaskID == f.failTaskID {
+		return store.Task{}, errors.New("poisoned task commit failure")
+	}
 	f.decisions = append(f.decisions, in)
 	return store.Task{Phase: domain.TaskAdmitted, ResourceVersion: in.ExpectedTaskVersion + 1}, nil
 }
 
-func (f *fakeControlStore) ReleaseTaskClaim(context.Context, store.TaskClaim) error { return nil }
+func (f *fakeControlStore) ReleaseTaskClaim(context.Context, store.TaskClaim) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.released++
+	return nil
+}
 
 func (f *fakeControlStore) GetTask(context.Context, string, uuid.UUID) (store.Task, error) {
 	return store.Task{}, store.ErrNotFound

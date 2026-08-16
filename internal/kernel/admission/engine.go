@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -119,7 +120,16 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	for _, claim := range claims {
 		decision, versionID, budget, err := c.decide(ctx, claim)
 		if err != nil {
-			return processed, err
+			if store.IsRetryableTransaction(err) {
+				return processed, err
+			}
+			// Per-task error isolation: a task that cannot be decided must
+			// not block the rest of the queue. The claim is released so the
+			// next round re-evaluates it, and the decision path that failed
+			// is recorded before continuing.
+			_ = c.store.ReleaseTaskClaim(ctx, claim)
+			slog.Error("admission decision failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+			continue
 		}
 		_, err = c.store.DecideAdmission(ctx, store.DecideAdmissionInput{
 			TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
@@ -129,7 +139,14 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 			PolicyRevision: policy.Revision,
 		})
 		if err != nil {
-			return processed, err
+			if store.IsRetryableTransaction(err) {
+				return processed, err
+			}
+			// A stale claim (another controller moved the task) or an
+			// unexpected per-task failure: release and continue.
+			_ = c.store.ReleaseTaskClaim(ctx, claim)
+			slog.Error("admission commit failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+			continue
 		}
 		processed++
 	}

@@ -2,11 +2,86 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
+	"github.com/google/uuid"
 )
+
+// fakeSchedulingStore satisfies store.ControlStore with only the scheduling
+// surface implemented; any other method panics, which is a test failure.
+type fakeSchedulingStore struct {
+	store.ControlStore
+	claims      []store.TaskClaim
+	scheduled   []uuid.UUID
+	released    int
+	poisonSpec  bool
+}
+
+func (f *fakeSchedulingStore) ClaimTasks(context.Context, store.ClaimTasksInput) ([]store.TaskClaim, error) {
+	return f.claims, nil
+}
+
+func (f *fakeSchedulingStore) ReleaseTaskClaim(context.Context, store.TaskClaim) error {
+	f.released++
+	return nil
+}
+
+func (f *fakeSchedulingStore) ScheduleTask(_ context.Context, in store.ScheduleTaskInput) (store.AttemptLease, error) {
+	if f.poisonSpec {
+		// The first claim's task carries the poisoned spec; decode happens
+		// before ScheduleTask, so poisoning here simulates a commit failure.
+		return store.AttemptLease{}, errors.New("schedule commit failure")
+	}
+	f.scheduled = append(f.scheduled, in.TaskID)
+	return store.AttemptLease{}, nil
+}
+
+func (f *fakeSchedulingStore) GetAgentVersionByRef(context.Context, string, string) (store.AgentVersion, error) {
+	return store.AgentVersion{}, store.ErrNotFound
+}
+
+// TestControllerIsolatesPoisonedTask proves the scheduler continues past a
+// task it cannot schedule instead of starving the whole batch.
+func TestControllerIsolatesPoisonedTask(t *testing.T) {
+	repository := &fakeSchedulingStore{claims: []store.TaskClaim{
+		{Task: admittedTask("poisoned", `not-json`)},
+		{Task: admittedTask("healthy", `{
+			"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+		}`)},
+	}}
+	controller := NewController(repository, StaticPoolSource{{
+		ID: "pool-1", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci",
+		RuntimeInstanceID: "worker-1", Region: "cn-east", Ready: true,
+		AvailableCPU: 2000, AvailableMemory: 4096, AvailableLLMSlots: 4,
+	}}, "scheduler-1", 10, time.Minute, time.Minute)
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil (poisoned task must be isolated)", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1 (only the healthy task)", processed)
+	}
+	if len(repository.scheduled) != 1 {
+		t.Fatalf("scheduled = %d, want 1", len(repository.scheduled))
+	}
+	if repository.released != 1 {
+		t.Fatalf("released claims = %d, want 1 (poisoned claim released)", repository.released)
+	}
+}
+
+func admittedTask(key, spec string) store.Task {
+	return store.Task{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
+		Goal: key, Spec: json.RawMessage(spec), Phase: domain.TaskAdmitted, ResourceVersion: 1,
+	}
+}
 
 func TestSelectFiltersAndExplainsPlacement(t *testing.T) {
 	spec := workload.Spec{Placement: workload.Placement{

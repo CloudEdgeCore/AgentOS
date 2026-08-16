@@ -4,7 +4,7 @@ package recovery
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
@@ -47,7 +47,11 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	for _, candidate := range candidates {
 		spec, err := workload.Decode(candidate.TaskSpec)
 		if err != nil {
-			return processed, fmt.Errorf("decode task spec for expired attempt %s: %w", candidate.AttemptID, err)
+			// Per-task error isolation: a poisoned task spec must not block
+			// the recovery of every other expired attempt. The candidate is
+			// skipped and logged; its lease stays expired for the next round.
+			slog.Error("recovery decode failed for expired attempt; isolated", "attempt", candidate.AttemptID, "tenant", candidate.TenantID, "error", err)
+			continue
 		}
 		_, err = c.repository.RecoverExpiredAttempt(ctx, store.RecoverExpiredAttemptInput{
 			TenantID: candidate.TenantID, AttemptID: candidate.AttemptID,
@@ -57,8 +61,12 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 		if errors.Is(err, store.ErrFenced) || errors.Is(err, store.ErrLeaseNotExpired) || errors.Is(err, store.ErrNotFound) {
 			continue
 		}
-		if err != nil {
+		if store.IsRetryableTransaction(err) {
 			return processed, err
+		}
+		if err != nil {
+			slog.Error("recovery failed for expired attempt; isolated", "attempt", candidate.AttemptID, "tenant", candidate.TenantID, "error", err)
+			continue
 		}
 		processed++
 	}
