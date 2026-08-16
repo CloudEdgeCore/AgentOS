@@ -15,17 +15,17 @@ import (
 const SBOMSpecVersion = "1.5"
 
 type sbomDocument struct {
-	BOMFormat    string         `json:"bomFormat"`
-	SpecVersion  string         `json:"specVersion"`
-	SerialNumber string         `json:"serialNumber"`
-	Version      int            `json:"version"`
-	Metadata     sbomMetadata   `json:"metadata"`
+	BOMFormat    string          `json:"bomFormat"`
+	SpecVersion  string          `json:"specVersion"`
+	SerialNumber string          `json:"serialNumber"`
+	Version      int             `json:"version"`
+	Metadata     sbomMetadata    `json:"metadata"`
 	Components   []sbomComponent `json:"components,omitempty"`
 }
 
 type sbomMetadata struct {
-	Timestamp string       `json:"timestamp"`
-	Tools     []sbomTool   `json:"tools,omitempty"`
+	Timestamp string         `json:"timestamp"`
+	Tools     []sbomTool     `json:"tools,omitempty"`
 	Component *sbomComponent `json:"component,omitempty"`
 }
 

@@ -76,7 +76,7 @@ type Manifest struct {
 	// SignedImageDigest is the digest-pinned OCI image this package ships
 	// (ADR-010 cosign-style binding); ImageSignature is its signature. When
 	// either is set both must be set and the signature must verify.
-	SignedImageDigest Digest    `json:"signedImageDigest,omitempty"`
+	SignedImageDigest Digest     `json:"signedImageDigest,omitempty"`
 	ImageSignature    *Signature `json:"imageSignature,omitempty"`
 }
 
