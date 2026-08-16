@@ -79,6 +79,78 @@ func TestAgentVersionPublishResolveAndImmutability(t *testing.T) {
 	}
 }
 
+func TestAgentVersionPersistsPackageSignatureEnvelope(t *testing.T) {
+	clock := newFakeClock()
+	pool, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+
+	envelope := &kernelstore.PackageSignature{
+		KeyID: "ci-builder-1", Signature: "c2lnbmF0dXJl", ManifestDigest: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+	}
+	created, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default",
+		Name: "research-agent", Version: "2.0.0",
+		Spec:             []byte(`{"runtimeClassPolicy":{"allowed":["oci"]}}`),
+		PackageSignature: envelope,
+	})
+	if err != nil {
+		t.Fatalf("publish signed agent version: %v", err)
+	}
+	if created.AgentVersion.PackageSignature == nil || *created.AgentVersion.PackageSignature != *envelope {
+		t.Fatalf("published signature = %+v, want %+v", created.AgentVersion.PackageSignature, envelope)
+	}
+
+	byID, err := repository.GetAgentVersion(ctx, "tenant-a", created.AgentVersion.ID)
+	if err != nil {
+		t.Fatalf("get by id: %v", err)
+	}
+	if byID.PackageSignature == nil || *byID.PackageSignature != *envelope {
+		t.Fatalf("read-back signature = %+v, want %+v", byID.PackageSignature, envelope)
+	}
+	byRef, err := repository.GetAgentVersionByRef(ctx, "tenant-a", "research-agent@2.0.0")
+	if err != nil {
+		t.Fatalf("get by ref: %v", err)
+	}
+	if byRef.PackageSignature == nil || byRef.PackageSignature.KeyID != envelope.KeyID {
+		t.Fatalf("ref read-back signature = %+v, want key id %s", byRef.PackageSignature, envelope.KeyID)
+	}
+
+	// An idempotent replay returns the stored envelope, not the new input.
+	replayed, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default",
+		Name: "research-agent", Version: "2.0.0",
+		Spec:             []byte(`{"runtimeClassPolicy":{"allowed":["oci"]}}`),
+		PackageSignature: &kernelstore.PackageSignature{KeyID: "intruder", Signature: "x", ManifestDigest: "y"},
+	})
+	if err != nil || !replayed.Existing {
+		t.Fatalf("idempotent replay: %+v err=%v", replayed, err)
+	}
+	if replayed.AgentVersion.PackageSignature == nil || replayed.AgentVersion.PackageSignature.KeyID != "ci-builder-1" {
+		t.Fatalf("replay signature = %+v, want stored ci-builder-1 envelope", replayed.AgentVersion.PackageSignature)
+	}
+
+	// Unsigned publications round-trip with a nil envelope.
+	unsigned, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: "tenant-b", Namespace: "default",
+		Name: "agent", Version: "1", Spec: []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("publish unsigned: %v", err)
+	}
+	if unsigned.AgentVersion.PackageSignature != nil {
+		t.Fatalf("unsigned publication carried a signature envelope: %+v", unsigned.AgentVersion.PackageSignature)
+	}
+
+	// The database itself rejects a partial envelope (all fields or none).
+	if _, err := pool.Exec(ctx, `INSERT INTO agent_versions (
+		id, tenant_id, namespace, name, version, spec, spec_digest,
+		package_key_id, resource_version, created_at
+	) VALUES ($1, 'tenant-c', 'default', 'agent', '2', '{}'::jsonb, decode(repeat('00', 32), 'hex'), 'lone-key', 1, now())`,
+		uuid.New().String()); err == nil {
+		t.Fatal("partial package signature envelope was accepted")
+	}
+}
+
 func TestAgentVersionRowsRejectMutation(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)

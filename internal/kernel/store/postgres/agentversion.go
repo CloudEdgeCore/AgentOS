@@ -31,15 +31,17 @@ func (s *Store) CreateAgentVersion(ctx context.Context, in kernelstore.CreateAge
 	}
 	defer rollback(ctx, tx)
 
+	keyID, signature, manifestDigest := packageSignatureFields(in.PackageSignature)
 	row := tx.QueryRow(ctx, `
 		INSERT INTO agent_versions (
 			id, tenant_id, namespace, name, version, spec, spec_digest,
+			package_key_id, package_signature, package_manifest_digest,
 			resource_version, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11)
 		ON CONFLICT (tenant_id, name, version) DO NOTHING
 		RETURNING `+agentVersionColumns,
 		in.ID.String(), in.TenantID, in.Namespace, in.Name, in.Version,
-		normalized, digest[:], now,
+		normalized, digest[:], keyID, signature, manifestDigest, now,
 	)
 	created, scanErr := scanAgentVersion(row)
 	if scanErr == nil {
@@ -121,14 +123,26 @@ func resolveAgentVersionID(ctx context.Context, tx pgx.Tx, tenantID, ref string)
 
 const agentVersionColumns = `
 	id::text, tenant_id, namespace, name, version, spec, spec_digest,
+	package_key_id, package_signature, package_manifest_digest,
 	resource_version, created_at`
+
+// packageSignatureFields renders the atomic signature envelope (all fields or
+// none, enforced by the agent_versions_package_signature_shape check).
+func packageSignatureFields(signature *kernelstore.PackageSignature) (any, any, any) {
+	if signature == nil {
+		return nil, nil, nil
+	}
+	return nullableString(signature.KeyID), nullableString(signature.Signature), nullableString(signature.ManifestDigest)
+}
 
 func scanAgentVersion(row scanner) (kernelstore.AgentVersion, error) {
 	var version kernelstore.AgentVersion
 	var id string
 	var digest []byte
+	var packageKeyID, packageSignature, packageManifestDigest *string
 	if err := row.Scan(&id, &version.TenantID, &version.Namespace, &version.Name, &version.Version,
-		&version.Spec, &digest, &version.ResourceVersion, &version.CreatedAt); err != nil {
+		&version.Spec, &digest, &packageKeyID, &packageSignature, &packageManifestDigest,
+		&version.ResourceVersion, &version.CreatedAt); err != nil {
 		return version, err
 	}
 	parsed, err := uuid.Parse(id)
@@ -140,5 +154,10 @@ func scanAgentVersion(row scanner) (kernelstore.AgentVersion, error) {
 		return version, fmt.Errorf("agent version spec digest has length %d", len(digest))
 	}
 	copy(version.SpecDigest[:], digest)
+	if packageKeyID != nil {
+		version.PackageSignature = &kernelstore.PackageSignature{
+			KeyID: *packageKeyID, Signature: *packageSignature, ManifestDigest: *packageManifestDigest,
+		}
+	}
 	return version, nil
 }

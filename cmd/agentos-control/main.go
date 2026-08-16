@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	controlapi "github.com/bian-cloud-skill/agentos/internal/control/api"
 	"github.com/bian-cloud-skill/agentos/internal/control/auth"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
 	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
@@ -29,6 +31,11 @@ func main() {
 	oidcIssuer := flag.String("oidc-issuer", "", "OIDC issuer for Bearer ID-token authentication")
 	oidcClientID := flag.String("oidc-client-id", "", "OIDC client ID the API's audience must match")
 	oidcTenantClaim := flag.String("oidc-tenant-claim", "tenant", "OIDC claim carrying the tenant scope")
+	var packageTrustKeys []string
+	flag.Func("package-trust-key", "trusted package signing key as keyID=base64rawpub (repeatable; ADR-010 publish admission)", func(value string) error {
+		packageTrustKeys = append(packageTrustKeys, value)
+		return nil
+	})
 	flag.Parse()
 
 	if *databaseURL == "" {
@@ -70,8 +77,18 @@ func main() {
 	}
 
 	repository := postgresstore.New(pool)
+	var options []controlapi.Option
+	if registry, err := packageTrustRegistry(packageTrustKeys); err != nil {
+		slog.Error("configure package trust registry", "error", err)
+		os.Exit(1)
+	} else if registry != nil {
+		options = append(options, controlapi.WithPackageAdmission(registry))
+		slog.Info("publish admission active: agent versions require a signed package", "trustedKeys", registry.Len())
+	} else {
+		slog.Warn("publish admission is OFF: unsigned agent version publications are allowed (dev mode)")
+	}
 	handler := controlapi.NewHandler(repository, repository, repository,
-		memory.NewGateway(memory.DevEmbedder{}, repository))
+		memory.NewGateway(memory.DevEmbedder{}, repository), options...)
 	if devMode {
 		handler = auth.StaticMiddleware(auth.Principal{Subject: "local-developer", TenantID: *devTenant}, handler)
 		slog.Info("control API using static development identity", "tenant", *devTenant)
@@ -119,4 +136,32 @@ func loopbackAddress(address string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// packageTrustRegistry builds the ADR-010 trust registry from
+// -package-trust-key flags (or AGENTOS_PACKAGE_TRUST_KEYS, comma-separated).
+// A nil registry means publish admission is off (dev mode).
+func packageTrustRegistry(flagKeys []string) (*agentpkg.Registry, error) {
+	entries := append([]string(nil), flagKeys...)
+	if env := strings.TrimSpace(os.Getenv("AGENTOS_PACKAGE_TRUST_KEYS")); env != "" {
+		entries = append(entries, strings.Split(env, ",")...)
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	registry := agentpkg.NewRegistry()
+	for _, entry := range entries {
+		id, encoded, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		if !ok || strings.TrimSpace(id) == "" {
+			return nil, fmt.Errorf("package trust key %q must be keyID=base64rawpub", entry)
+		}
+		publicKey, err := agentpkg.DecodePublicKey(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("package trust key %q: %w", id, err)
+		}
+		if err := registry.Add(agentpkg.Key{ID: id, PublicKey: publicKey}); err != nil {
+			return nil, err
+		}
+	}
+	return registry, nil
 }

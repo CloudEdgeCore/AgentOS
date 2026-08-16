@@ -268,7 +268,10 @@ paths:
       description: >-
         Publishes an immutable AgentVersion. Reusing the same name and version
         with an identical spec replays the existing publication; a different
-        spec for the same identity conflicts.
+        spec for the same identity conflicts. When publish admission is
+        configured, a signed Agent Package (ADR-010) is required and is
+        verified fail-closed: an unsigned, tampered or unbound package is
+        rejected with 422 PACKAGE_REQUIRED / PACKAGE_SIGNATURE_INVALID.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/RequestID'
@@ -441,6 +444,59 @@ components:
         version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
         namespace: { type: string, minLength: 1, maxLength: 255 }
         spec: { type: object, additionalProperties: true }
+        package:
+          $ref: '#/components/schemas/AgentPackage'
+          description: >-
+            Signed Agent Package (ADR-010). Required when publish admission is
+            configured; when present it is always verified fail-closed and its
+            manifest must bind to this exact name@version reference and spec.
+    AgentPackage:
+      type: object
+      additionalProperties: false
+      required: [manifest, signature]
+      description: >-
+        Canonical signed package document (agentos.agentpkg/v1). The signature
+        covers the SHA-256 digest of the manifest encoding; use the output of
+        `agentos-pkg sign` verbatim so the manifest spec bytes round-trip.
+      properties:
+        manifest:
+          type: object
+          additionalProperties: false
+          required: [schema, agentVersionRef, specDigest, spec, provenance]
+          properties:
+            schema: { type: string, const: agentos.agentpkg/v1 }
+            agentVersionRef: { type: string, description: Canonical name@version reference this manifest signs. }
+            specDigest: { $ref: '#/components/schemas/Digest' }
+            spec: { type: object, additionalProperties: true }
+            runtimeLock: { type: array, items: { $ref: '#/components/schemas/Digest' } }
+            toolLock: { type: array, items: { $ref: '#/components/schemas/Digest' } }
+            permissions: { $ref: '#/components/schemas/Digest' }
+            memorySchema: { $ref: '#/components/schemas/Digest' }
+            sbom: { $ref: '#/components/schemas/Digest' }
+            provenance:
+              type: object
+              additionalProperties: false
+              required: [builder, buildWorkflow, gitCommit]
+              properties:
+                builder: { type: string }
+                buildWorkflow: { type: string }
+                gitCommit: { type: string }
+                builtAt: { type: string, format: date-time }
+        signature:
+          type: object
+          additionalProperties: false
+          required: [keyId, ed25519, createdAt]
+          properties:
+            keyId: { type: string, description: Signing key identity in the control plane trust registry. }
+            ed25519: { type: string, description: Base64 raw std ed25519 signature over the manifest digest. }
+            createdAt: { type: string, format: date-time }
+    Digest:
+      type: object
+      additionalProperties: false
+      required: [algorithm, hex]
+      properties:
+        algorithm: { type: string, const: sha256 }
+        hex: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
     AgentVersion:
       type: object
       additionalProperties: false
@@ -472,6 +528,8 @@ components:
         resourceVersion: { type: integer, format: int64, const: 1, description: Immutable publications always have resource version 1. }
         createdAt: { type: string, format: date-time }
         traceId: { type: string, format: uuid }
+        packageKeyId: { type: string, description: Signing key identity of the verified package, when published signed. }
+        packageManifestDigest: { type: string, description: SHA-256 of the canonical signed manifest, when published signed. }
     Task:
       type: object
       additionalProperties: false

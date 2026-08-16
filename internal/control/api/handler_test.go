@@ -15,6 +15,7 @@ import (
 
 	controlapi "github.com/bian-cloud-skill/agentos/internal/control/api"
 	"github.com/bian-cloud-skill/agentos/internal/control/auth"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
@@ -220,6 +221,159 @@ func TestPublishAgentVersionIsStrictAndIdempotent(t *testing.T) {
 		t.Fatalf("missing idempotency key status = %d: %s", response.Code, response.Body.String())
 	}
 	assertReason(t, response, "INVALID_IDEMPOTENCY_KEY")
+}
+
+func TestPublishAgentVersionAdmissionFailClosed(t *testing.T) {
+	signingKey, key, err := agentpkg.GenerateSigningKey("ci-builder-1")
+	if err != nil {
+		t.Fatalf("generate package key: %v", err)
+	}
+	registry := agentpkg.NewRegistry()
+	if err := registry.Add(*key); err != nil {
+		t.Fatalf("trust key: %v", err)
+	}
+	backend := newMemoryStore()
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend, backend, controlapi.WithPackageAdmission(registry)),
+	)
+	spec := []byte(`{"runtimeClassPolicy":{"allowed":["oci"],"preferred":"oci"},"lifecycle":{"maxAttempts":5}}`)
+
+	// Without a signed package the publication is rejected fail-closed.
+	unsigned := performPublish(handler, spec, "publish-unsigned")
+	if unsigned.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unsigned status = %d, want 422: %s", unsigned.Code, unsigned.Body.String())
+	}
+	assertReason(t, unsigned, "PACKAGE_REQUIRED")
+
+	// A valid signed package is admitted and its envelope is recorded.
+	pkg := signedPackage(t, signingKey, "research-agent", "1.3.0", spec)
+	signed := performPackagePublish(handler, "research-agent", "1.3.0", spec, pkg, "publish-1")
+	if signed.Code != http.StatusCreated {
+		t.Fatalf("signed status = %d: %s", signed.Code, signed.Body.String())
+	}
+	var published map[string]any
+	if err := json.Unmarshal(signed.Body.Bytes(), &published); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if published["packageKeyId"] != "ci-builder-1" {
+		t.Fatalf("packageKeyId = %v, want ci-builder-1", published["packageKeyId"])
+	}
+	manifestDigest, ok := published["packageManifestDigest"].(string)
+	if !ok || len(manifestDigest) != 64 {
+		t.Fatalf("packageManifestDigest = %v, want hex sha256", published["packageManifestDigest"])
+	}
+
+	// An identical signed replay is idempotent.
+	replayed := performPackagePublish(handler, "research-agent", "1.3.0", spec, pkg, "publish-2")
+	if replayed.Code != http.StatusOK || replayed.Header().Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("replay status=%d headers=%v body=%s", replayed.Code, replayed.Header(), replayed.Body.String())
+	}
+
+	// A tampered signature is rejected before any binding check.
+	tampered := *pkg
+	tampered.Signature.Ed25519 = "AAAA"
+	badSignature := performPackagePublish(handler, "research-agent", "1.3.0", spec, &tampered, "publish-3")
+	if badSignature.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("tampered status = %d, want 422: %s", badSignature.Code, badSignature.Body.String())
+	}
+	assertReason(t, badSignature, "PACKAGE_SIGNATURE_INVALID")
+
+	// A package from an untrusted key is rejected.
+	_, attackerKey, err := agentpkg.GenerateSigningKey("attacker")
+	if err != nil {
+		t.Fatalf("generate attacker key: %v", err)
+	}
+	_ = attackerKey
+	forged, err := agentpkg.Sign(agentpkg.Manifest{
+		Schema: agentpkg.ManifestSchema, AgentVersionRef: "research-agent@1.3.0",
+		SpecDigest: agentpkg.SpecSHA256(spec), Spec: spec,
+		Provenance: agentpkg.Provenance{Builder: "test", BuildWorkflow: "unit.yml", GitCommit: "abc"},
+	}, signingKey)
+	if err != nil {
+		t.Fatalf("sign package: %v", err)
+	}
+	forged.Signature.KeyID = "attacker"
+	forgedPackage := performPackagePublish(handler, "research-agent", "1.3.0", spec, forged, "publish-4")
+	if forgedPackage.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("forged key status = %d, want 422: %s", forgedPackage.Code, forgedPackage.Body.String())
+	}
+	assertReason(t, forgedPackage, "PACKAGE_SIGNATURE_INVALID")
+
+	// The manifest must sign exactly this publication: wrong version binding.
+	wrongVersion := signedPackage(t, signingKey, "research-agent", "9.9.9", spec)
+	versionMismatch := performPackagePublish(handler, "research-agent", "1.3.0", spec, wrongVersion, "publish-5")
+	if versionMismatch.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("version mismatch status = %d, want 422: %s", versionMismatch.Code, versionMismatch.Body.String())
+	}
+	assertReason(t, versionMismatch, "PACKAGE_SIGNATURE_INVALID")
+
+	// The published spec bytes must equal the signed spec bytes.
+	otherSpec := []byte(`{"runtimeClassPolicy":{"allowed":["wasm"]}}`)
+	otherPackage := signedPackage(t, signingKey, "research-agent", "1.3.0", otherSpec)
+	specMismatch := performPackagePublish(handler, "research-agent", "1.3.0", spec, otherPackage, "publish-6")
+	if specMismatch.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("spec mismatch status = %d, want 422: %s", specMismatch.Code, specMismatch.Body.String())
+	}
+	assertReason(t, specMismatch, "PACKAGE_SIGNATURE_INVALID")
+}
+
+func TestPublishAgentVersionDevModeStillVerifiesPackages(t *testing.T) {
+	signingKey, key, err := agentpkg.GenerateSigningKey("ci-builder-1")
+	if err != nil {
+		t.Fatalf("generate package key: %v", err)
+	}
+	registry := agentpkg.NewRegistry()
+	if err := registry.Add(*key); err != nil {
+		t.Fatalf("trust key: %v", err)
+	}
+	backend := newMemoryStore()
+	// Dev mode: no admission registry, so unsigned publications are allowed…
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend, backend),
+	)
+	spec := []byte(`{"runtimeClassPolicy":{"allowed":["oci"]}}`)
+	unsigned := performPublish(handler, spec, "dev-publish-1")
+	if unsigned.Code != http.StatusCreated {
+		t.Fatalf("dev unsigned status = %d: %s", unsigned.Code, unsigned.Body.String())
+	}
+	// …but a presented package is still verified fail-closed.
+	tampered := *signedPackage(t, signingKey, "research-agent", "1.3.0", spec)
+	tampered.Signature.Ed25519 = "AAAA"
+	bad := performPackagePublish(handler, "research-agent", "1.3.0", spec, &tampered, "dev-publish-2")
+	if bad.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("dev tampered status = %d, want 422: %s", bad.Code, bad.Body.String())
+	}
+	assertReason(t, bad, "PACKAGE_SIGNATURE_INVALID")
+}
+
+// signedPackage builds an ADR-010 signed package for the publication.
+func signedPackage(t *testing.T, signingKey *agentpkg.SigningKey, name, version string, spec []byte) *agentpkg.Package {
+	t.Helper()
+	pkg, err := agentpkg.Sign(agentpkg.Manifest{
+		Schema: agentpkg.ManifestSchema, AgentVersionRef: name + "@" + version,
+		SpecDigest: agentpkg.SpecSHA256(spec), Spec: spec,
+		Provenance: agentpkg.Provenance{Builder: "test", BuildWorkflow: "unit.yml", GitCommit: "abc"},
+	}, signingKey)
+	if err != nil {
+		t.Fatalf("sign package: %v", err)
+	}
+	return pkg
+}
+
+func performPackagePublish(handler http.Handler, name, version string, spec []byte, pkg *agentpkg.Package, key string) *httptest.ResponseRecorder {
+	body, err := json.Marshal(map[string]any{
+		"name": name, "version": version, "namespace": "default",
+		"spec": json.RawMessage(spec), "package": pkg,
+	})
+	if err != nil {
+		panic(err)
+	}
+	request := publishRequest(body, key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 func TestGetAgentVersionDoesNotCrossTenantBoundary(t *testing.T) {
@@ -452,6 +606,7 @@ func (m *memoryStore) CreateAgentVersion(_ context.Context, in store.CreateAgent
 	version := store.AgentVersion{
 		ID: in.ID, TenantID: in.TenantID, Namespace: in.Namespace, Name: in.Name, Version: in.Version,
 		Spec: canonical, SpecDigest: digest, ResourceVersion: 1, CreatedAt: now,
+		PackageSignature: in.PackageSignature,
 	}
 	m.versions = append(m.versions, version)
 	return store.CreateAgentVersionResult{AgentVersion: version}, nil

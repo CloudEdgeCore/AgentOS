@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/control/auth"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
@@ -74,9 +76,24 @@ type Handler struct {
 	approvals    ApprovalStore
 	memories     MemoryAPI
 	newID        func() uuid.UUID
+	// packages is the ADR-010 publish gate. When non-nil, every publication
+	// must carry a package signed by a trusted key (fail-closed). When nil,
+	// unsigned dev publications are allowed, but a presented package is
+	// still verified.
+	packages *agentpkg.Registry
 }
 
-func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals ApprovalStore, memories MemoryAPI) http.Handler {
+// Option configures the control handler.
+type Option func(*Handler)
+
+// WithPackageAdmission installs the signed Agent Package publish gate
+// (ADR-010): publications without a package verified against the trusted key
+// registry are rejected.
+func WithPackageAdmission(registry *agentpkg.Registry) Option {
+	return func(h *Handler) { h.packages = registry }
+}
+
+func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals ApprovalStore, memories MemoryAPI, options ...Option) http.Handler {
 	handler := &Handler{
 		tasks:        taskStore,
 		agentVersion: agentVersions,
@@ -89,6 +106,9 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 			}
 			return id
 		},
+	}
+	for _, option := range options {
+		option(handler)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/tasks", handler.createTask)
@@ -411,10 +431,14 @@ func (h *Handler) readUsage(ctx context.Context, tenantID string, id uuid.UUID) 
 }
 
 type createAgentVersionRequest struct {
-	Name      string          `json:"name"`
-	Version   string          `json:"version"`
-	Namespace string          `json:"namespace"`
-	Spec      json.RawMessage `json:"spec"`
+	Name      string            `json:"name"`
+	Version   string            `json:"version"`
+	Namespace string            `json:"namespace"`
+	Spec      json.RawMessage   `json:"spec"`
+	// Package is the signed Agent Package (ADR-010). With publish admission
+	// installed it is required; without it, a presented package is still
+	// verified fail-closed.
+	Package *agentpkg.Package `json:"package,omitempty"`
 }
 
 type agentVersionResponse struct {
@@ -431,6 +455,8 @@ type agentVersionResponse struct {
 	ResourceVersion int64           `json:"resourceVersion"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	TraceID         string          `json:"traceId"`
+	PackageKeyID    string          `json:"packageKeyId,omitempty"`
+	PackageManifestDigest string    `json:"packageManifestDigest,omitempty"`
 }
 
 func (h *Handler) createAgentVersion(writer http.ResponseWriter, request *http.Request) {
@@ -476,9 +502,29 @@ func (h *Handler) createAgentVersion(writer http.ResponseWriter, request *http.R
 		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_AGENT_VERSION", err.Error(), traceID)
 		return
 	}
+	var packageSignature *store.PackageSignature
+	if body.Package != nil {
+		if err := h.admitPackage(body); err != nil {
+			h.writeProblem(writer, request, http.StatusUnprocessableEntity, "PACKAGE_SIGNATURE_INVALID", err.Error(), traceID)
+			return
+		}
+		manifestDigest, err := agentpkg.ManifestDigest(body.Package.Manifest)
+		if err != nil {
+			h.writeProblem(writer, request, http.StatusUnprocessableEntity, "PACKAGE_SIGNATURE_INVALID", err.Error(), traceID)
+			return
+		}
+		packageSignature = &store.PackageSignature{
+			KeyID: body.Package.Signature.KeyID, Signature: body.Package.Signature.Ed25519,
+			ManifestDigest: hex.EncodeToString(manifestDigest[:]),
+		}
+	} else if h.packages != nil {
+		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "PACKAGE_REQUIRED", "publication requires a signed agent package verified against the trust registry", traceID)
+		return
+	}
 	result, err := h.agentVersion.CreateAgentVersion(request.Context(), store.CreateAgentVersionInput{
 		ID: h.newID(), TenantID: principal.TenantID, Namespace: body.Namespace,
 		Name: body.Name, Version: body.Version, Spec: body.Spec,
+		PackageSignature: packageSignature,
 	})
 	if err != nil {
 		h.writeStoreProblem(writer, request, err, traceID)
@@ -1102,8 +1148,36 @@ func (h *Handler) writeAgentVersion(writer http.ResponseWriter, status int, vers
 		SpecDigest: fmt.Sprintf("%x", version.SpecDigest), ResourceVersion: version.ResourceVersion,
 		CreatedAt: version.CreatedAt.UTC(), TraceID: traceID,
 	}
+	if version.PackageSignature != nil {
+		response.PackageKeyID = version.PackageSignature.KeyID
+		response.PackageManifestDigest = version.PackageSignature.ManifestDigest
+	}
 	writer.Header().Set("ETag", fmt.Sprintf(`W/"%d"`, version.ResourceVersion))
 	writeJSON(writer, status, response)
+}
+
+// admitPackage is the ADR-010 publish gate. Verification is fail-closed
+// (signature, trusted key identity, canonical manifest) and additionally
+// binds the signed manifest to this exact publication: the manifest must sign
+// the same name@version reference and the same spec bytes being published.
+func (h *Handler) admitPackage(body createAgentVersionRequest) error {
+	if h.packages == nil {
+		// Dev mode without a trust registry: unsigned publications are
+		// allowed, but a presented package is still verified fail-closed
+		// against the empty trust set (every key is unknown).
+		return agentpkg.Verify(body.Package, nil)
+	}
+	if err := h.packages.Verify(body.Package); err != nil {
+		return err
+	}
+	if body.Package.Manifest.AgentVersionRef != body.Name+"@"+body.Version {
+		return fmt.Errorf("%w: manifest signs %q but the publication is %q",
+			agentpkg.ErrPackageBindingMismatch, body.Package.Manifest.AgentVersionRef, body.Name+"@"+body.Version)
+	}
+	if !body.Package.Manifest.SpecDigest.Verify(body.Spec) {
+		return fmt.Errorf("%w: spec does not match the signed spec digest", agentpkg.ErrPackageBindingMismatch)
+	}
+	return nil
 }
 
 func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Request, err error, traceID string) {
