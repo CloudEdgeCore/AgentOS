@@ -33,6 +33,7 @@ func main() {
 	tenantID := flag.String("tenant", "", "development tenant")
 	runtimeInstanceID := flag.String("runtime-instance-id", "", "assigned runtime instance ID")
 	artifactRoot := flag.String("artifact-root", "", "development content-addressed artifact directory")
+	artifactGC := flag.Duration("artifact-gc-retention", 0, "delete artifacts older than this retention at startup (0 = disabled; O7)")
 	pollInterval := flag.Duration("poll-interval", 250*time.Millisecond, "assignment polling interval")
 	heartbeatTTL := flag.Duration("heartbeat-ttl", 30*time.Second, "requested runtime lease TTL")
 	devMode := flag.Bool("dev-mode", false, "acknowledge deterministic non-sandboxed development provider")
@@ -80,6 +81,14 @@ func main() {
 	if err != nil {
 		slog.Error("create development artifact store", "error", err)
 		os.Exit(1)
+	}
+	if *artifactGC > 0 {
+		deleted, gcErr := artifactStore.GarbageCollect(ctx, *artifactGC, time.Now())
+		if gcErr != nil {
+			slog.Error("artifact garbage collection", "error", gcErr)
+			os.Exit(1)
+		}
+		slog.Info("artifact garbage collection", "deleted", deleted, "retention", *artifactGC)
 	}
 	worker := reference.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifactStore,
 		*tenantID, *runtimeInstanceID, *heartbeatTTL)

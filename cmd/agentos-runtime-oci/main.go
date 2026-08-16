@@ -25,6 +25,7 @@ func main() {
 	tenantID := flag.String("tenant", "", "development tenant")
 	runtimeInstanceID := flag.String("runtime-instance-id", "", "assigned runtime instance ID")
 	artifactRoot := flag.String("artifact-root", "", "development content-addressed artifact directory")
+	artifactGC := flag.Duration("artifact-gc-retention", 0, "delete artifacts older than this retention at startup (0 = disabled; O7)")
 	imageRef := flag.String("image-ref", "", "digest-pinned OCI image that runs the published AgentVersion")
 	namespace := flag.String("containerd-namespace", "agentos", "containerd namespace for sandboxed containers")
 	runtimeName := flag.String("containerd-runtime", "io.containerd.runsc.v1", "containerd runtime (runsc by default)")
@@ -89,6 +90,14 @@ func main() {
 	if err != nil {
 		slog.Error("create development artifact store", "error", err)
 		os.Exit(1)
+	}
+	if *artifactGC > 0 {
+		deleted, gcErr := artifactStore.GarbageCollect(ctx, *artifactGC, time.Now())
+		if gcErr != nil {
+			slog.Error("artifact garbage collection", "error", gcErr)
+			os.Exit(1)
+		}
+		slog.Info("artifact garbage collection", "deleted", deleted, "retention", *artifactGC)
 	}
 	worker := oci.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifactStore, executor,
 		*tenantID, *runtimeInstanceID, *heartbeatTTL, *imageRef)
