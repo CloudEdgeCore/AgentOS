@@ -17,10 +17,10 @@ import (
 // surface implemented; any other method panics, which is a test failure.
 type fakeSchedulingStore struct {
 	store.ControlStore
-	claims      []store.TaskClaim
-	scheduled   []uuid.UUID
-	released    int
-	poisonSpec  bool
+	claims     []store.TaskClaim
+	scheduled  []uuid.UUID
+	released   int
+	poisonSpec bool
 }
 
 func (f *fakeSchedulingStore) ClaimTasks(context.Context, store.ClaimTasksInput) ([]store.TaskClaim, error) {

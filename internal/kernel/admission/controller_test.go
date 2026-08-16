@@ -211,12 +211,12 @@ func taskClaim(ref, spec string) store.Task {
 }
 
 type fakeControlStore struct {
-	mu          sync.Mutex
-	versions    map[string]store.AgentVersion
-	claims      []store.TaskClaim
-	decisions   []store.DecideAdmissionInput
-	failTaskID  uuid.UUID
-	released    int
+	mu         sync.Mutex
+	versions   map[string]store.AgentVersion
+	claims     []store.TaskClaim
+	decisions  []store.DecideAdmissionInput
+	failTaskID uuid.UUID
+	released   int
 }
 
 func newFakeWithVersion(tenantID, ref, spec string) *fakeControlStore {
