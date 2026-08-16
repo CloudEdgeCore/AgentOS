@@ -528,8 +528,8 @@ components:
         resourceVersion: { type: integer, format: int64, const: 1, description: Immutable publications always have resource version 1. }
         createdAt: { type: string, format: date-time }
         traceId: { type: string, format: uuid }
-        packageKeyId: { type: string, description: Signing key identity of the verified package, when published signed. }
-        packageManifestDigest: { type: string, description: SHA-256 of the canonical signed manifest, when published signed. }
+        packageKeyId: { type: string, description: 'Signing key identity of the verified package, when published signed.' }
+        packageManifestDigest: { type: string, description: 'SHA-256 of the canonical signed manifest, when published signed.' }
     Task:
       type: object
       additionalProperties: false

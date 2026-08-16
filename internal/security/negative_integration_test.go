@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,17 +27,35 @@ import (
 
 const testDatabaseEnvironment = "AGENTOS_TEST_DATABASE_URL"
 
-// prepareSecurity connects to the test database, applies migrations and
-// resets the runtime tables.
+// securityDatabaseName is the dedicated database for the security suite: the
+// suite runs sequence-sensitive takeover scenarios, and other packages reset
+// shared test tables in parallel, so it must not share a database with them.
+const securityDatabaseName = "agentos_security"
+
+// prepareSecurity connects to the dedicated security test database (created
+// on demand), applies migrations and resets the runtime tables.
 func prepareSecurity(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv(testDatabaseEnvironment)
-	if url == "" {
+	baseURL := os.Getenv(testDatabaseEnvironment)
+	if baseURL == "" {
 		t.Skipf("%s is not set", testDatabaseEnvironment)
 	}
+	url, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	url.Path = "/" + securityDatabaseName
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, url)
+	admin, err := pgxpool.New(ctx, baseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL admin connection: %v", err)
+	}
+	_, _ = admin.Exec(ctx, `CREATE DATABASE `+securityDatabaseName)
+	admin.Close()
+
+	pool, err := pgxpool.New(ctx, url.String())
 	if err != nil {
 		t.Fatalf("open PostgreSQL: %v", err)
 	}

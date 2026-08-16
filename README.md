@@ -2,25 +2,32 @@
 
 Agent OS is a system software layer for securely publishing, scheduling, executing, recovering, governing, and auditing heterogeneous AI agents.
 
-The project is in its v0.1 kernel-slice phase. The current implementation establishes the invariants that every later runtime provider and gateway must preserve:
+The project is in its v0.3 Secure Runtime phase. The v0.1 kernel establishes
+the invariants that every later runtime provider and gateway must preserve —
+persistent `Task`/`Run`/`Attempt` lifecycles, an immutable `AgentVersion`
+registry, budget ledgers, lease/fencing tokens, durable outbox messaging,
+tenant-scoped storage, result-before-success ordering, fenced Admission and
+Scheduler reconciliation, a bounded Protobuf/gRPC Runtime Protocol,
+content-addressed Artifacts with logical Checkpoint envelopes, lease-expiry
+recovery, durable cancellation, and deterministic Go + capability-free
+Rust/Wasmtime runtime providers.
 
-- persistent `Task`, `Run`, and `Attempt` lifecycles;
-- an immutable `AgentVersion` publication registry with canonical `name@version` references;
-- a reserved task budget ledger with idempotent usage settlements and hard-stop enforcement;
-- optimistic concurrency through `resource_version`;
-- single-active-attempt execution through lease and fencing tokens;
-- idempotent creation and durable inbox/outbox messaging;
-- tenant-scoped database relationships;
-- result-before-success transaction ordering;
-- a versioned REST task submission/read contract;
-- fenced Admission and Scheduler reconciliation;
-- explainable runtime-pool placement;
-- PostgreSQL outbox delivery to NATS JetStream;
-- a fenced Protobuf/gRPC Runtime Protocol with bounded messages;
-- content-addressed Artifact metadata and logical Checkpoint envelopes;
-- lease-expiry recovery with higher fencing tokens and bounded retries;
-- durable cancellation from REST through Runtime acknowledgement;
-- deterministic Go and capability-free Rust/Wasmtime Runtime Providers.
+The v0.3 Secure Runtime closes the identity, supply-chain, secret and
+projection boundaries (delivery notes in
+[`docs/v0.3-secure-runtime.md`](docs/v0.3-secure-runtime.md)):
+
+- SPIFFE X.509-SVID mutual-TLS identity on the Runtime Protocol (ADR-011),
+  with `agentos-svid` issuing dev CA/SVID material;
+- signed Agent Packages with fail-closed publish admission (ADR-010) and
+  the `agentos-pkg` signing/verification CLI;
+- an OpenBao Secret Broker reference provider (ADR-012) behind the Tool
+  Gateway's scoped-credential contract;
+- an OpenSearch memory projection with tombstone deletion propagation
+  (ADR-013) via the outbox → JetStream → projector pipeline;
+- a security negative test suite (secret leak, approval binding, tenant
+  escape, fencing replay) in `internal/security`;
+- Firecracker/microVM documented as an explicit, not-yet-implemented
+  boundary ([`docs/firecracker-microvm-boundary.md`](docs/firecracker-microvm-boundary.md)).
 
 The complete architecture and technology baseline live in [`docs/`](./docs/).
 
@@ -92,6 +99,20 @@ The reference observability stack (tech baseline §15) is opt-in:
 docker compose --profile observability up -d
 $env:OTEL_EXPORTER_OTLP_ENDPOINT = "127.0.0.1:4317"   # traces/metrics/logs -> OTLP
 # Grafana: http://127.0.0.1:3300 (Prometheus/Tempo/Loki datasources provisioned)
+```
+
+The v0.3 Secure Runtime services are opt-in as well:
+
+```powershell
+docker compose --profile secrets up -d   # OpenBao Secret Broker (ADR-012)
+docker compose --profile search up -d    # OpenSearch projection target (ADR-013)
+go run ./cmd/agentos-svid -out tmp/svid -tenant dev -worker dev-worker-1   # SVID material (ADR-011)
+go run ./cmd/agentos-pkg genkey -id ci-builder-1                          # package signing key (ADR-010)
+go run ./cmd/agentos-projector -database-url $dbUrl -nats-url nats://127.0.0.1:54222 `
+  -opensearch-addr http://127.0.0.1:39200                                # memory projection
+# gateway with the Secret Broker:
+go run ./cmd/agentos-gateway ... -bao-addr http://127.0.0.1:58200 -bao-token bao-dev-only
+# runtime-control with the identity boundary (see docs/v0.3-secure-runtime.md for full flags)
 ```
 
 The reference Runtime exposes a loopback MCP endpoint (`-mcp-listen`) while an

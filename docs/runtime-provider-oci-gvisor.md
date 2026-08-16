@@ -85,5 +85,6 @@ runsc 本身提供 syscall 隔离,但 Provider 层仍需完成:
 ## 6. 明确不做(本 slice)
 
 - 通用透明进程快照;恢复只承诺逻辑 Checkpoint envelope(ADR-007)。
-- Firecracker/microVM 高隔离 Provider(v0.3,独立 RuntimeClass)。
+- Firecracker/microVM 高隔离 Provider:明确保持文档化边界,不在 v0.3
+  交付(见 [firecracker-microvm-boundary.md](firecracker-microvm-boundary.md))。
 - 从 Kernel 进程内加载第三方 Runtime 动态库(ADR-001)。
