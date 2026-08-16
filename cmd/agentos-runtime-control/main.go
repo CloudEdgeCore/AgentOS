@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log/slog"
 	"net"
@@ -15,6 +16,7 @@ import (
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
 	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
+	"github.com/bian-cloud-skill/agentos/internal/platform/spiffe"
 	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
@@ -28,10 +30,19 @@ func main() {
 	devTenant := flag.String("dev-tenant", "", "fixed development tenant")
 	maxLeaseTTL := flag.Duration("max-lease-ttl", 2*time.Minute, "maximum runtime-requested lease TTL")
 	devMode := flag.Bool("dev-mode", false, "acknowledge plaintext loopback-only development transport")
+	tlsCert := flag.String("tls-cert", "", "control plane X.509-SVID certificate (PEM)")
+	tlsKey := flag.String("tls-key", "", "control plane X.509-SVID private key (PEM)")
+	trustBundle := flag.String("trust-bundle", "", "SPIFFE trust bundle (PEM CA certificates)")
+	spiffePattern := flag.String("spiffe-pattern", "spiffe://agentos.dev/ns/*/worker/*", "SPIFFE ID pattern authorized to call the Runtime Protocol")
 	flag.Parse()
 
 	if *databaseURL == "" || strings.TrimSpace(*devTenant) == "" || *maxLeaseTTL <= 0 || !*devMode || !loopback(*listenAddress) {
 		slog.Error("database URL, dev tenant, positive max lease TTL, loopback listener, and explicit -dev-mode are required")
+		os.Exit(2)
+	}
+	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
+	if tlsConfigured && (*tlsCert == "" || *tlsKey == "" || *trustBundle == "") {
+		slog.Error("-tls-cert, -tls-key and -trust-bundle must be provided together for the mTLS boundary")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,9 +72,39 @@ func main() {
 		slog.Error("listen for Runtime Protocol", "error", err)
 		os.Exit(1)
 	}
-	server := grpc.NewServer(grpcx.ServerOptions()...)
+	serverOptions := append([]grpc.ServerOption{}, grpcx.ServerOptions()...)
+	var serviceOptions []runtimecontrol.Option
+	if tlsConfigured {
+		serverSVID, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			slog.Error("load control plane SVID", "error", err)
+			os.Exit(1)
+		}
+		bundlePEM, err := os.ReadFile(*trustBundle)
+		if err != nil {
+			slog.Error("read trust bundle", "error", err)
+			os.Exit(1)
+		}
+		pool, err := spiffe.TrustBundlePool([][]byte{bundlePEM})
+		if err != nil {
+			slog.Error("parse trust bundle", "error", err)
+			os.Exit(1)
+		}
+		pattern, err := spiffe.ParsePattern(*spiffePattern)
+		if err != nil {
+			slog.Error("parse SPIFFE pattern", "error", err)
+			os.Exit(1)
+		}
+		serverOptions = append(serverOptions, grpcx.ServerMTLSOptions(serverSVID, pool)...)
+		serverOptions = append(serverOptions, grpcx.WithSpiffeIdentity(pattern))
+		serviceOptions = append(serviceOptions, runtimecontrol.WithSpiffeClaimBinding(pattern.TrustDomain))
+		slog.Info("Runtime Protocol identity boundary active (mTLS X.509-SVID)", "pattern", pattern.String())
+	} else {
+		slog.Warn("Runtime Protocol has NO transport identity boundary: workers connect in plaintext (dev mode only)")
+	}
+	server := grpc.NewServer(serverOptions...)
 	runtimev1alpha1.RegisterRuntimeControlServiceServer(server,
-		runtimecontrol.NewService(postgresstore.New(pool), *devTenant, *maxLeaseTTL))
+		runtimecontrol.NewService(postgresstore.New(pool), *devTenant, *maxLeaseTTL, serviceOptions...))
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("agentos.runtime.v1alpha1.RuntimeControlService", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(server, healthServer)

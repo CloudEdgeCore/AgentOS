@@ -11,6 +11,7 @@ import (
 	"time"
 
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
+	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
 	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
@@ -34,6 +35,9 @@ func main() {
 	pollInterval := flag.Duration("poll-interval", 250*time.Millisecond, "assignment polling interval")
 	heartbeatTTL := flag.Duration("heartbeat-ttl", 30*time.Second, "requested runtime lease TTL")
 	devMode := flag.Bool("dev-mode", false, "acknowledge the v0.1 engineering-baseline provider (not a hardened sandbox)")
+	tlsCert := flag.String("tls-cert", "", "worker X.509-SVID certificate (PEM)")
+	tlsKey := flag.String("tls-key", "", "worker X.509-SVID private key (PEM)")
+	trustBundle := flag.String("trust-bundle", "", "SPIFFE trust bundle (PEM CA certificates)")
 	flag.Parse()
 	if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*runtimeInstanceID) == "" || strings.TrimSpace(*artifactRoot) == "" ||
 		strings.TrimSpace(*imageRef) == "" || *pollInterval <= 0 || *heartbeatTTL <= 0 || !*devMode {
@@ -62,8 +66,20 @@ func main() {
 		slog.Error("create OCI/gVisor executor", "error", err)
 		os.Exit(1)
 	}
+	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
+	controlCredentials, err := mtlsutil.ClientCredentials(tlsConfigured, *tlsCert, *tlsKey, *trustBundle)
+	if err != nil {
+		slog.Error("configure worker mTLS credentials", "error", err)
+		os.Exit(1)
+	}
+	if controlCredentials == nil {
+		controlCredentials = insecure.NewCredentials()
+		slog.Warn("Runtime Protocol client has NO transport identity (plaintext dev mode)")
+	} else {
+		slog.Info("Runtime Protocol client authenticating with X.509-SVID", "instance", *runtimeInstanceID)
+	}
 	connection, err := grpc.NewClient(*controlAddress,
-		append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
+		append([]grpc.DialOption{grpc.WithTransportCredentials(controlCredentials)}, grpcx.ClientOptions()...)...)
 	if err != nil {
 		slog.Error("create Runtime Protocol client", "error", err)
 		os.Exit(1)

@@ -15,6 +15,7 @@ import (
 	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
 	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
+	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
 	"github.com/bian-cloud-skill/agentos/internal/mcp"
 	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
 	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
@@ -35,11 +36,26 @@ func main() {
 	pollInterval := flag.Duration("poll-interval", 250*time.Millisecond, "assignment polling interval")
 	heartbeatTTL := flag.Duration("heartbeat-ttl", 30*time.Second, "requested runtime lease TTL")
 	devMode := flag.Bool("dev-mode", false, "acknowledge deterministic non-sandboxed development provider")
+	tlsCert := flag.String("tls-cert", "", "worker X.509-SVID certificate (PEM)")
+	tlsKey := flag.String("tls-key", "", "worker X.509-SVID private key (PEM)")
+	trustBundle := flag.String("trust-bundle", "", "SPIFFE trust bundle (PEM CA certificates)")
 	flag.Parse()
 	if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*runtimeInstanceID) == "" || strings.TrimSpace(*artifactRoot) == "" ||
 		*pollInterval <= 0 || *heartbeatTTL <= 0 || !*devMode {
 		slog.Error("tenant, runtime instance, artifact root, positive intervals, and explicit -dev-mode are required")
 		os.Exit(2)
+	}
+	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
+	controlCredentials, err := mtlsutil.ClientCredentials(tlsConfigured, *tlsCert, *tlsKey, *trustBundle)
+	if err != nil {
+		slog.Error("configure worker mTLS credentials", "error", err)
+		os.Exit(1)
+	}
+	if controlCredentials == nil {
+		controlCredentials = insecure.NewCredentials()
+		slog.Warn("Runtime Protocol client has NO transport identity (plaintext dev mode)")
+	} else {
+		slog.Info("Runtime Protocol client authenticating with X.509-SVID", "instance", *runtimeInstanceID)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -54,7 +70,7 @@ func main() {
 		_ = shutdownTelemetry(shutdownCtx)
 	}()
 	connection, err := grpc.NewClient(*controlAddress,
-		append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
+		append([]grpc.DialOption{grpc.WithTransportCredentials(controlCredentials)}, grpcx.ClientOptions()...)...)
 	if err != nil {
 		slog.Error("create Runtime Protocol client", "error", err)
 		os.Exit(1)

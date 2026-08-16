@@ -13,6 +13,7 @@ import (
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/bian-cloud-skill/agentos/internal/platform/spiffe"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -21,13 +22,29 @@ import (
 
 type Service struct {
 	runtimev1alpha1.UnimplementedRuntimeControlServiceServer
-	store         store.RuntimeStore
-	allowedTenant string
-	maxLeaseTTL   time.Duration
+	store             store.RuntimeStore
+	allowedTenant     string
+	maxLeaseTTL       time.Duration
+	spiffeTrustDomain string // empty = claim binding disabled (dev plaintext transport)
 }
 
-func NewService(repository store.RuntimeStore, allowedTenant string, maxLeaseTTL time.Duration) *Service {
-	return &Service{store: repository, allowedTenant: allowedTenant, maxLeaseTTL: maxLeaseTTL}
+// Option configures the runtime control service.
+type Option func(*Service)
+
+// WithSpiffeClaimBinding binds every request's tenant (and, where present,
+// runtime instance) claims to the peer's X.509-SVID SPIFFE ID (ADR-011). The
+// transport must be mutual TLS; requests without a verified SVID are
+// rejected.
+func WithSpiffeClaimBinding(trustDomain string) Option {
+	return func(s *Service) { s.spiffeTrustDomain = trustDomain }
+}
+
+func NewService(repository store.RuntimeStore, allowedTenant string, maxLeaseTTL time.Duration, options ...Option) *Service {
+	service := &Service{store: repository, allowedTenant: allowedTenant, maxLeaseTTL: maxLeaseTTL}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *Service) PollAssignment(ctx context.Context, request *runtimev1alpha1.PollAssignmentRequest) (*runtimev1alpha1.PollAssignmentResponse, error) {
@@ -35,6 +52,9 @@ func (s *Service) PollAssignment(ctx context.Context, request *runtimev1alpha1.P
 		return nil, status.Error(codes.InvalidArgument, "runtime instance ID is required")
 	}
 	if err := s.authorizeTenant(request.GetTenantId()); err != nil {
+		return nil, err
+	}
+	if err := s.authorizePeer(ctx, request.GetTenantId(), request.GetRuntimeInstanceId()); err != nil {
 		return nil, err
 	}
 	assignment, err := s.store.PollRuntimeAssignment(ctx, request.GetTenantId(), request.GetRuntimeInstanceId())
@@ -45,7 +65,7 @@ func (s *Service) PollAssignment(ctx context.Context, request *runtimev1alpha1.P
 }
 
 func (s *Service) GetAssignment(ctx context.Context, request *runtimev1alpha1.GetAssignmentRequest) (*runtimev1alpha1.GetAssignmentResponse, error) {
-	identity, attemptID, err := s.parseIdentity(request.GetIdentity())
+	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +77,7 @@ func (s *Service) GetAssignment(ctx context.Context, request *runtimev1alpha1.Ge
 }
 
 func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1alpha1.TransitionAttemptRequest) (*runtimev1alpha1.TransitionAttemptResponse, error) {
-	identity, attemptID, err := s.parseIdentity(request.GetIdentity())
+	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +102,7 @@ func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1alpha
 }
 
 func (s *Service) Heartbeat(ctx context.Context, request *runtimev1alpha1.HeartbeatRequest) (*runtimev1alpha1.HeartbeatResponse, error) {
-	identity, attemptID, err := s.parseIdentity(request.GetIdentity())
+	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +130,7 @@ func (s *Service) Heartbeat(ctx context.Context, request *runtimev1alpha1.Heartb
 }
 
 func (s *Service) CommitCheckpoint(ctx context.Context, request *runtimev1alpha1.CommitCheckpointRequest) (*runtimev1alpha1.CommitCheckpointResponse, error) {
-	identity, attemptID, err := s.parseIdentity(request.GetIdentity())
+	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +158,7 @@ func (s *Service) CommitCheckpoint(ctx context.Context, request *runtimev1alpha1
 }
 
 func (s *Service) CompleteAttempt(ctx context.Context, request *runtimev1alpha1.CompleteAttemptRequest) (*runtimev1alpha1.CompleteAttemptResponse, error) {
-	identity, attemptID, err := s.parseIdentity(request.GetIdentity())
+	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +180,7 @@ func (s *Service) CompleteAttempt(ctx context.Context, request *runtimev1alpha1.
 }
 
 func (s *Service) AcknowledgeCancellation(ctx context.Context, request *runtimev1alpha1.AcknowledgeCancellationRequest) (*runtimev1alpha1.AcknowledgeCancellationResponse, error) {
-	identity, attemptID, err := s.parseIdentity(request.GetIdentity())
+	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -177,11 +197,14 @@ func (s *Service) AcknowledgeCancellation(ctx context.Context, request *runtimev
 	}, nil
 }
 
-func (s *Service) parseIdentity(identity *runtimev1alpha1.AttemptIdentity) (*runtimev1alpha1.AttemptIdentity, uuid.UUID, error) {
+func (s *Service) parseIdentity(ctx context.Context, identity *runtimev1alpha1.AttemptIdentity) (*runtimev1alpha1.AttemptIdentity, uuid.UUID, error) {
 	if identity == nil || identity.GetFencingToken() <= 0 {
 		return nil, uuid.Nil, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
 	if err := s.authorizeTenant(identity.GetTenantId()); err != nil {
+		return nil, uuid.Nil, err
+	}
+	if err := s.authorizePeer(ctx, identity.GetTenantId(), ""); err != nil {
 		return nil, uuid.Nil, err
 	}
 	attemptID, err := uuid.Parse(identity.GetAttemptId())
@@ -194,6 +217,32 @@ func (s *Service) parseIdentity(identity *runtimev1alpha1.AttemptIdentity) (*run
 func (s *Service) authorizeTenant(tenantID string) error {
 	if strings.TrimSpace(tenantID) == "" || tenantID != s.allowedTenant {
 		return status.Error(codes.PermissionDenied, "tenant is not authorized by this runtime endpoint")
+	}
+	return nil
+}
+
+// authorizePeer binds the request's identity claims to the peer's X.509-SVID
+// (ADR-011). With claim binding configured, every call must arrive over
+// mutual TLS presenting an SVID whose SPIFFE ID names the same tenant (and,
+// when known, the same runtime instance) the request claims. Without claim
+// binding (development plaintext transport) the check is inert; deployments
+// enable it together with the mTLS server options.
+func (s *Service) authorizePeer(ctx context.Context, tenantID, runtimeInstanceID string) error {
+	if s.spiffeTrustDomain == "" {
+		return nil
+	}
+	identity, err := spiffe.PeerIdentity(ctx)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "mutual TLS worker identity is required: "+err.Error())
+	}
+	workerPrefix := "spiffe://" + s.spiffeTrustDomain + "/ns/" + tenantID + "/worker/"
+	if !strings.HasPrefix(identity, workerPrefix) {
+		return status.Error(codes.PermissionDenied, "peer SPIFFE identity does not match the tenant claim")
+	}
+	if runtimeInstanceID != "" {
+		if identity != spiffe.Identity(s.spiffeTrustDomain, tenantID, runtimeInstanceID) {
+			return status.Error(codes.PermissionDenied, "peer SPIFFE identity does not match the runtime instance claim")
+		}
 	}
 	return nil
 }
