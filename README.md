@@ -2,32 +2,35 @@
 
 Agent OS is a system software layer for securely publishing, scheduling, executing, recovering, governing, and auditing heterogeneous AI agents.
 
-The project is in its v0.3 Secure Runtime phase. The v0.1 kernel establishes
-the invariants that every later runtime provider and gateway must preserve —
-persistent `Task`/`Run`/`Attempt` lifecycles, an immutable `AgentVersion`
-registry, budget ledgers, lease/fencing tokens, durable outbox messaging,
-tenant-scoped storage, result-before-success ordering, fenced Admission and
-Scheduler reconciliation, a bounded Protobuf/gRPC Runtime Protocol,
-content-addressed Artifacts with logical Checkpoint envelopes, lease-expiry
-recovery, durable cancellation, and deterministic Go + capability-free
-Rust/Wasmtime runtime providers.
+The project is in its v0.4 Production Hardening phase. The v0.1 kernel
+establishes the invariants that every later runtime provider and gateway
+must preserve — persistent `Task`/`Run`/`Attempt` lifecycles, an immutable
+`AgentVersion` registry, budget ledgers, lease/fencing tokens, durable
+outbox messaging, tenant-scoped storage, result-before-success ordering,
+fenced Admission and Scheduler reconciliation, a bounded Protobuf/gRPC
+Runtime Protocol, content-addressed Artifacts with logical Checkpoint
+envelopes, lease-expiry recovery, durable cancellation, and deterministic
+Go + capability-free Rust/Wasmtime runtime providers.
 
-The v0.3 Secure Runtime closes the identity, supply-chain, secret and
-projection boundaries (delivery notes in
-[`docs/v0.3-secure-runtime.md`](docs/v0.3-secure-runtime.md)):
+The v0.3 Secure Runtime closed the identity, supply-chain, secret and
+projection boundaries ([`docs/v0.3-secure-runtime.md`](docs/v0.3-secure-runtime.md)):
+SPIFFE X.509-SVID mTLS, signed Agent Packages with fail-closed admission,
+an OpenBao Secret Broker, an OpenSearch memory projection with tombstone
+deletion propagation, a security negative test suite, and Firecracker
+documented as an explicit boundary.
 
-- SPIFFE X.509-SVID mutual-TLS identity on the Runtime Protocol (ADR-011),
-  with `agentos-svid` issuing dev CA/SVID material;
-- signed Agent Packages with fail-closed publish admission (ADR-010) and
-  the `agentos-pkg` signing/verification CLI;
-- an OpenBao Secret Broker reference provider (ADR-012) behind the Tool
-  Gateway's scoped-credential contract;
-- an OpenSearch memory projection with tombstone deletion propagation
-  (ADR-013) via the outbox → JetStream → projector pipeline;
-- a security negative test suite (secret leak, approval binding, tenant
-  escape, fencing replay) in `internal/security`;
-- Firecracker/microVM documented as an explicit, not-yet-implemented
-  boundary ([`docs/firecracker-microvm-boundary.md`](docs/firecracker-microvm-boundary.md)).
+The v0.4 Production Hardening phase (delivery notes in
+[`docs/v0.4-production-hardening.md`](docs/v0.4-production-hardening.md))
+adds the operations surface:
+
+- a transactional, hash-chained, append-only audit ledger (ADR-014) with
+  tenant-scoped query, chain verification and ed25519-signed exports;
+- an append-only OpenSearch audit projection alongside the memory one;
+- OpenBao dynamic database credentials with full lease lifecycle —
+  issued, renewed and revoked around the gateway process (ADR-015);
+- controller hardening: per-task error isolation, per-route request
+  budgets (504 on timeout), SSE stream caps and MCP concurrency caps;
+- OCI image digest pinning enforced end-to-end (spec → admission → worker).
 
 The complete architecture and technology baseline live in [`docs/`](./docs/).
 

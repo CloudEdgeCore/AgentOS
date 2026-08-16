@@ -40,13 +40,20 @@ func (b *blockingTaskStore) release() {
 	close(b.released)
 }
 
+func newBlockingTaskStore() *blockingTaskStore {
+	return &blockingTaskStore{
+		memoryStore: newMemoryStore(),
+		blocked:     true,
+		entered:     make(chan struct{}, 8),
+		released:    make(chan struct{}),
+		task: store.Task{ID: uuid.New(), TenantID: "tenant-a", Phase: "QUEUED", ResourceVersion: 1},
+	}
+}
+
 // TestRouteReadBudgetTimesOutSlowReads proves the per-route read budget (N9):
 // a GET whose store call exceeds the budget answers 504 instead of hanging.
 func TestRouteReadBudgetTimesOutSlowReads(t *testing.T) {
-	backend := &blockingTaskStore{
-		blocked: true, entered: make(chan struct{}, 8), released: make(chan struct{}),
-		task: store.Task{ID: uuid.New(), TenantID: "tenant-a", Phase: "QUEUED", ResourceVersion: 1},
-	}
+	backend := newBlockingTaskStore()
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "owner", TenantID: "tenant-a"},
 		controlapi.NewHandler(backend, backend, backend, backend,
@@ -70,10 +77,7 @@ func TestRouteReadBudgetTimesOutSlowReads(t *testing.T) {
 // TestSSECapacityBoundsConcurrentStreams proves the stream cap (O5): a second
 // stream is rejected with 503 while the first occupies the only slot.
 func TestSSECapacityBoundsConcurrentStreams(t *testing.T) {
-	backend := &blockingTaskStore{
-		blocked: true, entered: make(chan struct{}, 8), released: make(chan struct{}),
-		task: store.Task{ID: uuid.New(), TenantID: "tenant-a", Phase: "QUEUED", ResourceVersion: 1},
-	}
+	backend := newBlockingTaskStore()
 	handler := auth.StaticMiddleware(
 		auth.Principal{Subject: "owner", TenantID: "tenant-a"},
 		controlapi.NewHandler(backend, backend, backend, backend, controlapi.WithMaxSSESubscribers(1)),
