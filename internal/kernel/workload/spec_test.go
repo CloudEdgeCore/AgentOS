@@ -15,7 +15,7 @@ func TestImagePinValidation(t *testing.T) {
 	}
 
 	for name, image := range map[string]Image{
-		"empty ref":     {Ref: "", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"empty ref":      {Ref: "", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		"bad digest alg": {Ref: "example.com/agent", Digest: "md5:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		"short digest":   {Ref: "example.com/agent", Digest: "sha256:abc"},
 		"uppercase hex":  {Ref: "example.com/agent", Digest: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
