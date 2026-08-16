@@ -46,7 +46,7 @@ func newBlockingTaskStore() *blockingTaskStore {
 		blocked:     true,
 		entered:     make(chan struct{}, 8),
 		released:    make(chan struct{}),
-		task: store.Task{ID: uuid.New(), TenantID: "tenant-a", Phase: "QUEUED", ResourceVersion: 1},
+		task:        store.Task{ID: uuid.New(), TenantID: "tenant-a", Phase: "QUEUED", ResourceVersion: 1},
 	}
 }
 
