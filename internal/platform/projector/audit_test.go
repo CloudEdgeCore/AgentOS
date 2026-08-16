@@ -27,10 +27,10 @@ func (f *fakeAuditStore) GetAuditEvent(_ context.Context, tenantID string, id uu
 
 // recordingAuditSearch records every projection operation.
 type recordingAuditSearch struct {
-	mu       sync.Mutex
-	docs     map[string]map[string]any
-	indexed  []string
-	seqByID  map[string]int64
+	mu      sync.Mutex
+	docs    map[string]map[string]any
+	indexed []string
+	seqByID map[string]int64
 }
 
 func (r *recordingAuditSearch) Get(_ context.Context, id string) ([]byte, error) {
