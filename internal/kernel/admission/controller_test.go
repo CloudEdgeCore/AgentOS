@@ -449,6 +449,10 @@ func (f *fakeControlStore) ReleaseTaskClaim(context.Context, store.TaskClaim) er
 	return nil
 }
 
+func (f *fakeControlStore) DeferTaskSchedule(context.Context, store.DeferTaskScheduleInput) (store.Task, error) {
+	return store.Task{}, nil
+}
+
 func (f *fakeControlStore) GetTask(context.Context, string, uuid.UUID) (store.Task, error) {
 	return store.Task{}, store.ErrNotFound
 }

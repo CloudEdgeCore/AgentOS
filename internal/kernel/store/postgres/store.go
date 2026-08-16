@@ -650,6 +650,7 @@ func attemptEventType(phase domain.AttemptPhase) string {
 const taskColumns = `
 	id::text, tenant_id, namespace, agent_version_ref, agent_version_id::text, goal, spec, request_hash,
 	idempotency_key, phase, admission_reason_code, admitted_at, cancel_requested_at, active_run_id::text, result_ref,
+	next_schedule_attempt_at, schedule_retry_count,
 	resource_version, created_at, updated_at`
 
 const runColumns = `
@@ -672,11 +673,12 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 	var id string
 	var agentVersionID sql.NullString
 	var admissionReason, activeID, result sql.NullString
-	var admitted, cancel sql.NullTime
+	var admitted, cancel, nextSchedule sql.NullTime
 	var hash []byte
 	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &agentVersionID,
 		&task.Goal, &task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel,
-		&activeID, &result, &task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
+		&activeID, &result, &nextSchedule, &task.ScheduleRetryCount,
+		&task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return task, err
 	}
 	parsed, err := uuid.Parse(id)
@@ -703,6 +705,9 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 	}
 	if cancel.Valid {
 		task.CancelRequestedAt = &cancel.Time
+	}
+	if nextSchedule.Valid {
+		task.NextScheduleAttemptAt = &nextSchedule.Time
 	}
 	if activeID.Valid {
 		parsed, err := uuid.Parse(activeID.String)

@@ -37,13 +37,20 @@ func (s *Store) ClaimTasks(ctx context.Context, in kernelstore.ClaimTasksInput) 
 	}
 	defer rollback(ctx, tx)
 
+	// Scheduling claims honor the O6 backoff: a task deferred after a
+	// no-placement is not claimable until next_schedule_attempt_at. Admission
+	// claims are unaffected (queued tasks are never deferred).
+	scheduleEligible := ""
+	if in.Kind == kernelstore.ControllerScheduling {
+		scheduleEligible = ` AND (t.next_schedule_attempt_at IS NULL OR t.next_schedule_attempt_at <= $3)`
+	}
 	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t
 		WHERE t.phase = $1
 		  AND NOT EXISTS (
 			SELECT 1 FROM task_controller_claims c
 			WHERE c.tenant_id = t.tenant_id AND c.task_id = t.id
 			  AND c.controller_kind = $2 AND c.expires_at > $3
-		  )
+		  )`+scheduleEligible+`
 		ORDER BY t.created_at, t.id
 		FOR UPDATE OF t SKIP LOCKED
 		LIMIT $4`, in.Phase, in.Kind, now, in.Limit)
@@ -214,6 +221,66 @@ func (s *Store) ReleaseTaskClaim(ctx context.Context, claim kernelstore.TaskClai
 	return nil
 }
 
+// DeferTaskSchedule releases the scheduling claim on a task that no pool
+// could place and defers its next attempt until Until (O6). The deferral
+// commits atomically with the claim release, bumps the task's resource
+// version (so task-event streams observe it), and emits a
+// TaskScheduleDeferred outbox event. The caller must still own the claim;
+// stale owners are fenced.
+func (s *Store) DeferTaskSchedule(ctx context.Context, in kernelstore.DeferTaskScheduleInput) (kernelstore.Task, error) {
+	var zero kernelstore.Task
+	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.OwnerID) == "" || in.Until.IsZero() {
+		return zero, fmt.Errorf("tenant, owner, and a deferral deadline are required")
+	}
+	now := s.now()
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return zero, err
+	}
+	defer rollback(ctx, tx)
+
+	task, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks
+		WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.TaskID.String()))
+	if err != nil {
+		return zero, classify(err)
+	}
+	if task.ResourceVersion != in.ExpectedTaskVersion {
+		return zero, versionConflict("task", task.ID, in.ExpectedTaskVersion, task.ResourceVersion)
+	}
+	if err := requireTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerScheduling, in.OwnerID, in.ClaimFencingToken, now); err != nil {
+		return zero, err
+	}
+	if task.Phase != domain.TaskAdmitted {
+		return zero, fmt.Errorf("%w: task is %s", kernelstore.ErrInvalidTransition, task.Phase)
+	}
+	updated, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET
+		next_schedule_attempt_at = $1,
+		schedule_retry_count = schedule_retry_count + 1,
+		resource_version = resource_version + 1, updated_at = $2
+		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
+		in.Until.UTC(), now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion))
+	if err != nil {
+		return zero, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
+	}
+	if err := deleteTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerScheduling, in.OwnerID, in.ClaimFencingToken); err != nil {
+		return zero, err
+	}
+	if err := insertEvent(ctx, tx, in.TenantID, "Task", task.ID, updated.ResourceVersion, "TaskScheduleDeferred", map[string]any{
+		"taskId": task.ID, "until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount,
+	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "task.schedule.deferred", "Task", task.ID, map[string]any{
+		"until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount,
+	}, now); err != nil {
+		return zero, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return zero, classify(err)
+	}
+	return updated, nil
+}
+
 func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInput) (kernelstore.AttemptLease, error) {
 	if err := validateScheduleInput(in); err != nil {
 		return kernelstore.AttemptLease{}, err
@@ -280,6 +347,7 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 		return kernelstore.AttemptLease{}, classify(err)
 	}
 	updatedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'RUNNING', active_run_id = $1,
+		next_schedule_attempt_at = NULL, schedule_retry_count = 0,
 		resource_version = resource_version + 1, updated_at = $2
 		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
 		run.ID.String(), now, in.TenantID, task.ID.String(), in.ExpectedTaskVersion))

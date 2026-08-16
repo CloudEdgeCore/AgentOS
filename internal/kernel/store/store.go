@@ -54,9 +54,17 @@ type Task struct {
 	CancelRequestedAt   *time.Time
 	ActiveRunID         *uuid.UUID
 	ResultRef           string
-	ResourceVersion     int64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// NextScheduleAttemptAt gates scheduling-claim eligibility (O6): a task
+	// deferred after a no-placement is not claimable by the scheduler until
+	// this deadline. Nil means eligible immediately.
+	NextScheduleAttemptAt *time.Time
+	// ScheduleRetryCount is the number of consecutive no-placement
+	// deferrals; it drives the exponential scheduling backoff and resets on
+	// successful placement.
+	ScheduleRetryCount int64
+	ResourceVersion    int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type Run struct {

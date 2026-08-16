@@ -77,6 +77,20 @@ type ScheduleTaskInput struct {
 	LeaseTTL            time.Duration
 }
 
+// DeferTaskScheduleInput releases the scheduler's claim on a task that no
+// pool could place and defers its next scheduling attempt until Until (O6).
+// The deferral is recorded on the task — not on the claim — so every
+// controller instance agrees on the backoff, and the claim is deleted in the
+// same transaction (immediate release, no waiting out the claim TTL).
+type DeferTaskScheduleInput struct {
+	TaskID              uuid.UUID
+	TenantID            string
+	OwnerID             string
+	ClaimFencingToken   int64
+	ExpectedTaskVersion int64
+	Until               time.Time
+}
+
 type OutboxEvent struct {
 	ID               uuid.UUID
 	TenantID         string
@@ -104,6 +118,7 @@ type ControlStore interface {
 	ReleaseTaskClaim(context.Context, TaskClaim) error
 	DecideAdmission(context.Context, DecideAdmissionInput) (Task, error)
 	ScheduleTask(context.Context, ScheduleTaskInput) (AttemptLease, error)
+	DeferTaskSchedule(context.Context, DeferTaskScheduleInput) (Task, error)
 	ClaimOutbox(context.Context, ClaimOutboxInput) ([]OutboxEvent, error)
 	MarkOutboxPublished(context.Context, uuid.UUID, string, int64, time.Time) error
 	MarkOutboxFailed(context.Context, uuid.UUID, string, int64, string, time.Time) error

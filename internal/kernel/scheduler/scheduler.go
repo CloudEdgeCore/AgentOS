@@ -330,8 +330,26 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 	selection, err := Select(spec, pools)
 	if err != nil {
 		if errors.Is(err, ErrNoPlacement) {
-			// Keep the short claim until expiry to avoid hot-looping when all
-			// pools are full. Another controller may retry after the TTL.
+			// O6: release the claim immediately and defer the next attempt
+			// with exponential backoff instead of pinning the claim until
+			// its TTL. The deferral lives on the task, so every controller
+			// instance honors the same backoff and the task is claimable
+			// again the moment it elapses.
+			_, deferErr := c.store.DeferTaskSchedule(ctx, store.DeferTaskScheduleInput{
+				TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
+				ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
+				Until: time.Now().UTC().Add(scheduleBackoff(claim.Task.ScheduleRetryCount)),
+			})
+			if deferErr != nil {
+				if store.IsRetryableTransaction(deferErr) {
+					return false, deferErr
+				}
+				// The deferral commit failed (stale claim or unexpected
+				// store failure): release the claim so the task is not
+				// pinned, and continue.
+				_ = c.store.ReleaseTaskClaim(ctx, claim)
+				slog.Error("schedule deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
+			}
 			return false, nil
 		}
 		_ = c.store.ReleaseTaskClaim(ctx, claim)
@@ -364,4 +382,27 @@ func newUUIDv7() uuid.UUID {
 		return uuid.New()
 	}
 	return id
+}
+
+// scheduleBackoff returns the exponential backoff for a task's next
+// scheduling attempt after a no-placement (O6): 5s doubled per consecutive
+// deferral, capped at 5 minutes. The retry count comes from the task row, so
+// the progression survives controller restarts and is shared across
+// instances.
+func scheduleBackoff(retries int64) time.Duration {
+	const (
+		base = 5 * time.Second
+		max  = 5 * time.Minute
+	)
+	if retries < 0 {
+		retries = 0
+	}
+	if retries > 6 {
+		return max
+	}
+	backoff := base << retries
+	if backoff > max {
+		return max
+	}
+	return backoff
 }
