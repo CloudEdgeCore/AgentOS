@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/google/uuid"
@@ -188,6 +189,17 @@ func (s *Store) UpdateToolCall(ctx context.Context, in kernelstore.UpdateToolCal
 	if err != nil {
 		return zero, classifyCAS(err, "tool call", in.ToolCallID, in.ExpectedVersion)
 	}
+	// Audit the decision points of the tool decision chain (ADR-014);
+	// intermediate parking transitions are not audited.
+	switch in.Status {
+	case kernelstore.ToolCallDenied, kernelstore.ToolCallApproved, kernelstore.ToolCallExecuted, kernelstore.ToolCallFailed:
+		if err := auditHook(ctx, tx, in.TenantID, "tool_call.decided", "ToolCall", in.ToolCallID, map[string]any{
+			"status": string(in.Status), "tool": current.ToolName + "@" + current.ToolVersion,
+			"action": current.Action, "resource": current.Resource, "reasons": in.DecisionReasons,
+		}, s.now()); err != nil {
+			return zero, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return zero, classify(err)
 	}
@@ -202,7 +214,18 @@ func (s *Store) CreateToolApproval(ctx context.Context, in kernelstore.CreateToo
 	if err := validateApprovalInput(in); err != nil {
 		return result, err
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO tool_approvals (
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return result, err
+	}
+	defer rollback(ctx, tx)
+	// The insert is guarded by a savepoint: a concurrent duplicate on the
+	// binding unique key aborts only the insert, and the transaction (which
+	// carries the audit append) can still commit.
+	if _, err := tx.Exec(ctx, `SAVEPOINT create_approval`); err != nil {
+		return result, classify(err)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO tool_approvals (
 		id, tenant_id, call_id, task_id, run_id, attempt_id, tool_name, tool_version, action, resource,
 		args_hash, requested_at, expires_at
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
@@ -213,11 +236,14 @@ func (s *Store) CreateToolApproval(ctx context.Context, in kernelstore.CreateToo
 		if !isUniqueViolation(err) {
 			return result, classify(err)
 		}
-		// The same bound approval already exists: return it.
+		if _, rollbackErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT create_approval`); rollbackErr != nil {
+			return result, classify(rollbackErr)
+		}
+		// The same bound approval already exists: return it without re-audit.
 		approval, lookupErr := s.GetToolApproval(ctx, in.TenantID, in.ID)
 		if lookupErr != nil {
 			// The conflict may be on the binding unique key with a different ID.
-			approval, lookupErr = scanToolApproval(s.pool.QueryRow(ctx, `SELECT `+toolApprovalColumns+` FROM tool_approvals
+			approval, lookupErr = scanToolApproval(tx.QueryRow(ctx, `SELECT `+toolApprovalColumns+` FROM tool_approvals
 				WHERE tenant_id = $1 AND attempt_id = $2 AND tool_name = $3 AND tool_version = $4 AND action = $5
 				AND resource = $6 AND args_hash = $7`,
 				in.TenantID, in.AttemptID.String(), in.ToolName, in.ToolVersion, in.Action, in.Resource, in.ArgsHash[:]))
@@ -225,8 +251,20 @@ func (s *Store) CreateToolApproval(ctx context.Context, in kernelstore.CreateToo
 				return result, classify(lookupErr)
 			}
 		}
+		if err := tx.Commit(ctx); err != nil {
+			return result, classify(err)
+		}
 		result.ToolApproval, result.Existing = approval, true
 		return result, nil
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "approval.requested", "ToolApproval", in.ID, map[string]any{
+		"tool": in.ToolName + "@" + in.ToolVersion, "action": in.Action, "resource": in.Resource,
+		"attemptId": in.AttemptID.String(), "expiresAt": in.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}, in.RequestedAt); err != nil {
+		return result, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, classify(err)
 	}
 	result.ToolApproval, err = s.GetToolApproval(ctx, in.TenantID, in.ID)
 	return result, err
@@ -269,6 +307,11 @@ func (s *Store) DecideToolApproval(ctx context.Context, in kernelstore.DecideToo
 			in.TenantID, in.ApprovalID.String(), in.ExpectedVersion)); expireErr != nil {
 			return zero, classifyCAS(expireErr, "tool approval", in.ApprovalID, in.ExpectedVersion)
 		}
+		if err := auditHook(ctx, tx, in.TenantID, "approval.expired", "ToolApproval", in.ApprovalID, map[string]any{
+			"tool": current.ToolName + "@" + current.ToolVersion, "action": current.Action, "resource": current.Resource,
+		}, in.Now); err != nil {
+			return zero, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return zero, classify(err)
 		}
@@ -280,6 +323,12 @@ func (s *Store) DecideToolApproval(ctx context.Context, in kernelstore.DecideToo
 		string(in.Decision), in.Now, in.DecidedBy, in.TenantID, in.ApprovalID.String(), in.ExpectedVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "tool approval", in.ApprovalID, in.ExpectedVersion)
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "approval.decided", "ToolApproval", in.ApprovalID, map[string]any{
+		"decision": string(in.Decision), "decidedBy": in.DecidedBy,
+		"tool": current.ToolName + "@" + current.ToolVersion, "action": current.Action, "resource": current.Resource,
+	}, in.Now); err != nil {
+		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return zero, classify(err)

@@ -69,6 +69,11 @@ func (s *Store) RequestTaskCancellation(ctx context.Context, tenantID string, ta
 		}, now, s.newID()); err != nil {
 			return zero, err
 		}
+		if err := auditHook(ctx, tx, tenantID, "task.cancelled", "Task", task.ID, map[string]any{
+			"phase": string(domain.TaskCancelled),
+		}, now); err != nil {
+			return zero, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return zero, classify(err)
 		}
@@ -130,6 +135,11 @@ func (s *Store) RequestTaskCancellation(ctx context.Context, tenantID string, ta
 	if err := insertEvent(ctx, tx, tenantID, "Task", task.ID, updatedTask.ResourceVersion, "TaskCancelRequested", map[string]any{
 		"taskId": task.ID, "runId": run.ID, "attemptId": attempt.ID,
 	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, tenantID, "task.cancellation.requested", "Task", task.ID, map[string]any{
+		"runId": run.ID, "attemptId": attempt.ID,
+	}, now); err != nil {
 		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -350,6 +360,12 @@ func (s *Store) CommitCheckpoint(ctx context.Context, input kernelstore.CommitCh
 	}, now, s.newID()); err != nil {
 		return zeroCheckpoint, zeroAttempt, err
 	}
+	if err := auditHook(ctx, tx, in.TenantID, "checkpoint.committed", "Attempt", attempt.ID, map[string]any{
+		"checkpointId": checkpoint.ID, "runId": run.ID, "schemaVersion": in.SchemaVersion,
+		"artifactUri": in.State.URI,
+	}, now); err != nil {
+		return zeroCheckpoint, zeroAttempt, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return zeroCheckpoint, zeroAttempt, classify(err)
 	}
@@ -479,6 +495,11 @@ func (s *Store) CompleteAttempt(ctx context.Context, in kernelstore.CompleteAtte
 		in.IdempotencyKey, requestHash[:], response, now); err != nil {
 		return result, classify(err)
 	}
+	if err := auditHook(ctx, tx, in.TenantID, "attempt.completed", "Attempt", attempt.ID, map[string]any{
+		"runId": run.ID, "taskId": task.ID, "resultRef": artifact.URI,
+	}, now); err != nil {
+		return result, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, classify(err)
 	}
@@ -601,6 +622,11 @@ func (s *Store) AcknowledgeCancellation(ctx context.Context, in kernelstore.Canc
 		in.IdempotencyKey, requestHash[:], response, now); err != nil {
 		return result, classify(err)
 	}
+	if err := auditHook(ctx, tx, in.TenantID, "cancellation.acknowledged", "Attempt", attempt.ID, map[string]any{
+		"runId": run.ID, "taskId": task.ID,
+	}, now); err != nil {
+		return result, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, classify(err)
 	}
@@ -709,6 +735,11 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 				return result, err
 			}
 		}
+		if err := auditHook(ctx, tx, in.TenantID, "attempt.recovered", "Attempt", attempt.ID, map[string]any{
+			"runId": run.ID, "taskId": task.ID, "reason": "CANCELLED_AFTER_EXPIRY",
+		}, now); err != nil {
+			return result, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return result, classify(err)
 		}
@@ -792,6 +823,12 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 	if err := insertEvent(ctx, tx, in.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunAttemptRecovered", map[string]any{
 		"runId": run.ID, "attemptId": newAttempt.ID, "previousAttemptId": attempt.ID, "fencingToken": newToken,
 	}, now, s.newID()); err != nil {
+		return result, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "attempt.recovered", "Attempt", attempt.ID, map[string]any{
+		"runId": run.ID, "taskId": task.ID, "newAttemptId": newAttempt.ID,
+		"newFencingToken": newToken, "ordinal": attempt.Ordinal + 1,
+	}, now); err != nil {
 		return result, err
 	}
 	if err := tx.Commit(ctx); err != nil {

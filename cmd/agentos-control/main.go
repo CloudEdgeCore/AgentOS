@@ -36,6 +36,8 @@ func main() {
 		packageTrustKeys = append(packageTrustKeys, value)
 		return nil
 	})
+	auditSigningKey := flag.String("audit-signing-key", "", "base64 raw std ed25519 private key that signs audit exports (ADR-014; absent = unsigned dev exports)")
+	auditSigningKeyID := flag.String("audit-signing-key-id", "control-plane-audit", "key identity recorded on signed audit exports")
 	flag.Parse()
 
 	if *databaseURL == "" {
@@ -86,6 +88,18 @@ func main() {
 		slog.Info("publish admission active: agent versions require a signed package", "trustedKeys", registry.Len())
 	} else {
 		slog.Warn("publish admission is OFF: unsigned agent version publications are allowed (dev mode)")
+	}
+	options = append(options, controlapi.WithAuditStore(repository))
+	if strings.TrimSpace(*auditSigningKey) != "" {
+		decoded, err := agentpkg.DecodePrivateKey(*auditSigningKey)
+		if err != nil {
+			slog.Error("configure audit signing key", "error", err)
+			os.Exit(1)
+		}
+		options = append(options, controlapi.WithAuditSigningKey(*auditSigningKeyID, decoded))
+		slog.Info("audit exports are signed", "keyId", *auditSigningKeyID)
+	} else {
+		slog.Warn("audit exports are UNSIGNED (dev mode); configure -audit-signing-key for signed WORM archives")
 	}
 	handler := controlapi.NewHandler(repository, repository, repository,
 		memory.NewGateway(memory.DevEmbedder{}, repository), options...)

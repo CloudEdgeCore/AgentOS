@@ -389,6 +389,73 @@ paths:
         '415': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
         '428': { $ref: '#/components/responses/Problem' }
+  /v1/audit:
+    get:
+      operationId: listAudit
+      summary: Page the tenant's audit ledger
+      description: >-
+        Returns the authenticated tenant's append-only audit ledger
+        (ADR-014), paged forward by seq. Events carry the per-tenant hash
+        chain so integrity can be verified independently.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: afterSeq
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: One page of audit events and the next cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditList'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/audit/verify:
+    get:
+      operationId: verifyAudit
+      summary: Verify the tenant's audit hash chain
+      description: >-
+        Walks the tenant's ledger and reports whether every link and stored
+        chain hash is intact. A tampered or truncated chain reports the first
+        broken seq.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: Chain integrity result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditVerification'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/audit/export:
+    get:
+      operationId: exportAudit
+      summary: Export the tenant's audit ledger as a signed archive
+      description: >-
+        Returns the full ledger with its hash chain. When the control plane
+        is configured with -audit-signing-key, the archive is signed with
+        ed25519 over the canonical payload (schemaVersion, tenantId,
+        generatedAt, events) for WORM-style compliance archives.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The signed (or dev-unsigned) audit archive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExport'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -745,5 +812,63 @@ components:
         instance: { type: string }
         reasonCode: { type: string }
         traceId: { type: string, format: uuid }
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, seq, eventType, resourceType, resourceId, actor, details, prevHash, chainHash, occurredAt]
+      description: One append-only audit record (ADR-014); chainHash is the canonical hash the next event's prevHash must equal.
+      properties:
+        id: { type: string, format: uuid }
+        seq: { type: integer, format: int64, minimum: 1 }
+        eventType: { type: string, description: 'Dotted decision name, e.g. task.queued, approval.decided.' }
+        resourceType: { type: string }
+        resourceId: { type: string, format: uuid }
+        actor: { type: string, const: kernel }
+        details: { type: object, additionalProperties: true }
+        prevHash: { type: string, description: SHA-256 (hex) of the previous event's chainHash; the genesis anchor for seq 1. }
+        chainHash: { type: string, description: SHA-256 (hex) of this event's canonical record. }
+        occurredAt: { type: string, format: date-time }
+    AuditList:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        nextAfterSeq:
+          type: integer
+          format: int64
+          description: Cursor for the next page (the last returned seq).
+    AuditVerification:
+      type: object
+      additionalProperties: false
+      required: [valid, checked, firstBrokenSeq, headSeq, headHash]
+      properties:
+        valid: { type: boolean }
+        checked: { type: integer, format: int64, description: Number of events walked. }
+        firstBrokenSeq: { type: integer, format: int64, description: First seq whose link or hash is broken; 0 when valid. }
+        headSeq: { type: integer, format: int64 }
+        headHash: { type: string }
+    AuditExport:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, tenantId, generatedAt, signed, events]
+      properties:
+        schemaVersion: { type: string, const: 'agentos.audit/v1' }
+        tenantId: { type: string }
+        generatedAt: { type: string, format: date-time }
+        signed: { type: boolean, description: False in dev when no -audit-signing-key is configured. }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        signature:
+          type: object
+          additionalProperties: false
+          required: [keyId, ed25519]
+          description: ed25519 over the SHA-256 of the canonical payload (schemaVersion, tenantId, generatedAt, events).
+          properties:
+            keyId: { type: string }
+            ed25519: { type: string, description: Base64 raw std signature. }
 security:
   - bearerAuth: []

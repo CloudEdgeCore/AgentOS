@@ -74,11 +74,11 @@ func TestTaskIdempotencyAndCAS(t *testing.T) {
 	}
 
 	var outboxCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events`).Scan(&outboxCount); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE aggregate_type = 'Task'`).Scan(&outboxCount); err != nil {
 		t.Fatalf("count outbox: %v", err)
 	}
 	if outboxCount != 2 {
-		t.Fatalf("outbox count = %d, want 2", outboxCount)
+		t.Fatalf("outbox count = %d, want 2 (Task aggregate only; audit events are separate)", outboxCount)
 	}
 }
 
@@ -359,9 +359,19 @@ func TestControllerClaimFencingAndOutboxOwnership(t *testing.T) {
 	}
 
 	events, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-a", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(events) != 1 {
-		t.Fatalf("claim outbox: events=%d err=%v", len(events), err)
+	if err != nil {
+		t.Fatalf("claim outbox: err=%v", err)
 	}
+	var taskEvents []kernelstore.OutboxEvent
+	for _, event := range events {
+		if event.AggregateType == "Task" {
+			taskEvents = append(taskEvents, event)
+		}
+	}
+	if len(taskEvents) != 1 {
+		t.Fatalf("claim outbox: Task events=%d (total %d) err=%v", len(taskEvents), len(events), err)
+	}
+	events = taskEvents
 	other, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-b", Limit: 10, LockTTL: time.Minute})
 	if err != nil || len(other) != 0 {
 		t.Fatalf("second dispatcher stole event: events=%d err=%v", len(other), err)
@@ -374,9 +384,19 @@ func TestControllerClaimFencingAndOutboxOwnership(t *testing.T) {
 		t.Fatalf("expected expired outbox claim fencing, got %v", err)
 	}
 	reclaimed, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-a", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(reclaimed) != 1 {
-		t.Fatalf("reclaim outbox: events=%d err=%v", len(reclaimed), err)
+	if err != nil {
+		t.Fatalf("reclaim outbox: err=%v", err)
 	}
+	var reclaimedTask []kernelstore.OutboxEvent
+	for _, event := range reclaimed {
+		if event.AggregateType == "Task" {
+			reclaimedTask = append(reclaimedTask, event)
+		}
+	}
+	if len(reclaimedTask) != 1 {
+		t.Fatalf("reclaim outbox: Task events=%d (total %d) err=%v", len(reclaimedTask), len(reclaimed), err)
+	}
+	reclaimed = reclaimedTask
 	if reclaimed[0].LockFencingToken <= events[0].LockFencingToken {
 		t.Fatalf("outbox token did not increase: old=%d new=%d", events[0].LockFencingToken, reclaimed[0].LockFencingToken)
 	}
@@ -413,15 +433,35 @@ func TestOutboxClaimsOnlyTheNextAggregateVersion(t *testing.T) {
 		t.Fatalf("admit task: %v", err)
 	}
 	first, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "first", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(first) != 1 || first[0].AggregateVersion != 1 {
-		t.Fatalf("first aggregate claim=%+v err=%v", first, err)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
 	}
-	if err := repository.MarkOutboxPublished(ctx, first[0].ID, "first", first[0].LockFencingToken, clock.Now()); err != nil {
+	// Audit projection events share the outbox; the ordering rule applies per
+	// aggregate, so filter to the Task aggregate for the version assertions.
+	var taskClaims []kernelstore.OutboxEvent
+	for _, event := range first {
+		if event.AggregateType == "Task" {
+			taskClaims = append(taskClaims, event)
+		}
+	}
+	if len(taskClaims) != 1 || taskClaims[0].AggregateVersion != 1 {
+		t.Fatalf("first Task aggregate claim=%+v err=%v", taskClaims, err)
+	}
+	if err := repository.MarkOutboxPublished(ctx, taskClaims[0].ID, "first", taskClaims[0].LockFencingToken, clock.Now()); err != nil {
 		t.Fatalf("publish first version: %v", err)
 	}
 	second, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "second", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(second) != 1 || second[0].AggregateVersion != 2 {
-		t.Fatalf("second aggregate claim=%+v err=%v", second, err)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	var secondTask []kernelstore.OutboxEvent
+	for _, event := range second {
+		if event.AggregateType == "Task" {
+			secondTask = append(secondTask, event)
+		}
+	}
+	if len(secondTask) != 1 || secondTask[0].AggregateVersion != 2 {
+		t.Fatalf("second Task aggregate claim=%+v err=%v", secondTask, err)
 	}
 }
 
@@ -491,6 +531,7 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
+		audit_events,
 		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}

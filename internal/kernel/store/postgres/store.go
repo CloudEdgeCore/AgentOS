@@ -91,6 +91,11 @@ func (s *Store) createTaskOnce(ctx context.Context, in kernelstore.CreateTaskInp
 		}, now, s.newID()); err != nil {
 			return result, err
 		}
+		if err := auditHook(ctx, tx, created.TenantID, "task.queued", "Task", created.ID, map[string]any{
+			"namespace": created.Namespace, "agentVersionRef": created.AgentVersionRef,
+		}, now); err != nil {
+			return result, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return result, classify(err)
 		}
@@ -147,6 +152,11 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 	if err := insertEvent(ctx, tx, updated.TenantID, "Task", updated.ID, updated.ResourceVersion, "Task"+title(string(to)), map[string]any{
 		"taskId": updated.ID, "phase": updated.Phase,
 	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, updated.TenantID, "task.transitioned", "Task", updated.ID, map[string]any{
+		"from": string(current.Phase), "to": string(to),
+	}, now); err != nil {
 		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -286,6 +296,11 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 	}, now, s.newID()); err != nil {
 		return zero, err
 	}
+	if err := auditHook(ctx, tx, run.TenantID, "attempt.acquired", "Attempt", attempt.ID, map[string]any{
+		"runId": run.ID, "fencingToken": token, "runtimeClass": in.RuntimeClass, "runtimeInstanceId": in.RuntimeInstanceID,
+	}, now); err != nil {
+		return zero, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return zero, classify(err)
 	}
@@ -361,6 +376,12 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 	if err := insertEvent(ctx, tx, attempt.TenantID, "Attempt", attempt.ID, updated.ResourceVersion, attemptEventType(in.To), map[string]any{
 		"attemptId": attempt.ID, "runId": attempt.RunID, "phase": in.To, "fencingToken": in.FencingToken,
 	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, attempt.TenantID, "attempt.transitioned", "Attempt", attempt.ID, map[string]any{
+		"runId": attempt.RunID, "from": string(attempt.Phase), "to": string(in.To),
+		"fencingToken": in.FencingToken, "failureCode": in.FailureCode,
+	}, now); err != nil {
 		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {

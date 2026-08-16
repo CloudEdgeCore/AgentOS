@@ -98,6 +98,12 @@ func (s *Store) PutMemory(ctx context.Context, in kernelstore.PutMemoryInput) (k
 		memoryEventPayload(updated), now, s.newID()); err != nil {
 		return zero, false, err
 	}
+	if err := auditHook(ctx, tx, in.TenantID, "memory.upserted", "Memory", updated.ID, map[string]any{
+		"namespace": updated.Namespace, "key": updated.Key, "contentType": updated.ContentType,
+		"sensitivity": updated.Sensitivity, "resourceVersion": updated.ResourceVersion,
+	}, now); err != nil {
+		return zero, false, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return zero, false, classify(err)
 	}
@@ -201,6 +207,11 @@ func (s *Store) TombstoneMemory(ctx context.Context, tenantID string, id uuid.UU
 	// deletion.
 	if err := insertEvent(ctx, tx, tenantID, "Memory", updated.ID, updated.ResourceVersion, "MemoryTombstoned",
 		memoryEventPayload(updated), now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, tenantID, "memory.tombstoned", "Memory", updated.ID, map[string]any{
+		"namespace": updated.Namespace, "key": updated.Key, "resourceVersion": updated.ResourceVersion,
+	}, now); err != nil {
 		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {

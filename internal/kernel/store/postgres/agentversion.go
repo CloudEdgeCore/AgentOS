@@ -51,6 +51,14 @@ func (s *Store) CreateAgentVersion(ctx context.Context, in kernelstore.CreateAge
 		}, now, s.newID()); err != nil {
 			return result, err
 		}
+		packageDetails := map[string]any{"ref": created.Ref(), "specDigest": fmt.Sprintf("%x", created.SpecDigest)}
+		if created.PackageSignature != nil {
+			packageDetails["packageKeyId"] = created.PackageSignature.KeyID
+			packageDetails["packageManifestDigest"] = created.PackageSignature.ManifestDigest
+		}
+		if err := auditHook(ctx, tx, created.TenantID, "agent_version.published", "AgentVersion", created.ID, packageDetails, now); err != nil {
+			return result, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return result, classify(err)
 		}

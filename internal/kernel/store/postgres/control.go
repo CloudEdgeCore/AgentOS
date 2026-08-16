@@ -179,6 +179,12 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	}, now, s.newID()); err != nil {
 		return kernelstore.Task{}, err
 	}
+	if err := auditHook(ctx, tx, in.TenantID, "task.admission."+strings.ToLower(decision), "Task", task.ID, map[string]any{
+		"reasonCode": in.ReasonCode, "reasons": in.Reasons, "evaluatorVersion": in.EvaluatorVersion,
+		"policyRevision": in.PolicyRevision,
+	}, now); err != nil {
+		return kernelstore.Task{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.Task{}, classify(err)
 	}
@@ -289,6 +295,12 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 		if err := insertEvent(ctx, tx, in.TenantID, event.aggregateType, event.aggregateID, event.version, event.eventType, event.payload, now, s.newID()); err != nil {
 			return kernelstore.AttemptLease{}, err
 		}
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "task.scheduled", "Task", task.ID, map[string]any{
+		"runId": run.ID, "attemptId": attempt.ID, "runtimeClass": in.RuntimeClass,
+		"runtimePoolId": in.RuntimePoolID, "runtimeInstanceId": in.RuntimeInstanceID,
+	}, now); err != nil {
+		return kernelstore.AttemptLease{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.AttemptLease{}, classify(err)
