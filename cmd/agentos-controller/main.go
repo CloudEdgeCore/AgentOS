@@ -82,6 +82,9 @@ func main() {
 		RuntimeClasses: []string{"wasm", "oci"}, MaxTokens: 1_000_000, MaxCostUSD: 1_000,
 		MaxToolCalls: 100_000, MaxWallSeconds: 86_400, MaxCPU: 64_000,
 		MaxMemory: 262_144, MaxLLMConcurrency: 128,
+		// Container classes must declare explicit sandbox limits; zero values
+		// are never admitted (hardening checklist §4.1).
+		ContainerClasses: []string{"oci"},
 	})
 	admissionController := admission.NewController(repository, engine, policyEngine, *controllerID+"/admission", 50, 30*time.Second)
 	schedulerController := scheduler.NewController(repository, scheduler.StaticPoolSource(pools), *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)

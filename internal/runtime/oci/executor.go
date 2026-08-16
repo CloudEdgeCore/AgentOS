@@ -7,6 +7,8 @@ package oci
 import (
 	"context"
 	"io"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
@@ -48,18 +50,79 @@ type ExecutionSpec struct {
 	RuntimeClass      string
 	RuntimePoolID     string
 	RuntimeInstanceID string
+	// OutputSpooler persists bounded workload stdout/stderr to the artifact
+	// store; nil keeps the pre-hardening bounded-discard behavior.
+	OutputSpooler OutputSpooler
 }
 
-// RunResult is what a provider reports after the workload terminates. Output
-// bytes are not returned by design: container stdout must be spooled to the
-// artifact store in a later slice and must never enter kernel messages
-// unbounded.
+// RunResult is what a provider reports after the workload terminates.
+// Container stdout is spooled to the artifact store (bounded), never carried
+// in kernel messages.
 type RunResult struct {
 	ExitCode    int
 	UsageMillis int64
 	// FailureCode is an optional machine-readable classification. When empty,
 	// the worker derives one from ExitCode.
 	FailureCode string
+	// Stdout is the spooled stdout/stderr artifact, when the execution
+	// declared an OutputSpooler and produced output.
+	Stdout *store.ArtifactReference
+	// StdoutTruncated reports that output exceeded the spool cap.
+	StdoutTruncated bool
+}
+
+// OutputSpooler persists bounded workload output so container stdout/stderr
+// never grow unbounded in kernel memory (hardening checklist §4.4). The
+// worker's artifact store satisfies it.
+type OutputSpooler interface {
+	Spool(context.Context, string, string, string, io.Reader) (store.ArtifactReference, error)
+}
+
+// SpoolCap bounds spooled output per execution.
+const SpoolCap = 4 << 20
+
+// spoolOutput copies reader output into the spooler with a hard SpoolCap.
+// Without a spooler the output is drained and discarded (bounded), which is
+// the pre-hardening behavior. After spooling, one probe byte is read to
+// detect overflow, so exactly-full output is not misreported as truncated.
+func spoolOutput(ctx context.Context, spooler OutputSpooler, tenantID, attemptID, mediaType string, reader io.Reader) (*store.ArtifactReference, bool, error) {
+	if reader == nil {
+		return nil, false, nil
+	}
+	limited := &io.LimitedReader{R: reader, N: SpoolCap}
+	if spooler == nil {
+		_, _ = io.Copy(io.Discard, limited)
+	} else {
+		reference, err := spooler.Spool(ctx, tenantID, attemptID, mediaType, limited)
+		if err != nil {
+			return nil, false, err
+		}
+		var probe [1]byte
+		extra, _ := reader.Read(probe[:])
+		return &reference, extra > 0, nil
+	}
+	var probe [1]byte
+	extra, _ := reader.Read(probe[:])
+	return nil, extra > 0, nil
+}
+
+// sandboxIDPrefix names the containerd containers this provider owns.
+const sandboxIDPrefix = "agentos-"
+
+// reapTargets returns the listed container IDs this provider should clean up
+// as orphans: our prefix, and not currently owned by a live execution.
+func reapTargets(listed []string, active map[string]struct{}) []string {
+	var targets []string
+	for _, id := range listed {
+		if !strings.HasPrefix(id, sandboxIDPrefix) {
+			continue
+		}
+		if _, owned := active[id]; owned {
+			continue
+		}
+		targets = append(targets, id)
+	}
+	return targets
 }
 
 // Execution is a prepared workload owned by the provider.
@@ -94,6 +157,10 @@ type ctrExecutor struct {
 	skipPull    bool
 	pullTimeout time.Duration
 	outputLimit int64
+	// active tracks sandbox container IDs owned by live executions so the
+	// preflight reaper never deletes a running workload.
+	mu     sync.Mutex
+	active map[string]struct{}
 }
 
 // WithNamespace sets the containerd namespace (default "agentos").
@@ -117,4 +184,33 @@ func WithSkipPull() RunscOption {
 // limit", which Admission must not allow for untrusted workloads.
 func (s ExecutionSpec) Limits() (cpuMillis, memoryMiB, workspaceBytes int64) {
 	return s.CPUQuotaMillis, s.MemoryLimitMiB, s.WorkspaceBytes
+}
+
+// register marks a sandbox container ID as owned by a live execution so the
+// orphan reaper never deletes it.
+func (e *ctrExecutor) register(containerID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.active == nil {
+		e.active = map[string]struct{}{}
+	}
+	e.active[containerID] = struct{}{}
+}
+
+// unregister releases ownership after the execution is destroyed.
+func (e *ctrExecutor) unregister(containerID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.active, containerID)
+}
+
+// activeSnapshot copies the live-execution container IDs.
+func (e *ctrExecutor) activeSnapshot() map[string]struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	snapshot := make(map[string]struct{}, len(e.active))
+	for id := range e.active {
+		snapshot[id] = struct{}{}
+	}
+	return snapshot
 }

@@ -29,6 +29,11 @@ type Limits struct {
 	MaxCPU            int64
 	MaxMemory         int64
 	MaxLLMConcurrency int
+	// ContainerClasses are runtime classes that execute untrusted workloads
+	// in a sandboxed container (oci, microvm). Admission requires every
+	// task on these classes to declare explicit CPU, memory and workspace
+	// limits — zero values are never allowed (hardening checklist §4.1).
+	ContainerClasses []string
 }
 
 type Decision struct {
@@ -79,6 +84,26 @@ func (e *Engine) Evaluate(task store.Task) Decision {
 	checkPositiveLimit(&reasons, "MEMORY_REQUEST_INVALID", "placement.memoryMiB", spec.Placement.Memory, e.limits.MaxMemory)
 	if spec.Placement.LLMConcurrency <= 0 || (e.limits.MaxLLMConcurrency > 0 && spec.Placement.LLMConcurrency > e.limits.MaxLLMConcurrency) {
 		reasons = append(reasons, reason("LLM_CONCURRENCY_INVALID", "placement.llmConcurrency", "LLM concurrency must be positive and within the tenant limit"))
+	}
+	// Container classes must declare explicit sandbox limits; a zero value
+	// means "unlimited" to the executor and is never admitted (hardening
+	// checklist §4.1).
+	for _, runtimeClass := range spec.Placement.RuntimeClasses {
+		if !slices.Contains(e.limits.ContainerClasses, runtimeClass) {
+			continue
+		}
+		if spec.Placement.CPU <= 0 {
+			reasons = append(reasons, reason("CONTAINER_CPU_REQUIRED", "placement.cpuMillis",
+				fmt.Sprintf("runtime class %q requires an explicit positive cpuMillis", runtimeClass)))
+		}
+		if spec.Placement.Memory <= 0 {
+			reasons = append(reasons, reason("CONTAINER_MEMORY_REQUIRED", "placement.memoryMiB",
+				fmt.Sprintf("runtime class %q requires an explicit positive memoryMiB", runtimeClass)))
+		}
+		if spec.Placement.WorkspaceBytes <= 0 {
+			reasons = append(reasons, reason("CONTAINER_WORKSPACE_REQUIRED", "placement.workspaceBytes",
+				fmt.Sprintf("runtime class %q requires an explicit positive workspaceBytes", runtimeClass)))
+		}
 	}
 	if maxAttempts := spec.RetryPolicy.EffectiveMaxAttempts(); maxAttempts < 1 || maxAttempts > 10 {
 		reasons = append(reasons, reason("RETRY_ATTEMPTS_INVALID", "retryPolicy.maxAttempts", "max attempts must be between 1 and 10"))

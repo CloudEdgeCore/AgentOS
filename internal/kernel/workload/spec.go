@@ -124,7 +124,11 @@ type Placement struct {
 	ArtifactRegion string   `json:"artifactRegion,omitempty"`
 	CPU            int64    `json:"cpuMillis"`
 	Memory         int64    `json:"memoryMiB"`
-	LLMConcurrency int      `json:"llmConcurrency"`
+	// WorkspaceBytes is the sandbox workspace size (tmpfs) container-class
+	// workloads must declare; Admission rejects container classes with a
+	// zero workspace (ADR-010 hardening checklist).
+	WorkspaceBytes int64 `json:"workspaceBytes"`
+	LLMConcurrency int   `json:"llmConcurrency"`
 }
 
 func Decode(raw json.RawMessage) (Spec, error) {

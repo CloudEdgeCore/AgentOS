@@ -122,30 +122,53 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	// anything else. The configured image is the operator's binding — when
 	// both exist they must agree (the configured ref may itself be
 	// digest-pinned, so both the bare ref and the canonical ref@digest form
-	// are accepted).
+	// are accepted). The spec also carries the decided sandbox limits
+	// (hardening checklist §4.1): container classes must declare explicit
+	// CPU/memory/workspace values, and the worker enforces them
+	// independently of Admission.
 	imageRef := w.imageRef
-	if spec, decodeErr := workload.Decode(assignment.GetWorkloadSpecJson()); decodeErr != nil {
+	cpuQuota, memoryMiB, workspaceBytes := w.cpuQuotaMillis, w.memoryLimitMiB, w.workspaceBytes
+	workloadSpec, decodeErr := workload.Decode(assignment.GetWorkloadSpecJson())
+	if decodeErr != nil {
 		return w.fail(ctx, identity, version, "workload_spec_invalid", decodeErr)
-	} else if spec.Image != nil {
-		if err := spec.Image.Validate(); err != nil {
+	}
+	if workloadSpec.Image != nil {
+		if err := workloadSpec.Image.Validate(); err != nil {
 			return w.fail(ctx, identity, version, "image_pin_invalid", err)
 		}
-		if w.imageRef != "" && w.imageRef != spec.Image.Ref && w.imageRef != spec.Image.Canonical() {
+		if w.imageRef != "" && w.imageRef != workloadSpec.Image.Ref && w.imageRef != workloadSpec.Image.Canonical() {
 			return w.fail(ctx, identity, version, "image_pin_mismatch",
-				fmt.Errorf("configured image %q does not match the spec pin %q", w.imageRef, spec.Image.Canonical()))
+				fmt.Errorf("configured image %q does not match the spec pin %q", w.imageRef, workloadSpec.Image.Canonical()))
 		}
-		imageRef = spec.Image.Ref
+		imageRef = workloadSpec.Image.Ref
 	} else if !strings.Contains(assignment.GetRuntimeClass(), "oci") {
 		return w.fail(ctx, identity, version, "image_required",
 			fmt.Errorf("runtime class %q requires a digest-pinned image in the workload spec", assignment.GetRuntimeClass()))
 	}
+	if workloadSpec.Placement.CPU > 0 {
+		cpuQuota = workloadSpec.Placement.CPU
+	}
+	if workloadSpec.Placement.Memory > 0 {
+		memoryMiB = workloadSpec.Placement.Memory
+	}
+	if workloadSpec.Placement.WorkspaceBytes > 0 {
+		workspaceBytes = workloadSpec.Placement.WorkspaceBytes
+	}
+	if strings.Contains(assignment.GetRuntimeClass(), "oci") &&
+		(cpuQuota <= 0 || memoryMiB <= 0 || workspaceBytes <= 0) {
+		return w.fail(ctx, identity, version, "resource_limits_required",
+			fmt.Errorf("container runtime class %q requires explicit cpuMillis, memoryMiB and workspaceBytes in the workload spec", assignment.GetRuntimeClass()))
+	}
 
-	spec := ExecutionSpec{
+	execSpec := ExecutionSpec{
 		TenantID: w.tenantID, AttemptID: identity.GetAttemptId(), AgentVersionRef: assignment.GetAgentVersionRef(),
 		WorkloadSpecJSON: assignment.GetWorkloadSpecJson(), ImageRef: imageRef,
-		WorkspaceBytes: w.workspaceBytes, CPUQuotaMillis: w.cpuQuotaMillis, MemoryLimitMiB: w.memoryLimitMiB,
+		WorkspaceBytes: workspaceBytes, CPUQuotaMillis: cpuQuota, MemoryLimitMiB: memoryMiB,
 		RuntimeClass: assignment.GetRuntimeClass(), RuntimePoolID: assignment.GetRuntimePoolId(),
 		RuntimeInstanceID: w.runtimeInstanceID,
+		// Bounded output spooling (hardening checklist §4.4): container
+		// stdout/stderr land in the artifact store, never in kernel messages.
+		OutputSpooler: w,
 	}
 	// Keep the runtime lease alive while the sandbox runs: a container that
 	// outlives the lease TTL must never be fenced mid-execution. Cancellation
@@ -155,7 +178,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		HeartbeatTTL: w.heartbeatTTL, RPCTimeout: controlRPCTimeout,
 	}, heartbeat.GetLeaseVersion(), heartbeat.GetAttemptVersion())
 	defer keeper.Stop()
-	execution, err := w.executor.Prepare(execCtx, spec)
+	execution, err := w.executor.Prepare(execCtx, execSpec)
 	if err != nil {
 		if keeper.Cancelled() {
 			return true, nil
@@ -226,6 +249,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		"goal": assignment.GetGoal(), "provider": ProviderName,
 		"runtimeClass": assignment.GetRuntimeClass(), "resumed": assignment.GetResumeCheckpoint() != nil,
 		"exitCode": result.ExitCode, "usageMillis": result.UsageMillis,
+		"stdoutRef": stdoutReference(result), "stdoutTruncated": result.StdoutTruncated,
 	})
 	if err != nil {
 		return false, err
@@ -328,4 +352,19 @@ func artifactFromProto(reference *runtimev1alpha1.ArtifactReference) (store.Arti
 	copy(result.SHA256[:], digest)
 	result.URI, result.SizeBytes, result.MediaType = reference.GetUri(), reference.GetSizeBytes(), reference.GetMediaType()
 	return result, result.Validate()
+}
+
+// Spool implements the OutputSpooler contract (hardening checklist §4.4):
+// bounded workload output is persisted to the artifact store.
+func (w *Worker) Spool(ctx context.Context, tenantID, attemptID, mediaType string, reader io.Reader) (store.ArtifactReference, error) {
+	return w.artifacts.Put(ctx, tenantID, mediaType, reader)
+}
+
+// stdoutReference renders the spooled stdout artifact URI for the result
+// document, or an empty string when the execution produced no spool.
+func stdoutReference(result RunResult) string {
+	if result.Stdout == nil {
+		return ""
+	}
+	return result.Stdout.URI
 }
