@@ -13,6 +13,7 @@ import (
 
 	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
 	"github.com/bian-cloud-skill/agentos/internal/runtime/leasekeeper"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -116,9 +117,32 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		}
 	}
 
+	// Image pin enforcement (ADR-010): the assignment's workload spec may pin
+	// the OCI image; the worker runs exactly that reference and refuses
+	// anything else. The configured image is the operator's binding — when
+	// both exist they must agree (the configured ref may itself be
+	// digest-pinned, so both the bare ref and the canonical ref@digest form
+	// are accepted).
+	imageRef := w.imageRef
+	if spec, decodeErr := workload.Decode(assignment.GetWorkloadSpecJson()); decodeErr != nil {
+		return w.fail(ctx, identity, version, "workload_spec_invalid", decodeErr)
+	} else if spec.Image != nil {
+		if err := spec.Image.Validate(); err != nil {
+			return w.fail(ctx, identity, version, "image_pin_invalid", err)
+		}
+		if w.imageRef != "" && w.imageRef != spec.Image.Ref && w.imageRef != spec.Image.Canonical() {
+			return w.fail(ctx, identity, version, "image_pin_mismatch",
+				fmt.Errorf("configured image %q does not match the spec pin %q", w.imageRef, spec.Image.Canonical()))
+		}
+		imageRef = spec.Image.Ref
+	} else if !strings.Contains(assignment.GetRuntimeClass(), "oci") {
+		return w.fail(ctx, identity, version, "image_required",
+			fmt.Errorf("runtime class %q requires a digest-pinned image in the workload spec", assignment.GetRuntimeClass()))
+	}
+
 	spec := ExecutionSpec{
 		TenantID: w.tenantID, AttemptID: identity.GetAttemptId(), AgentVersionRef: assignment.GetAgentVersionRef(),
-		WorkloadSpecJSON: assignment.GetWorkloadSpecJson(), ImageRef: w.imageRef,
+		WorkloadSpecJSON: assignment.GetWorkloadSpecJson(), ImageRef: imageRef,
 		WorkspaceBytes: w.workspaceBytes, CPUQuotaMillis: w.cpuQuotaMillis, MemoryLimitMiB: w.memoryLimitMiB,
 		RuntimeClass: assignment.GetRuntimeClass(), RuntimePoolID: assignment.GetRuntimePoolId(),
 		RuntimeInstanceID: w.runtimeInstanceID,

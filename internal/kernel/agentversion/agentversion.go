@@ -32,12 +32,19 @@ const (
 // filesystem- and subject-safe tokens.
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,127})$`)
 
+// imageDigestPattern bounds version-level image pins to sha256 digests.
+var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 // Spec is the bounded subset of the published AgentVersion spec that v0.1
 // kernel stages consume. Unknown fields are preserved verbatim in the stored
 // document for later stages; they are not part of this vocabulary yet.
 type Spec struct {
 	RuntimeClassPolicy RuntimeClassPolicy `json:"runtimeClassPolicy,omitempty"`
 	Lifecycle          Lifecycle          `json:"lifecycle,omitempty"`
+	// Image pins the container image the published version is allowed to run
+	// (ADR-010). When set, admission rejects tasks whose spec pins a
+	// different image.
+	Image *Image `json:"image,omitempty"`
 }
 
 type RuntimeClassPolicy struct {
@@ -47,6 +54,13 @@ type RuntimeClassPolicy struct {
 
 type Lifecycle struct {
 	MaxAttempts int `json:"maxAttempts,omitempty"`
+}
+
+// Image is the version-level image pin; it mirrors workload.Image so the
+// kernel package graph stays acyclic.
+type Image struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest,omitempty"`
 }
 
 // ValidateName rejects names that are not canonical agent-name tokens.
@@ -145,6 +159,14 @@ func ValidateSpec(raw json.RawMessage) error {
 	}
 	if attempts := spec.Lifecycle.MaxAttempts; attempts < 0 || attempts > MaxAttemptsLimit {
 		return fmt.Errorf("lifecycle.maxAttempts must be between 0 and %d", MaxAttemptsLimit)
+	}
+	if spec.Image != nil {
+		if strings.TrimSpace(spec.Image.Ref) == "" {
+			return fmt.Errorf("image.ref is required when image is set")
+		}
+		if spec.Image.Digest != "" && !imageDigestPattern.MatchString(spec.Image.Digest) {
+			return fmt.Errorf("image.digest must be sha256:<64 lowercase hex>")
+		}
 	}
 	return nil
 }

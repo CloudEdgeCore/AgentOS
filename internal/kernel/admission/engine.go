@@ -204,9 +204,10 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 	return decision, &version.ID, budget, nil
 }
 
-// checkVersionPolicy enforces the runtime-class policy published with the
-// agent version. An absent policy is permissive: the engine-level limits
-// remain authoritative.
+// checkVersionPolicy enforces the runtime-class and image policy published
+// with the agent version. An absent policy is permissive: the engine-level
+// limits remain authoritative. A published image pin is mandatory for the
+// task (ADR-010): the task must pin exactly the same image.
 func checkVersionPolicy(raw json.RawMessage, version store.AgentVersion) []store.AdmissionReason {
 	spec, err := workload.Decode(raw)
 	if err != nil {
@@ -223,7 +224,33 @@ func checkVersionPolicy(raw json.RawMessage, version store.AgentVersion) []store
 				fmt.Sprintf("runtime class %q is not allowed by agent version %s", runtimeClass, version.Ref())))
 		}
 	}
+	if spec.Image != nil {
+		if err := spec.Image.Validate(); err != nil {
+			reasons = append(reasons, reason("RUNTIME_IMAGE_INVALID", "image", err.Error()))
+		}
+	}
+	if policy.Image != nil {
+		switch {
+		case spec.Image == nil:
+			reasons = append(reasons, reason("RUNTIME_IMAGE_REQUIRED", "image",
+				fmt.Sprintf("agent version %s pins image %q; the task must pin the same image", version.Ref(), policy.Image.Ref)))
+		case policy.Image.Ref != spec.Image.Ref || policy.Image.Digest != spec.Image.Digest:
+			reasons = append(reasons, reason("RUNTIME_IMAGE_MISMATCH", "image",
+				fmt.Sprintf("task pins %q but agent version %s pins %q", spec.Image.Canonical(), version.Ref(), imageCanonical(policy.Image))))
+		}
+	}
 	return reasons
+}
+
+// imageCanonical renders the version-level pin like workload.Image.Canonical.
+func imageCanonical(image *agentversion.Image) string {
+	if image == nil {
+		return ""
+	}
+	if image.Digest != "" {
+		return image.Ref + "@" + image.Digest
+	}
+	return image.Ref
 }
 
 func rejected(code, field, message string) Decision {

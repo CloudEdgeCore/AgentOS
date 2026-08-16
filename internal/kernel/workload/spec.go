@@ -5,8 +5,13 @@ package workload
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
+
+// imageDigestPattern bounds digests to "sha256:<64 lowercase hex>".
+var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type Spec struct {
 	Priority    int         `json:"priority"`
@@ -14,6 +19,10 @@ type Spec struct {
 	Budget      Budget      `json:"budget"`
 	Placement   Placement   `json:"placement"`
 	RetryPolicy RetryPolicy `json:"retryPolicy,omitempty"`
+	// Image pins the OCI image this workload must run in (ADR-010). Runtime
+	// providers for container classes (oci/microvm) must run exactly this
+	// reference; digest-only references are the production contract.
+	Image *Image `json:"image,omitempty"`
 	// ToolCalls is the deterministic tool script the reference provider
 	// executes through the Tool Gateway before completing. Other providers
 	// ignore it; the gateway enforces policy and budget regardless of caller.
@@ -22,6 +31,45 @@ type Spec struct {
 	// executes through the Model Gateway (Begin/Settle/Finish) after tools.
 	ModelCalls []ModelCallScript `json:"modelCalls,omitempty"`
 }
+
+// Image is the digest-pinned container reference of a workload.
+type Image struct {
+	// Ref is the image reference the provider must run, e.g.
+	// "example.com/agent@sha256:...". The worker verifies it against the
+	// runtime's own configuration before starting anything.
+	Ref string `json:"ref"`
+	// Digest pins the image content ("sha256:<64 hex>"); empty allows a
+	// mutable reference in dev, but production admission requires it for
+	// container runtime classes.
+	Digest string `json:"digest,omitempty"`
+}
+
+// Validate checks the pin shape: a non-empty reference and, when set, a
+// canonical sha256 digest.
+func (i Image) Validate() error {
+	if strings.TrimSpace(i.Ref) == "" {
+		return fmt.Errorf("image ref is required")
+	}
+	if strings.TrimSpace(i.Digest) != "" && !imageDigestPattern.MatchString(i.Digest) {
+		return fmt.Errorf("image digest must be sha256:<64 lowercase hex>")
+	}
+	return nil
+}
+
+// Pinned reports whether the reference is content-addressed.
+func (i Image) Pinned() bool { return imageDigestPattern.MatchString(i.Digest) }
+
+// Canonical returns the pin the worker and admission compare: ref@digest when
+// pinned, ref otherwise.
+func (i Image) Canonical() string {
+	if i.Pinned() {
+		return i.Ref + "@" + i.Digest
+	}
+	return i.Ref
+}
+
+// Equal reports whether two pins denote the same image.
+func (i Image) Equal(other Image) bool { return i.Canonical() == other.Canonical() }
 
 // ModelCallScript is one deterministic model invocation with pre-declared
 // usage, metered and hard-stopped by the Model Gateway.

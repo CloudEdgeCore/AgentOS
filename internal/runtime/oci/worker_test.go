@@ -86,7 +86,88 @@ func TestWorkerFailsAttemptOnNonZeroExit(t *testing.T) {
 	}
 }
 
+// TestWorkerEnforcesImagePinMismatch proves the worker refuses to run an
+// image that does not match the assignment's digest pin (ADR-010): the
+// attempt fails with image_pin_mismatch and nothing is prepared.
+func TestWorkerEnforcesImagePinMismatch(t *testing.T) {
+	repository := newFakeRuntimeStore()
+	repository.task.Spec = []byte(`{"placement":{"runtimeClasses":["oci"]},
+		"image":{"ref":"example.com/evil","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`)
+	executor := &fakeExecutor{result: RunResult{ExitCode: 0}}
+	worker := newTestWorker(t, repository, executor, "worker-1")
+
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("RunOnce() = %v, %v", processed, err)
+	}
+	if repository.attempt.Phase != domain.AttemptFailed || repository.attempt.FailureCode != "image_pin_mismatch" {
+		t.Fatalf("attempt = %s (%s), want ATTEMPT_FAILED image_pin_mismatch", repository.attempt.Phase, repository.attempt.FailureCode)
+	}
+	if len(executor.prepared) != 0 {
+		t.Fatalf("executor prepared %d executions for a mismatched pin", len(executor.prepared))
+	}
+}
+
+// TestWorkerRunsPinnedImageWhenItMatches proves a matching spec pin is
+// honored and reaches the executor, in both the bare-ref and canonical
+// ref@digest configured forms.
+func TestWorkerRunsPinnedImageWhenItMatches(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, test := range []struct {
+		name     string
+		imageRef string
+	}{
+		{"bare ref", "example.com/agent"},
+		{"canonical ref", "example.com/agent@" + digest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := newFakeRuntimeStore()
+			repository.task.Spec = []byte(`{"placement":{"runtimeClasses":["oci"]},
+				"image":{"ref":"example.com/agent","digest":"` + digest + `"}}`)
+			executor := &fakeExecutor{result: RunResult{ExitCode: 0, UsageMillis: 7}}
+			worker := newTestWorkerWithImage(t, repository, executor, "worker-1", test.imageRef)
+
+			processed, err := worker.RunOnce(context.Background())
+			if err != nil || !processed {
+				t.Fatalf("RunOnce() = %v, %v", processed, err)
+			}
+			if len(executor.prepared) != 1 {
+				t.Fatalf("executor prepared %d executions, want 1", len(executor.prepared))
+			}
+			if executor.prepared[0].ImageRef != "example.com/agent" {
+				t.Fatalf("execution spec image = %q, want the spec pin ref", executor.prepared[0].ImageRef)
+			}
+		})
+	}
+}
+
+// TestWorkerRejectsMalformedImagePin proves a malformed pin fails closed
+// before any execution.
+func TestWorkerRejectsMalformedImagePin(t *testing.T) {
+	repository := newFakeRuntimeStore()
+	repository.task.Spec = []byte(`{"placement":{"runtimeClasses":["oci"]},
+		"image":{"ref":"example.com/agent","digest":"md5:abc"}}`)
+	executor := &fakeExecutor{result: RunResult{ExitCode: 0}}
+	worker := newTestWorker(t, repository, executor, "worker-1")
+
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("RunOnce() = %v, %v", processed, err)
+	}
+	if repository.attempt.Phase != domain.AttemptFailed || repository.attempt.FailureCode != "image_pin_invalid" {
+		t.Fatalf("attempt = %s (%s), want ATTEMPT_FAILED image_pin_invalid", repository.attempt.Phase, repository.attempt.FailureCode)
+	}
+	if len(executor.prepared) != 0 {
+		t.Fatalf("executor prepared %d executions for a malformed pin", len(executor.prepared))
+	}
+}
+
 func newTestWorker(t *testing.T, repository store.RuntimeStore, executor Executor, instanceID string) *Worker {
+	t.Helper()
+	return newTestWorkerWithImage(t, repository, executor, instanceID, "example.com/agent@sha256:abcd")
+}
+
+func newTestWorkerWithImage(t *testing.T, repository store.RuntimeStore, executor Executor, instanceID, imageRef string) *Worker {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
@@ -104,7 +185,7 @@ func newTestWorker(t *testing.T, repository store.RuntimeStore, executor Executo
 		t.Fatal(err)
 	}
 	return NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifacts, executor,
-		"tenant-a", instanceID, 30*time.Second, "example.com/agent@sha256:abcd")
+		"tenant-a", instanceID, 30*time.Second, imageRef)
 }
 
 // fakeExecutor records the lifecycle and returns scripted outcomes.
