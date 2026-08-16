@@ -1,13 +1,14 @@
 // Command agentos-projector consumes canonical store events from JetStream
-// and applies them to the OpenSearch search projection (ADR-013). Memory
-// upserts index documents; memory tombstones delete them, propagating
-// deletions from the canonical store to the search index. Application is
-// idempotent by resource version, so replays and redeliveries are safe.
+// and applies them to OpenSearch search projections. Memory upserts index
+// documents and memory tombstones delete them, propagating deletions
+// (ADR-013); audit records are indexed append-only with their hash chain
+// (ADR-014). Application is idempotent by resource version / seq, so
+// replays and redeliveries are safe.
 //
 // Usage:
 //
 //	agentos-projector -database-url ... -nats-url nats://127.0.0.1:54222 \
-//	    -opensearch-addr http://127.0.0.1:39200 -opensearch-index agentos-memory
+//	    -opensearch-addr http://127.0.0.1:39200
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,7 +35,15 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const memoryFilter = outbox.SubjectPrefix + ".memory.>"
+type projectionConfig struct {
+	name       string
+	filter     string
+	index      string
+	mapping    []byte
+	consumerID string
+	// apply builds the projector's apply function for the repository.
+	apply func(*postgresstore.Store, *opensearch.Client) func(context.Context, store.OutboxEvent) error
+}
 
 func main() {
 	databaseURL := flag.String("database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL (or DATABASE_URL)")
@@ -42,11 +52,30 @@ func main() {
 	opensearchUser := flag.String("opensearch-user", "", "OpenSearch basic auth user (security plugin)")
 	opensearchPassword := flag.String("opensearch-password", "", "OpenSearch basic auth password (security plugin)")
 	opensearchIndex := flag.String("opensearch-index", "agentos-memory", "OpenSearch index for projected memory records")
-	consumerID := flag.String("consumer-id", "agentos-projector-memory", "durable JetStream consumer ID")
+	auditIndex := flag.String("audit-index", "agentos-audit", "OpenSearch index for projected audit records")
+	projections := flag.String("projection", "memory,audit", "comma-separated projections to run: memory, audit")
 	replicas := flag.Int("stream-replicas", 1, "JetStream replica count")
 	flag.Parse()
 	if *databaseURL == "" {
 		slog.Error("database URL is required")
+		os.Exit(2)
+	}
+	enabled := map[string]bool{}
+	for _, name := range strings.Split(*projections, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		switch name {
+		case "memory", "audit":
+			enabled[name] = true
+		default:
+			slog.Error("unknown projection", "projection", name)
+			os.Exit(2)
+		}
+	}
+	if len(enabled) == 0 {
+		slog.Error("at least one projection is required")
 		os.Exit(2)
 	}
 
@@ -72,7 +101,7 @@ func main() {
 		slog.Error("connect to PostgreSQL", "error", err)
 		os.Exit(1)
 	}
-	natsConnection, err := nats.Connect(*natsURL, nats.Name("agentos-projector-"+*consumerID), nats.Timeout(5*time.Second))
+	natsConnection, err := nats.Connect(*natsURL, nats.Name("agentos-projector"), nats.Timeout(5*time.Second))
 	if err != nil {
 		slog.Error("connect to NATS", "error", err)
 		os.Exit(1)
@@ -88,60 +117,94 @@ func main() {
 		os.Exit(1)
 	}
 
-	var options []opensearch.Option
+	var searchOptions []opensearch.Option
 	if *opensearchUser != "" {
-		options = append(options, opensearch.WithCredentials(*opensearchUser, *opensearchPassword))
+		searchOptions = append(searchOptions, opensearch.WithCredentials(*opensearchUser, *opensearchPassword))
 	}
-	searchClient, err := opensearch.New(*opensearchAddr, *opensearchIndex, options...)
+	repository := postgresstore.New(pool)
+
+	configs := []projectionConfig{}
+	if enabled["memory"] {
+		configs = append(configs, projectionConfig{
+			name: "memory", filter: outbox.SubjectPrefix + ".memory.>",
+			index: *opensearchIndex, mapping: projector.MemoryMapping, consumerID: "agentos-projector-memory",
+			apply: func(repository *postgresstore.Store, search *opensearch.Client) func(context.Context, store.OutboxEvent) error {
+				return projector.NewMemoryProjector(repository, search).Apply
+			},
+		})
+	}
+	if enabled["audit"] {
+		configs = append(configs, projectionConfig{
+			name: "audit", filter: outbox.SubjectPrefix + ".audit.>",
+			index: *auditIndex, mapping: projector.AuditMapping, consumerID: "agentos-projector-audit",
+			apply: func(repository *postgresstore.Store, search *opensearch.Client) func(context.Context, store.OutboxEvent) error {
+				return projector.NewAuditProjector(repository, search).Apply
+			},
+		})
+	}
+
+	var consumers []jetstream.ConsumeContext
+	defer func() {
+		for _, consumer := range consumers {
+			consumer.Stop()
+		}
+	}()
+	for _, config := range configs {
+		consumer, err := startProjection(ctx, js, repository, config, *opensearchAddr, searchOptions)
+		if err != nil {
+			slog.Error("start projection", "projection", config.name, "error", err)
+			os.Exit(1)
+		}
+		consumers = append(consumers, consumer)
+		slog.Info("Agent OS projection listening", "projection", config.name, "index", config.index, "filter", config.filter, "consumer", config.consumerID)
+	}
+	<-ctx.Done()
+}
+
+func startProjection(ctx context.Context, js jetstream.JetStream, repository *postgresstore.Store, config projectionConfig, opensearchAddr string, searchOptions []opensearch.Option) (jetstream.ConsumeContext, error) {
+	searchClient, err := opensearch.New(opensearchAddr, config.index, searchOptions...)
 	if err != nil {
-		slog.Error("configure OpenSearch client", "error", err)
-		os.Exit(1)
+		return nil, err
 	}
 	pingCtx, cancelPing := context.WithTimeout(ctx, 15*time.Second)
 	if err := searchClient.Ping(pingCtx); err != nil {
 		cancelPing()
-		slog.Error("OpenSearch is not reachable", "error", err)
-		os.Exit(1)
+		return nil, err
 	}
 	cancelPing()
 	indexCtx, cancelIndex := context.WithTimeout(ctx, 15*time.Second)
 	defer cancelIndex()
-	if err := searchClient.EnsureIndex(indexCtx, projector.MemoryMapping); err != nil {
-		slog.Error("ensure OpenSearch index", "error", err)
-		os.Exit(1)
+	if err := searchClient.EnsureIndex(indexCtx, config.mapping); err != nil {
+		return nil, err
 	}
-	memoryProjector := projector.NewMemoryProjector(postgresstore.New(pool), searchClient)
+	apply := config.apply(repository, searchClient)
 
 	consumer, err := js.CreateOrUpdateConsumer(ctx, outbox.StreamName, jetstream.ConsumerConfig{
-		Durable:       *consumerID,
-		Name:          *consumerID,
-		FilterSubject: memoryFilter,
+		Durable:       config.consumerID,
+		Name:          config.consumerID,
+		FilterSubject: config.filter,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		MaxAckPending: 256,
 	})
 	if err != nil {
-		slog.Error("create JetStream consumer", "error", err)
-		os.Exit(1)
+		return nil, err
 	}
 	consumeContext, err := consumer.Consume(func(message jetstream.Msg) {
-		if err := applyMessage(ctx, memoryProjector, message); err != nil {
-			slog.Error("projection apply failed; retrying", "error", err, "subject", message.Subject())
+		if err := applyMessage(ctx, apply, message); err != nil {
+			slog.Error("projection apply failed; retrying", "projection", config.name, "error", err, "subject", message.Subject())
 			_ = message.NakWithDelay(2 * time.Second)
 			return
 		}
 		_ = message.Ack()
 	})
 	if err != nil {
-		slog.Error("start JetStream consumer", "error", err)
-		os.Exit(1)
+		return nil, err
 	}
-	defer consumeContext.Stop()
-	slog.Info("Agent OS memory projector listening", "index", *opensearchIndex, "filter", memoryFilter, "consumer", *consumerID)
-	<-ctx.Done()
+	return consumeContext, nil
 }
 
-func applyMessage(ctx context.Context, memoryProjector *projector.MemoryProjector, message jetstream.Msg) error {
+func applyMessage(ctx context.Context, apply func(context.Context, store.OutboxEvent) error, message jetstream.Msg) error {
 	envelope, err := decodeEnvelope(message.Data())
 	if err != nil {
 		// A malformed envelope can never succeed; drop it instead of
@@ -158,7 +221,7 @@ func applyMessage(ctx context.Context, memoryProjector *projector.MemoryProjecto
 	}
 	applyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	return memoryProjector.Apply(applyCtx, event)
+	return apply(applyCtx, event)
 }
 
 type eventEnvelope struct {

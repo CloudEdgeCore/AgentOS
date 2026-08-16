@@ -77,6 +77,7 @@ type AuditVerification struct {
 // AuditStore is the read surface of the audit ledger.
 type AuditStore interface {
 	ListAudit(context.Context, ListAuditInput) ([]AuditEvent, error)
+	GetAuditEvent(context.Context, string, uuid.UUID) (AuditEvent, error)
 	VerifyAuditChain(context.Context, string) (AuditVerification, error)
 	ExportAuditChain(context.Context, string) ([]AuditEvent, error)
 }

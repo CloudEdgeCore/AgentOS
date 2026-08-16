@@ -100,6 +100,19 @@ func (s *Store) ListAudit(ctx context.Context, in kernelstore.ListAuditInput) ([
 	return events, nil
 }
 
+func (s *Store) GetAuditEvent(ctx context.Context, tenantID string, id uuid.UUID) (kernelstore.AuditEvent, error) {
+	if strings.TrimSpace(tenantID) == "" || id == uuid.Nil {
+		return kernelstore.AuditEvent{}, fmt.Errorf("tenant and audit ID are required")
+	}
+	event, err := scanAuditEvent(s.pool.QueryRow(ctx, `SELECT id::text, tenant_id, seq, prev_hash, chain_hash,
+		event_type, resource_type, resource_id::text, actor, details, occurred_at
+		FROM audit_events WHERE tenant_id = $1 AND id = $2`, tenantID, id.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return kernelstore.AuditEvent{}, kernelstore.ErrNotFound
+	}
+	return event, classify(err)
+}
+
 func (s *Store) VerifyAuditChain(ctx context.Context, tenantID string) (kernelstore.AuditVerification, error) {
 	if strings.TrimSpace(tenantID) == "" {
 		return kernelstore.AuditVerification{}, fmt.Errorf("tenant is required")
