@@ -150,15 +150,44 @@ echo ">> pulling busybox (bounded 300s)"
 timeout 300 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" images pull \
   --snapshotter "$SNAPSHOTTER" docker.io/library/busybox:latest >/dev/null
 echo ">> running runsc probe (bounded 300s)"
-if timeout 300 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" run \
+timeout 300 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" run \
   --rm --runtime io.containerd.runsc.v1 --snapshotter "$SNAPSHOTTER" \
-  docker.io/library/busybox:latest agentos-runtime-probe /bin/true; then
+  docker.io/library/busybox:latest agentos-runtime-probe /bin/true \
+  >/tmp/probe-out.log 2>&1 &
+PROBE_PID=$!
+# Mid-hang diagnostics: 30s in, if the probe is still alive, capture who is
+# blocked where (kernel stack, wchan, fds) so a silent hang pinpoints the
+# exact layer instead of burning the full 300s bound.
+(
+  sleep 30
+  if kill -0 "$PROBE_PID" 2>/dev/null; then
+    {
+      echo "== probe still running after 30s; process state =="
+      ps -eo pid,ppid,stat,wchan:28,cmd | grep -E 'runsc|shim|ctr' | grep -v grep || true
+      for p in $(pgrep -f 'runsc|containerd-shim' || true); do
+        echo "--- proc ${p} wchan: $(cat /proc/${p}/wchan 2>/dev/null || echo unknown)"
+        echo "--- proc ${p} stack:"
+        cat /proc/${p}/stack 2>/dev/null | tail -n 10 || true
+        echo "--- proc ${p} fds:"
+        ls -l /proc/${p}/fd 2>/dev/null | tail -n 12 || true
+      done
+    } > /tmp/probe-diag.log 2>&1
+  fi
+) &
+DIAG_PID=$!
+if wait "$PROBE_PID"; then
+  kill "$DIAG_PID" 2>/dev/null || true
   echo ">> runsc runtime probe: PASS (snapshotter=${SNAPSHOTTER})"
 else
+  kill "$DIAG_PID" 2>/dev/null || true
   echo ">> runsc runtime probe: FAIL (the pinned matrix must be re-validated)" >&2
+  echo ">> probe output:" >&2
+  cat /tmp/probe-out.log 2>/dev/null >&2 || true
+  echo ">> mid-hang diagnostics:" >&2
+  cat /tmp/probe-diag.log 2>/dev/null >&2 || true
   echo ">> containerd log tail:" >&2
-  tail -n 40 /tmp/agentos-containerd.log >&2 || true
+  tail -n 20 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc debug log tail:" >&2
-  tail -n 60 /tmp/runsc-debug.log* 2>/dev/null >&2 || true
+  tail -n 40 /tmp/runsc-debug.log* 2>/dev/null >&2 || true
   exit 1
 fi
