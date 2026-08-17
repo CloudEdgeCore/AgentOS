@@ -29,6 +29,15 @@ esac
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# Host facts recorded for later diagnosis: runsc sandbox creation needs clone()
+# with namespace flags and (for the ptrace/systrap platforms) ptrace access.
+# A host that blocks either (seccomp filter, userns sysctl) will hang the
+# sandbox silently — these lines document that constraint in the job log.
+echo ">> host kernel: $(uname -r)"
+echo ">> unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a) max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)"
+echo ">> seccomp=$(awk '/^Seccomp:/{print $2}' /proc/self/status 2>/dev/null || echo n/a) (0=disabled,2=filter)"
+echo ">> apparmor=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo n/a)"
+
 # --- containerd ------------------------------------------------------------
 # Runner images may ship containerd (e.g. 2.3.3 on ubuntu-24.04). The pinned
 # version must win, so install when missing or when the installed binary is
@@ -160,10 +169,12 @@ PROBE_PID=$!
 # exact layer instead of burning the full 300s bound.
 (
   sleep 30
-  if kill -0 "$PROBE_PID" 2>/dev/null; then
-    {
-      echo "== probe still running after 30s; process state =="
-      ps -eo pid,ppid,stat,wchan:28,cmd | grep -E 'runsc|shim|ctr' | grep -v grep || true
+  {
+    echo "== DIAG-RAN probe-alive=$(kill -0 "$PROBE_PID" 2>/dev/null && echo yes || echo no) =="
+    if kill -0 "$PROBE_PID" 2>/dev/null; then
+      echo "== ps (runsc/shim/ctr) =="
+      ps -eo pid,ppid,stat,wchan,cmd | grep -E 'runsc|shim|ctr' | grep -v grep || true
+      echo "== shim sockets: $(ls -la /run/containerd/s/ 2>/dev/null || echo none) =="
       for p in $(pgrep -f 'runsc|containerd-shim' || true); do
         echo "--- proc ${p} wchan: $(cat /proc/${p}/wchan 2>/dev/null || echo unknown)"
         echo "--- proc ${p} stack:"
@@ -171,8 +182,8 @@ PROBE_PID=$!
         echo "--- proc ${p} fds:"
         ls -l /proc/${p}/fd 2>/dev/null | tail -n 12 || true
       done
-    } > /tmp/probe-diag.log 2>&1
-  fi
+    fi
+  } > /tmp/probe-diag.log 2>&1
 ) &
 DIAG_PID=$!
 if wait "$PROBE_PID"; then
@@ -186,8 +197,46 @@ else
   echo ">> mid-hang diagnostics:" >&2
   cat /tmp/probe-diag.log 2>/dev/null >&2 || true
   echo ">> containerd log tail:" >&2
-  tail -n 20 /tmp/agentos-containerd.log >&2 || true
+  tail -n 200 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc debug log tail:" >&2
   tail -n 40 /tmp/runsc-debug.log* 2>/dev/null >&2 || true
+  echo ">> shim sockets: $(ls -la /run/containerd/s/ 2>/dev/null || echo none)" >&2
+  echo ">> dmesg tail:" >&2
+  dmesg 2>/dev/null | tail -n 30 >&2 || true
+  # --- bisect: direct runsc, bypassing containerd entirely ----------------
+  # If the direct sandbox also hangs, runsc/kernel is the failing layer; if it
+  # passes, containerd's shim handshake is. Build a minimal OCI bundle from
+  # the already-pulled busybox image (single gzip layer) and run /bin/true.
+  echo ">> bisect: direct runsc probe (no containerd)" >&2
+  BUNDLE="$TMPDIR/bundle"
+  mkdir -p "$BUNDLE/rootfs"
+  timeout 180 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" images export \
+    /tmp/busybox-export.tar docker.io/library/busybox:latest >/dev/null 2>&1 || true
+  ROOTFS_LAYER="$(tar -tf /tmp/busybox-export.tar 2>/dev/null | grep -E 'blobs/.+layer\.tar$' | head -n 1 || true)"
+  if [ -n "$ROOTFS_LAYER" ] && tar -xOf /tmp/busybox-export.tar "$ROOTFS_LAYER" 2>/dev/null | tar -xz -C "$BUNDLE/rootfs" 2>/dev/null; then
+    cat > "$BUNDLE/config.json" <<'JSON'
+{
+  "ociVersion": "1.0.2",
+  "process": {"terminal": false, "user": {"uid": 0, "gid": 0}, "args": ["/bin/true"], "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"], "cwd": "/"},
+  "root": {"path": "rootfs", "readonly": true},
+  "hostname": "runsc-direct-probe",
+  "linux": {"namespaces": [{"type": "pid"}, {"type": "mount"}, {"type": "ipc"}, {"type": "uts"}]}
+}
+JSON
+    if (cd "$BUNDLE" && timeout 120 /usr/local/bin/runsc.real --platform=ptrace --network=none \
+        --ignore-cgroups --debug --debug-log=/tmp/runsc-direct.log run \
+        -bundle "$BUNDLE" direct-probe) >/tmp/direct-out.log 2>&1; then
+      echo ">> bisect: DIRECT runsc probe PASSED (containerd shim handshake is the failing layer)" >&2
+      timeout 30 /usr/local/bin/runsc.real delete direct-probe >/dev/null 2>&1 || true
+    else
+      echo ">> bisect: DIRECT runsc probe FAILED (runsc/kernel is the failing layer)" >&2
+      echo ">> direct runsc output:" >&2
+      cat /tmp/direct-out.log >&2 || true
+      echo ">> direct runsc debug log tail:" >&2
+      tail -n 40 /tmp/runsc-direct.log 2>/dev/null >&2 || true
+    fi
+  else
+    echo ">> bisect: could not assemble busybox bundle (layer=${ROOTFS_LAYER:-none}); skipping direct probe" >&2
+  fi
   exit 1
 fi
