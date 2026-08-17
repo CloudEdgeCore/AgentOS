@@ -82,22 +82,25 @@ fi
 runsc --version | head -n 1 || true
 
 # --- containerd config with the runsc runtime ------------------------------
-# ctr resolves io.containerd.runsc.v1 through containerd's task-v2 shim
-# discovery (containerd-shim-runsc-v1 on PATH); the CRI entry keeps
-# containerd's CRI surface consistent for future kubernetes-style
-# consumption. The exact config surface is itself part of what v0.7
-# validates on the first runner bring-up.
+# The v2 task plugin runs runsc AS the shim (runtime_path), the long-standing
+# gVisor/containerd integration. The standalone containerd-shim-runsc-v1 was
+# found to hang on GitHub runners after containerd connects to its TTRPC
+# endpoint (CreateTask never progresses and runsc never starts); routing
+# through runsc-as-shim skips that layer. The CRI entry keeps containerd's
+# CRI surface consistent for future kubernetes-style consumption.
 #
 # SNAPSHOTTER defaults to overlayfs (production hosts). Nested environments
 # (containerd inside a container, e.g. Docker Desktop/WSL2) cannot mount
 # overlay-on-overlay ("mount source overlay ... invalid argument"), so they
-# set SNAPSHOTTER=native, which containerd 2.x clients pick up as the
-# server-side default snapshotter.
+# set SNAPSHOTTER=native, which is passed to ctr explicitly.
 mkdir -p /etc/containerd
 cat > /etc/containerd/config.toml <<EOF
 version = 2
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
+[plugins."io.containerd.runtime.v2.task".runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+  runtime_path = "/usr/local/bin/runsc"
 [plugins."io.containerd.snapshotter.v1"]
   default_snapshotter = "${SNAPSHOTTER:-overlayfs}"
 EOF
