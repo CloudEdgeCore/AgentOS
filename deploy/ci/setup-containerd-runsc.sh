@@ -153,5 +153,9 @@ if timeout 300 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" run \
   echo ">> runsc runtime probe: PASS (snapshotter=${SNAPSHOTTER})"
 else
   echo ">> runsc runtime probe: FAIL (the pinned matrix must be re-validated)" >&2
+  echo ">> containerd log tail:" >&2
+  tail -n 40 /tmp/agentos-containerd.log >&2 || true
+  echo ">> runsc debug log tail:" >&2
+  tail -n 60 /tmp/runsc-debug.log* 2>/dev/null >&2 || true
   exit 1
 fi

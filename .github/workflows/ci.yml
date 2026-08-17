@@ -157,11 +157,12 @@ jobs:
       # in deploy/ci/runtime-matrix.md).
       CONTAINERD_VERSION: "2.0.2"
       RUNSC_TAG: "20260810.0"
-      # Bring-up finding 2026-08-17: runsc 20260810.0's default systrap
-      # platform hangs during sandbox startup on GitHub-hosted runners (VM
-      # without KVM). ptrace is the stable platform for this CI leg;
-      # KVM-capable self-hosted runners may drop this and use systrap/kvm.
-      RUNSC_EXTRA_FLAGS: "--platform ptrace"
+      # Bring-up finding 2026-08-17: runsc 20260810.0 sandbox startup hangs
+      # on GitHub-hosted runners with both systrap and ptrace platforms.
+      # ptrace + full debug logging pinpoints the hang; the debug log is
+      # dumped by the probe on failure. KVM-capable self-hosted runners may
+      # drop the flags.
+      RUNSC_EXTRA_FLAGS: "--platform ptrace --debug --debug-log=/tmp/runsc-debug.log --alsologtostderr"
 
     steps:
       - name: Check out source
