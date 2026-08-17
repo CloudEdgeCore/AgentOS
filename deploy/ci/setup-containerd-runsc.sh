@@ -130,10 +130,13 @@ for attempt in $(seq 1 30); do
 done
 echo ">> containerd ready"
 # The socket must serve the pinned version: a resurrected service daemon
-# would silently run the leg against an unpinned containerd.
-if ! ctr version 2>&1 | grep -q "v${CONTAINERD_VERSION}"; then
+# would silently run the leg against an unpinned containerd. Capture the
+# output first — grep -q on a live pipe closes it while ctr is still
+# writing (SIGPIPE + pipefail would misreport a version mismatch).
+VERSION_OUTPUT="$(ctr version 2>&1 || true)"
+if ! echo "$VERSION_OUTPUT" | grep -q "v${CONTAINERD_VERSION}"; then
   echo "containerd on the socket is not the pinned ${CONTAINERD_VERSION}; full version output:" >&2
-  ctr version >&2 || true
+  echo "$VERSION_OUTPUT" >&2
   exit 1
 fi
 echo ">> containerd on socket is pinned ${CONTAINERD_VERSION}"
