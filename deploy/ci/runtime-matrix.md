@@ -89,6 +89,12 @@
 5. **ctr 命令面(隔离项显式化路径)**:`ctr run` 原生支持
    `--cap-add/--cap-drop/--seccomp/--read-only/--annotation`——§3
    第 4–9 项"是否显式传参"决策点有现成路径,待真机 runner 逐项验证。
+6. **systrap 平台在无 KVM VM 上挂起(2026-08-17,真机 runner 实测)**:
+   runsc 20260810.0 默认 systrap 平台在 GitHub 托管 runner(VM,无
+   /dev/kvm)上沙箱启动挂起(300s 超时);`--platform ptrace` 是该环境
+   的稳定平台,已通过 `RUNSC_EXTRA_FLAGS` 编入 CI 腿。KVM 自托管
+   runner 可去掉该 flag 回到 systrap/kvm。CI 腿上的 sandbox 启动必须
+   保持有界(超时包裹)以便快速失败并定位。
 
 ## 4. CI 真机腿(job:`runtime-linux-leg`)
 
