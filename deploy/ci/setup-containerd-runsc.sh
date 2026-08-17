@@ -25,12 +25,20 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # --- containerd ------------------------------------------------------------
-if ! command -v containerd >/dev/null 2>&1; then
-  echo ">> installing containerd ${CONTAINERD_VERSION} (${ARCH})"
+# Runner images may ship containerd (e.g. 2.3.3 on ubuntu-24.04). The pinned
+# version must win, so install when missing or when the installed binary is
+# not the pinned one. `containerd --version` prints
+# "containerd github.com/containerd/containerd/v2 v2.0.2 ..." — the third
+# field is the version.
+INSTALLED_CONTAINERD="$(containerd --version 2>/dev/null | awk '{print $3}' || true)"
+if [ "$INSTALLED_CONTAINERD" != "v${CONTAINERD_VERSION}" ]; then
+  echo ">> installing containerd ${CONTAINERD_VERSION} (${ARCH}); installed: ${INSTALLED_CONTAINERD:-none}"
   curl -fsSL -o "$TMPDIR/containerd.tar.gz" \
     "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-${ARCH}.tar.gz"
   sha256sum "$TMPDIR/containerd.tar.gz"
   tar -C /usr/local -xzf "$TMPDIR/containerd.tar.gz"
+else
+  echo ">> containerd ${CONTAINERD_VERSION} already installed"
 fi
 containerd --version
 
@@ -64,7 +72,9 @@ else
   # No wrapper: the shim resolves runsc by name on PATH.
   ln -sf /usr/local/bin/runsc.real /usr/local/bin/runsc
 fi
-runsc --version | head -n 1
+# head -n 1 can close the pipe while runsc is still writing (SIGPIPE), so the
+# version print must never fail the script.
+runsc --version | head -n 1 || true
 
 # --- containerd config with the runsc runtime ------------------------------
 # ctr resolves io.containerd.runsc.v1 through containerd's task-v2 shim
@@ -88,10 +98,17 @@ version = 2
 EOF
 
 # --- start containerd and wait for readiness -------------------------------
-if ! pgrep -x containerd >/dev/null 2>&1; then
-  echo ">> starting containerd"
-  nohup containerd >/tmp/agentos-containerd.log 2>&1 &
+# Always run our own daemon: a pre-existing daemon on the runner may serve an
+# unpinned version, so stop it first, then start the pinned binary with our
+# config. `pkill` twice handles a slow shutdown race.
+if pgrep -x containerd >/dev/null 2>&1; then
+  echo ">> stopping pre-existing containerd daemon"
+  pkill -x containerd || true
+  sleep 1
+  pkill -x containerd || true
 fi
+echo ">> starting containerd (pinned ${CONTAINERD_VERSION})"
+nohup containerd >/tmp/agentos-containerd.log 2>&1 &
 for attempt in $(seq 1 30); do
   if ctr version >/dev/null 2>&1; then
     break
