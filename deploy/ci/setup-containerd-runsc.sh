@@ -100,7 +100,7 @@ EOF
 chmod 0755 /usr/local/bin/agentos-runsc
 cat > "$RUNSC_CONFIG_PATH" <<EOF
 binary_name = "/usr/local/bin/agentos-runsc"
-log_path = "${RUNSC_LOG_DIR}/shim.log"
+log_path = "${RUNSC_LOG_DIR}/%ID%/shim.log"
 log_level = "debug"
 
 [runsc_config]
@@ -109,9 +109,9 @@ log_level = "debug"
   systemd-cgroup = "${RUNSC_SYSTEMD_CGROUP}"
   ignore-cgroups = "${RUNSC_IGNORE_CGROUPS}"
   debug = "true"
-  # A directory makes runsc create distinct logs for create/gofer/boot. This
-  # avoids interleaved multiprocess output and preserves the exact boot stage.
-  debug-log = "${RUNSC_LOG_DIR}/"
+  # The shim expands %ID%; runsc expands %COMMAND%. Each process receives a
+  # dedicated log, matching the upstream containerd configuration contract.
+  debug-log = "${RUNSC_LOG_DIR}/%ID%/gvisor.%COMMAND%.log"
   alsologtostderr = "true"
 EOF
 
@@ -125,8 +125,8 @@ if ! timeout --signal=KILL 30 runsc \
   --network=none \
   --ignore-cgroups=true \
   --debug=true \
-  --debug-log="${RUNSC_LOG_DIR}/" \
-  do /bin/true; then
+  --debug-log="${RUNSC_LOG_DIR}/direct.%COMMAND%.log" \
+  do /bin/true </dev/null; then
   echo ">> direct runsc probe: FAIL" >&2
   find "$RUNSC_LOG_DIR" -maxdepth 4 -type f -print -exec tail -n 120 {} \; >&2 || true
   exit 1
@@ -204,6 +204,7 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   --snapshotter "$SNAPSHOTTER" \
   "$PROBE_IMAGE" agentos-runtime-probe \
   /bin/true \
+  </dev/null \
   >/tmp/probe-out.log 2>&1; then
   echo ">> runsc runtime probe: FAIL (the pinned matrix must be re-validated)" >&2
   echo ">> probe output:" >&2

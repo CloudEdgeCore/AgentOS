@@ -64,12 +64,12 @@ if ! timeout --signal=KILL 120 ctr -n "$NAMESPACE" run \
   --memory-limit 67108864 \
   --mount type=tmpfs,dst=/agentos/workspace,options=size=8388608 \
   "$AGENTOS_OCI_IMAGE" "$PROBE_ID" \
-  /bin/sh -c "$probe"; then
+  /bin/sh -c "$probe" </dev/null; then
   echo ">> OCI/gVisor isolation assertion: FAIL" >&2
   echo ">> containerd log tail:" >&2
   tail -n 120 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc/shim logs:" >&2
-  find /tmp/agentos-runsc -maxdepth 4 -type f -print -exec tail -n 80 {} \; 2>/dev/null >&2 || true
+  find /var/log/agentos-runsc -maxdepth 4 -type f -print -exec tail -n 80 {} \; 2>/dev/null >&2 || true
   exit 1
 fi
 
@@ -90,7 +90,7 @@ timeout 120 ctr -n "$NAMESPACE" run \
   --cpu-quota 100000 \
   --memory-limit 67108864 \
   "$AGENTOS_OCI_IMAGE" "$HOST_PROBE_ID" \
-  /bin/sleep 120
+  /bin/sleep 120 </dev/null
 
 timeout 15 ctr -n "$NAMESPACE" containers info --spec "$HOST_PROBE_ID" |
   jq -e '.linux.resources.cpu.quota == 100000 and .linux.resources.memory.limit == 67108864' >/dev/null
