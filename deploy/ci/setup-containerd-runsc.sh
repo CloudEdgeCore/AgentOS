@@ -90,7 +90,24 @@ RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
 CONTAINERD_SOCKET_GID="${CONTAINERD_SOCKET_GID:-${SUDO_GID:-0}}"
 RUNSC_LOG_DIR="/var/log/agentos-runsc"
 mkdir -p "$RUNSC_LOG_DIR"
+
+# The gVisor shim captures `runsc create` output with an os/exec pipe. The
+# long-lived gofer and sandbox inherit that pipe, so Cmd.Wait cannot observe
+# EOF after the short-lived create process exits. Redirect only create output
+# to a regular file; other runsc commands must retain their protocol output.
+cat > /usr/local/bin/agentos-runsc <<'EOF'
+#!/bin/sh
+for arg do
+  if [ "$arg" = "create" ]; then
+    exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1
+  fi
+done
+exec /usr/local/bin/runsc "$@"
+EOF
+chmod 0755 /usr/local/bin/agentos-runsc
+
 cat > "$RUNSC_CONFIG_PATH" <<EOF
+binary_name = "/usr/local/bin/agentos-runsc"
 log_path = "${RUNSC_LOG_DIR}/shim.log"
 log_level = "debug"
 
