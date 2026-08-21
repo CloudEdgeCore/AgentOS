@@ -45,7 +45,7 @@ printf "observed isolation: CapEff=%s NoNewPrivs=%s Seccomp=%s interfaces=%s\n" 
 test "$cap_eff" = "0000000000000000" || exit 11
 # gVisor enforces this boundary from the OCI contract but does not reliably
 # expose the host PR_SET_NO_NEW_PRIVS bit through its virtual /proc. Assert the
-# exact OCI field against containerd's stored spec in the host-side probe below.
+# exact OCI field against the stored containerd spec in the host-side probe below.
 test "$seccomp" = "2" || exit 13
 if touch /agentos-rootfs-must-remain-read-only 2>/dev/null; then
   echo "root filesystem is writable" >&2
