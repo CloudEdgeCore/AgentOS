@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/platform/spiffe"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
 )
 
 func main() {

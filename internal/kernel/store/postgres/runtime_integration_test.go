@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
 	"github.com/google/uuid"
 )
 

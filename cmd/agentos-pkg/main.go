@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 )
 
 func main() {

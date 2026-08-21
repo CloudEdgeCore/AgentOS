@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
 type Kind string
@@ -26,7 +26,7 @@ const (
 var ErrDenied = errors.New("agent version capability denied")
 
 // Authorizer resolves the immutable AgentVersion and enforces its symbolic
-// grants. Legacy pre-v0.9 publications (no runtimes declaration) retain their
+// grants. Legacy publications (no runtimes declaration) retain their
 // tenant-policy behavior during the v1alpha1 compatibility window.
 type Authorizer struct {
 	versions store.AgentVersionStore
@@ -63,7 +63,7 @@ func (a *Authorizer) Authorize(
 		return nil
 	}
 	if spec.Capabilities == nil {
-		return fmt.Errorf("%w: v0.9 publication has no capability declaration", ErrDenied)
+		return fmt.Errorf("%w: portable publication has no capability declaration", ErrDenied)
 	}
 	var grants []string
 	switch kind {

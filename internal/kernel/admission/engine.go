@@ -12,14 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
 	"github.com/google/uuid"
 )
 
-const EvaluatorVersion = "builtin/v1alpha1"
+const EvaluatorVersion = "builtin/v1"
 
 type Limits struct {
 	RuntimeClasses    []string
@@ -117,7 +117,7 @@ func (e *Engine) Evaluate(task store.Task) Decision {
 	if len(reasons) != 0 {
 		return Decision{ReasonCode: reasons[0].Code, Reasons: reasons}
 	}
-	return Decision{Admit: true, ReasonCode: "ADMISSION_PASSED", Reasons: []store.AdmissionReason{{Code: "ADMISSION_PASSED", Message: "all v1alpha1 admission checks passed"}}}
+	return Decision{Admit: true, ReasonCode: "ADMISSION_PASSED", Reasons: []store.AdmissionReason{{Code: "ADMISSION_PASSED", Message: "all v1 admission checks passed"}}}
 }
 
 type Controller struct {

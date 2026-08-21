@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -55,9 +55,9 @@ func TestMemoryServiceFencesAndAuthorizesReadWrite(t *testing.T) {
 	}}
 	memories := &fakeMemoryInvoker{}
 	service := NewMemoryService(memories, fence, "tenant-a", authorizer)
-	identity := &gatewayv1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID.String(), FencingToken: 7}
+	identity := &gatewayv1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID.String(), FencingToken: 7}
 
-	put, err := service.PutMemory(context.Background(), &gatewayv1alpha1.PutMemoryRequest{
+	put, err := service.PutMemory(context.Background(), &gatewayv1.PutMemoryRequest{
 		Identity: identity, AgentVersionRef: "agent@1", Namespace: "project", Key: "status",
 		ContentType: "text/plain", Content: "ready", Sensitivity: "internal", ProvenanceJson: []byte(`{"source":"test"}`),
 	})
@@ -68,14 +68,14 @@ func TestMemoryServiceFencesAndAuthorizesReadWrite(t *testing.T) {
 		t.Fatalf("write was not provenance-bound: response=%+v input=%+v", put, memories.put)
 	}
 
-	search, err := service.SearchMemory(context.Background(), &gatewayv1alpha1.SearchMemoryRequest{
+	search, err := service.SearchMemory(context.Background(), &gatewayv1.SearchMemoryRequest{
 		Identity: identity, AgentVersionRef: "agent@1", Namespace: "project", Query: "ready", Limit: 5,
 	})
 	if err != nil || len(search.GetRecords()) != 1 {
 		t.Fatalf("SearchMemory: response=%+v error=%v", search, err)
 	}
 
-	_, err = service.SearchMemory(context.Background(), &gatewayv1alpha1.SearchMemoryRequest{
+	_, err = service.SearchMemory(context.Background(), &gatewayv1.SearchMemoryRequest{
 		Identity: identity, AgentVersionRef: "agent@1", Namespace: "private", Query: "ready", Limit: 5,
 	})
 	if status.Code(err) != codes.PermissionDenied {
@@ -90,9 +90,9 @@ func TestMemoryServiceRejectsStaleAndMismatchedAttempt(t *testing.T) {
 	authorizer := testAuthorizer(t, agentversion.Capabilities{
 		Tools: []string{}, Models: []string{}, Memory: []string{"*"}, Secrets: []string{},
 	})
-	identity := &gatewayv1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID.String(), FencingToken: 1}
+	identity := &gatewayv1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID.String(), FencingToken: 1}
 	service := NewMemoryService(&fakeMemoryInvoker{}, &fakeMemoryFence{err: store.ErrFenced}, "tenant-a", authorizer)
-	_, err := service.SearchMemory(context.Background(), &gatewayv1alpha1.SearchMemoryRequest{
+	_, err := service.SearchMemory(context.Background(), &gatewayv1.SearchMemoryRequest{
 		Identity: identity, AgentVersionRef: "agent@1", Namespace: "project", Query: "x", Limit: 1,
 	})
 	if status.Code(err) != codes.PermissionDenied {
@@ -102,7 +102,7 @@ func TestMemoryServiceRejectsStaleAndMismatchedAttempt(t *testing.T) {
 	service = NewMemoryService(&fakeMemoryInvoker{}, &fakeMemoryFence{assignment: store.RuntimeAssignment{
 		Task: store.Task{AgentVersionRef: "other@1"}, Attempt: store.Attempt{ID: attemptID},
 	}}, "tenant-a", authorizer)
-	_, err = service.SearchMemory(context.Background(), &gatewayv1alpha1.SearchMemoryRequest{
+	_, err = service.SearchMemory(context.Background(), &gatewayv1.SearchMemoryRequest{
 		Identity: identity, AgentVersionRef: "agent@1", Namespace: "project", Query: "x", Limit: 1,
 	})
 	if status.Code(err) != codes.PermissionDenied {

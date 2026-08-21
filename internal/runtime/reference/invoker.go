@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
-	"github.com/bian-cloud-skill/agentos/internal/mcp"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 	"github.com/google/uuid"
 )
 
@@ -16,10 +16,10 @@ import (
 // boundary, preserving the attempt identity (tenant, attempt, fencing token)
 // so the gateway's decision chain is exercised exactly like scripted calls.
 type GrpcToolInvoker struct {
-	client gatewayv1alpha1.ToolGatewayServiceClient
+	client gatewayv1.ToolGatewayServiceClient
 }
 
-func NewGrpcToolInvoker(client gatewayv1alpha1.ToolGatewayServiceClient) *GrpcToolInvoker {
+func NewGrpcToolInvoker(client gatewayv1.ToolGatewayServiceClient) *GrpcToolInvoker {
 	return &GrpcToolInvoker{client: client}
 }
 
@@ -30,7 +30,7 @@ func (g *GrpcToolInvoker) ListTools(ctx context.Context, tenantID string) ([]sto
 }
 
 func (g *GrpcToolInvoker) ListToolsForAgent(ctx context.Context, tenantID, agentVersionRef string) ([]store.ToolDescriptor, error) {
-	response, err := g.client.ListTools(ctx, &gatewayv1alpha1.ListToolsRequest{
+	response, err := g.client.ListTools(ctx, &gatewayv1.ListToolsRequest{
 		TenantId: tenantID, AgentVersionRef: agentVersionRef,
 	})
 	if err != nil {
@@ -49,8 +49,8 @@ func (g *GrpcToolInvoker) ListToolsForAgent(ctx context.Context, tenantID, agent
 }
 
 func (g *GrpcToolInvoker) InvokeTool(ctx context.Context, in tool.InvokeInput) (tool.InvokeResult, error) {
-	request := &gatewayv1alpha1.InvokeToolRequest{
-		Identity: &gatewayv1alpha1.AttemptIdentity{
+	request := &gatewayv1.InvokeToolRequest{
+		Identity: &gatewayv1.AttemptIdentity{
 			TenantId: in.TenantID, AttemptId: in.AttemptID.String(), FencingToken: in.FencingToken,
 		},
 		TaskId: in.TaskID.String(), RunId: in.RunID.String(),

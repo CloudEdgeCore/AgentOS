@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
 // ErrQuotaExceeded reports an artifact write that would breach the store's

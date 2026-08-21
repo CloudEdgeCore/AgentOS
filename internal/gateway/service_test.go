@@ -6,9 +6,9 @@ import (
 	"net"
 	"testing"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -94,7 +94,7 @@ func TestListToolsScopedToTenant(t *testing.T) {
 			Actions: []string{"read"}, ParamsSchema: json.RawMessage(`{"type":"object"}`)},
 	}}
 	client := newTestClient(t, invoker)
-	response, err := client.ListTools(context.Background(), &gatewayv1alpha1.ListToolsRequest{TenantId: "tenant-a"})
+	response, err := client.ListTools(context.Background(), &gatewayv1.ListToolsRequest{TenantId: "tenant-a"})
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
@@ -106,10 +106,10 @@ func TestListToolsScopedToTenant(t *testing.T) {
 
 var attemptID = uuid.MustParse("33333333-3333-3333-3333-333333333333")
 
-func invokeRequest(t *testing.T, approvalID string) *gatewayv1alpha1.InvokeToolRequest {
+func invokeRequest(t *testing.T, approvalID string) *gatewayv1.InvokeToolRequest {
 	t.Helper()
-	request := &gatewayv1alpha1.InvokeToolRequest{
-		Identity: &gatewayv1alpha1.AttemptIdentity{
+	request := &gatewayv1.InvokeToolRequest{
+		Identity: &gatewayv1.AttemptIdentity{
 			TenantId: "tenant-a", AttemptId: attemptID.String(), FencingToken: 1,
 		},
 		TaskId:          uuid.MustParse("11111111-1111-1111-1111-111111111111").String(),
@@ -142,11 +142,11 @@ func (f *fakeInvoker) ListTools(context.Context, string) ([]store.ToolDescriptor
 	return f.descriptors, nil
 }
 
-func newTestClient(t *testing.T, invoker ToolInvoker) gatewayv1alpha1.ToolGatewayServiceClient {
+func newTestClient(t *testing.T, invoker ToolInvoker) gatewayv1.ToolGatewayServiceClient {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, NewService(invoker, "tenant-a"))
+	gatewayv1.RegisterToolGatewayServiceServer(server, NewService(invoker, "tenant-a"))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufconn", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -155,5 +155,5 @@ func newTestClient(t *testing.T, invoker ToolInvoker) gatewayv1alpha1.ToolGatewa
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
-	return gatewayv1alpha1.NewToolGatewayServiceClient(connection)
+	return gatewayv1.NewToolGatewayServiceClient(connection)
 }

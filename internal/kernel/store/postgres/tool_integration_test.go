@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
 )
 

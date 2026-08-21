@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 )
 
 var (

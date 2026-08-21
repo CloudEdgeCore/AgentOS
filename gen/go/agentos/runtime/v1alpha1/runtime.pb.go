@@ -1529,7 +1529,7 @@ const file_agentos_runtime_v1alpha1_runtime_proto_rawDesc = "" +
 	"\tHeartbeat\x12*.agentos.runtime.v1alpha1.HeartbeatRequest\x1a+.agentos.runtime.v1alpha1.HeartbeatResponse\x12y\n" +
 	"\x10CommitCheckpoint\x121.agentos.runtime.v1alpha1.CommitCheckpointRequest\x1a2.agentos.runtime.v1alpha1.CommitCheckpointResponse\x12v\n" +
 	"\x0fCompleteAttempt\x120.agentos.runtime.v1alpha1.CompleteAttemptRequest\x1a1.agentos.runtime.v1alpha1.CompleteAttemptResponse\x12\x8e\x01\n" +
-	"\x17AcknowledgeCancellation\x128.agentos.runtime.v1alpha1.AcknowledgeCancellationRequest\x1a9.agentos.runtime.v1alpha1.AcknowledgeCancellationResponseBUZSgithub.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1;runtimev1alpha1b\x06proto3"
+	"\x17AcknowledgeCancellation\x128.agentos.runtime.v1alpha1.AcknowledgeCancellationRequest\x1a9.agentos.runtime.v1alpha1.AcknowledgeCancellationResponseBRZPgithub.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1alpha1;runtimev1alpha1b\x06proto3"
 
 var (
 	file_agentos_runtime_v1alpha1_runtime_proto_rawDescOnce sync.Once

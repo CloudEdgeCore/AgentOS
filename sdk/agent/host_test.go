@@ -101,6 +101,23 @@ func TestHostLifecycleIsIdempotentAndObservable(t *testing.T) {
 	}
 }
 
+func TestLegacyClientUsesDeprecatedAlphaRoute(t *testing.T) {
+	host, err := NewHost(&testRuntime{}, HostOptions{Adapter: "legacy-compatible"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	client, err := NewLegacyClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	health, err := client.Health(context.Background())
+	if err != nil || len(health.ProtocolVersions) != 1 || health.ProtocolVersions[0] != LegacyProtocolVersion {
+		t.Fatalf("legacy health=%+v err=%v", health, err)
+	}
+}
+
 func TestHostRejectsConflictsImplicitCapabilitiesAndUnknownFields(t *testing.T) {
 	client, server := newTestClient(t, &testRuntime{})
 	request := startFixture("exec-conflict")

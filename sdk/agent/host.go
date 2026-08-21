@@ -73,25 +73,30 @@ func NewHost(runtime Runtime, options HostOptions) (*Host, error) {
 }
 
 func (h *Host) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("AgentOS-Runtime-Interface", ProtocolVersion)
+	prefix, protocol, ok := negotiatedRoute(request.URL.Path)
+	if !ok {
+		writeProblem(writer, http.StatusNotFound, "ROUTE_NOT_FOUND", "runtime interface route not found")
+		return
+	}
+	writer.Header().Set("AgentOS-Runtime-Interface", protocol)
 	switch {
-	case request.Method == http.MethodGet && request.URL.Path == "/v1alpha1/health":
-		h.health(writer)
-	case request.Method == http.MethodPost && request.URL.Path == "/v1alpha1/executions:start":
+	case request.Method == http.MethodGet && request.URL.Path == prefix+"/health":
+		h.health(writer, protocol)
+	case request.Method == http.MethodPost && request.URL.Path == prefix+"/executions:start":
 		h.start(writer, request)
-	case strings.HasPrefix(request.URL.Path, "/v1alpha1/executions/"):
-		h.executionRoute(writer, request)
+	case strings.HasPrefix(request.URL.Path, prefix+"/executions/"):
+		h.executionRoute(writer, request, prefix)
 	default:
 		writeProblem(writer, http.StatusNotFound, "ROUTE_NOT_FOUND", "runtime interface route not found")
 	}
 }
 
-func (h *Host) health(writer http.ResponseWriter) {
+func (h *Host) health(writer http.ResponseWriter, protocol string) {
 	h.mu.RLock()
 	active := h.active
 	h.mu.RUnlock()
 	writeJSON(writer, http.StatusOK, HealthResponse{
-		Status: "SERVING", ProtocolVersions: []string{ProtocolVersion}, Adapter: h.opts.Adapter,
+		Status: "SERVING", ProtocolVersions: []string{protocol}, Adapter: h.opts.Adapter,
 		MaxConcurrent: h.opts.MaxConcurrent, ActiveExecutions: active,
 	})
 }
@@ -206,8 +211,8 @@ func (h *Host) run(ctx context.Context, request StartRequest, state *execution) 
 	h.mu.Unlock()
 }
 
-func (h *Host) executionRoute(writer http.ResponseWriter, request *http.Request) {
-	remainder := strings.TrimPrefix(request.URL.Path, "/v1alpha1/executions/")
+func (h *Host) executionRoute(writer http.ResponseWriter, request *http.Request, prefix string) {
+	remainder := strings.TrimPrefix(request.URL.Path, prefix+"/executions/")
 	var executionID, action string
 	switch {
 	case strings.HasSuffix(remainder, ":stop"):
@@ -239,6 +244,17 @@ func (h *Host) executionRoute(writer http.ResponseWriter, request *http.Request)
 		h.events(writer, request, executionID)
 	case "result":
 		h.result(writer, request, executionID)
+	}
+}
+
+func negotiatedRoute(path string) (prefix, protocol string, ok bool) {
+	switch {
+	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
+		return "/v1", ProtocolVersion, true
+	case path == "/v1alpha1" || strings.HasPrefix(path, "/v1alpha1/"):
+		return "/v1alpha1", LegacyProtocolVersion, true
+	default:
+		return "", "", false
 	}
 }
 

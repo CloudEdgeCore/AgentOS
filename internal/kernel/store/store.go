@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/google/uuid"
 )
 

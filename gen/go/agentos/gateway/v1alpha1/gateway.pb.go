@@ -992,7 +992,7 @@ const file_agentos_gateway_v1alpha1_gateway_proto_rawDesc = "" +
 	"InvokeTool\x12+.agentos.gateway.v1alpha1.InvokeToolRequest\x1a,.agentos.gateway.v1alpha1.InvokeToolResponse2\xeb\x01\n" +
 	"\x14MemoryGatewayService\x12m\n" +
 	"\fSearchMemory\x12-.agentos.gateway.v1alpha1.SearchMemoryRequest\x1a..agentos.gateway.v1alpha1.SearchMemoryResponse\x12d\n" +
-	"\tPutMemory\x12*.agentos.gateway.v1alpha1.PutMemoryRequest\x1a+.agentos.gateway.v1alpha1.PutMemoryResponseBUZSgithub.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1b\x06proto3"
+	"\tPutMemory\x12*.agentos.gateway.v1alpha1.PutMemoryRequest\x1a+.agentos.gateway.v1alpha1.PutMemoryResponseBRZPgithub.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1b\x06proto3"
 
 var (
 	file_agentos_gateway_v1alpha1_gateway_proto_rawDescOnce sync.Once

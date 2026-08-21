@@ -20,11 +20,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/control/auth"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/version"
 	"github.com/google/uuid"
 )
 
@@ -127,6 +128,7 @@ type Handler struct {
 	// exhaust the server (O5); activeSSE is the live stream count.
 	sseSlots  int
 	activeSSE atomic.Int64
+	readiness func(context.Context) error
 }
 
 // Option configures the control handler.
@@ -171,6 +173,13 @@ func WithMaxSSESubscribers(limit int) Option {
 	}
 }
 
+// WithReadiness installs the dependency probe used by /readyz. Liveness is
+// process-only; readiness must fail during database outages and rolling
+// migration windows so load balancers stop routing new work.
+func WithReadiness(probe func(context.Context) error) Option {
+	return func(h *Handler) { h.readiness = probe }
+}
+
 func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals ApprovalStore, memories MemoryAPI, options ...Option) http.Handler {
 	handler := &Handler{
 		tasks:        taskStore,
@@ -211,6 +220,8 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("PUT /v1/quota", handler.setTenantQuota)
 	mux.HandleFunc("DELETE /v1/quota", handler.deleteTenantQuota)
 	mux.HandleFunc("GET /healthz", handler.health)
+	mux.HandleFunc("GET /readyz", handler.ready)
+	mux.HandleFunc("GET /versionz", handler.version)
 	mux.HandleFunc("/v1/tasks", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}/events", handler.methodNotAllowed)
@@ -225,6 +236,8 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("/v1/audit/export", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/quota", handler.methodNotAllowed)
 	mux.HandleFunc("/healthz", handler.methodNotAllowed)
+	mux.HandleFunc("/readyz", handler.methodNotAllowed)
+	mux.HandleFunc("/versionz", handler.methodNotAllowed)
 	mux.HandleFunc("/", handler.notFound)
 	return handler.requestContext(mux)
 }
@@ -693,7 +706,7 @@ func (h *Handler) listTools(writer http.ResponseWriter, request *http.Request) {
 		})
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"apiVersion": "agentos.dev/v1alpha1", "kind": "ToolList", "tools": tools, "traceId": traceID,
+		"apiVersion": agentversion.APIVersion, "kind": "ToolList", "tools": tools, "traceId": traceID,
 	})
 }
 
@@ -1007,7 +1020,7 @@ func (h *Handler) searchMemory(writer http.ResponseWriter, request *http.Request
 		memories = append(memories, memoryResponseFrom(record, traceID))
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"apiVersion": "agentos.dev/v1alpha1", "kind": "MemoryList", "memories": memories, "traceId": traceID,
+		"apiVersion": agentversion.APIVersion, "kind": "MemoryList", "memories": memories, "traceId": traceID,
 	})
 }
 
@@ -1122,7 +1135,7 @@ func (p *handlerProblem) write(writer http.ResponseWriter, request *http.Request
 
 func memoryResponseFrom(record store.MemoryRecord, traceID string) memoryResponse {
 	response := memoryResponse{
-		APIVersion: "agentos.dev/v1alpha1", Kind: "Memory", ID: record.ID.String(),
+		APIVersion: agentversion.APIVersion, Kind: "Memory", ID: record.ID.String(),
 		TenantID: record.TenantID, Namespace: record.Namespace, Key: record.Key,
 		ContentType: record.ContentType, Content: record.Content,
 		EmbeddingProvider: record.EmbeddingProvider, Sensitivity: record.Sensitivity,
@@ -1187,6 +1200,28 @@ func (h *Handler) health(writer http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(writer, `{"status":"ok"}`)
 }
 
+func (h *Handler) ready(writer http.ResponseWriter, request *http.Request) {
+	if h.readiness == nil {
+		h.writeProblem(writer, request, http.StatusServiceUnavailable, "DEPENDENCY_NOT_READY", "readiness probe is not configured", traceIDFrom(request.Context()))
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.readiness(ctx); err != nil {
+		h.writeProblem(writer, request, http.StatusServiceUnavailable, "DEPENDENCY_NOT_READY", "control-plane dependency is unavailable", traceIDFrom(request.Context()))
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(writer, `{"status":"ready"}`)
+}
+
+func (h *Handler) version(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(writer).Encode(version.Current())
+}
+
 func (h *Handler) methodNotAllowed(writer http.ResponseWriter, request *http.Request) {
 	h.writeProblem(writer, request, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method is not allowed for this resource", traceIDFrom(request.Context()))
 }
@@ -1239,7 +1274,7 @@ func (h *Handler) writeTask(writer http.ResponseWriter, status int, task store.T
 
 func taskResponseFrom(task store.Task, usage usageSummary, budgetExhausted bool, traceID string) taskResponse {
 	response := taskResponse{
-		APIVersion: "agentos.dev/v1alpha1", Kind: "Task", ID: task.ID.String(),
+		APIVersion: agentversion.APIVersion, Kind: "Task", ID: task.ID.String(),
 		TenantID: task.TenantID, Namespace: task.Namespace, AgentVersionRef: task.AgentVersionRef,
 		Goal: task.Goal, Spec: task.Spec, Phase: string(task.Phase), ResourceVersion: task.ResourceVersion,
 		Usage: usage, BudgetExhausted: budgetExhausted,
@@ -1607,7 +1642,7 @@ func (h *Handler) deleteTenantQuota(writer http.ResponseWriter, request *http.Re
 
 func (h *Handler) writeQuota(writer http.ResponseWriter, status int, quota store.TenantQuota, usage store.TenantWindowUsage, traceID string) {
 	response := tenantQuotaResponse{
-		APIVersion: "agentos.dev/v1alpha1", Kind: "TenantQuota", TenantID: quota.TenantID,
+		APIVersion: agentversion.APIVersion, Kind: "TenantQuota", TenantID: quota.TenantID,
 		WindowSeconds: quota.WindowSeconds,
 		Limits: usageSummary{
 			Tokens: quota.Limits.Tokens, CostUSD: quota.Limits.CostUSD,

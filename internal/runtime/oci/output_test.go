@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
 // recordingSpooler captures spooled output and returns a deterministic

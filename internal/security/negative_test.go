@@ -24,13 +24,13 @@ import (
 	"testing"
 	"time"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/gateway"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/control"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -174,11 +174,11 @@ func TestTenantEscapeRejectedAtGatewayBoundary(t *testing.T) {
 	invoker := &countingInvoker{}
 	service := gateway.NewService(invoker, "tenant-a")
 
-	if _, err := service.ListTools(ctx, &gatewayv1alpha1.ListToolsRequest{TenantId: "tenant-b"}); status.Code(err) != codes.PermissionDenied {
+	if _, err := service.ListTools(ctx, &gatewayv1.ListToolsRequest{TenantId: "tenant-b"}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("cross-tenant ListTools error = %v, want PermissionDenied", err)
 	}
-	_, err := service.InvokeTool(ctx, &gatewayv1alpha1.InvokeToolRequest{
-		Identity: &gatewayv1alpha1.AttemptIdentity{
+	_, err := service.InvokeTool(ctx, &gatewayv1.InvokeToolRequest{
+		Identity: &gatewayv1.AttemptIdentity{
 			TenantId: "tenant-b", AttemptId: uuid.New().String(), FencingToken: 1,
 		},
 		TaskId: uuid.New().String(), RunId: uuid.New().String(),
@@ -197,7 +197,7 @@ func TestTenantEscapeRejectedAtGatewayBoundary(t *testing.T) {
 // Protocol rejects cross-tenant polls before the store is consulted.
 func TestTenantEscapeRejectedAtRuntimeControlBoundary(t *testing.T) {
 	service := control.NewService(&fencedStore{}, "tenant-a", time.Minute)
-	_, err := service.PollAssignment(context.Background(), &runtimev1alpha1.PollAssignmentRequest{
+	_, err := service.PollAssignment(context.Background(), &runtimev1.PollAssignmentRequest{
 		TenantId: "tenant-b", RuntimeInstanceId: "worker-1",
 	})
 	if status.Code(err) != codes.PermissionDenied {
@@ -212,27 +212,27 @@ func TestTenantEscapeRejectedAtRuntimeControlBoundary(t *testing.T) {
 // replaying an old execution cannot mutate state it no longer owns.
 func TestFencingReplayRejectedAtProtocolBoundary(t *testing.T) {
 	service := control.NewService(&fencedStore{}, "tenant-a", time.Minute)
-	identity := &runtimev1alpha1.AttemptIdentity{
+	identity := &runtimev1.AttemptIdentity{
 		TenantId: "tenant-a", AttemptId: uuid.New().String(), FencingToken: 1,
 	}
-	_, err := service.Heartbeat(context.Background(), &runtimev1alpha1.HeartbeatRequest{
+	_, err := service.Heartbeat(context.Background(), &runtimev1.HeartbeatRequest{
 		Identity: identity, ExpectedLeaseVersion: 3, RequestedTtlSeconds: 30, IdempotencyKey: "replay-heartbeat",
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("stale heartbeat error = %v, want PermissionDenied", err)
 	}
-	_, err = service.CommitCheckpoint(context.Background(), &runtimev1alpha1.CommitCheckpointRequest{
+	_, err = service.CommitCheckpoint(context.Background(), &runtimev1.CommitCheckpointRequest{
 		Identity: identity, CheckpointId: uuid.New().String(), ExpectedAttemptVersion: 1,
 		IdempotencyKey: "replay-checkpoint", AgentVersionRef: "agent@1", Provider: "reference-go",
 		RuntimeAbi: "agentos.reference/v1", SchemaVersion: "state/v1",
-		State: &runtimev1alpha1.ArtifactReference{Uri: "artifact://tenant-a/sha256/ab", Sha256: sha256Hex("x"), SizeBytes: 1, MediaType: "application/octet-stream"},
+		State: &runtimev1.ArtifactReference{Uri: "artifact://tenant-a/sha256/ab", Sha256: sha256Hex("x"), SizeBytes: 1, MediaType: "application/octet-stream"},
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("stale checkpoint error = %v, want PermissionDenied", err)
 	}
-	_, err = service.TransitionAttempt(context.Background(), &runtimev1alpha1.TransitionAttemptRequest{
+	_, err = service.TransitionAttempt(context.Background(), &runtimev1.TransitionAttemptRequest{
 		Identity: identity, ExpectedAttemptVersion: 1, IdempotencyKey: "replay-transition",
-		TargetPhase: runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_FAILED,
+		TargetPhase: runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED,
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("stale transition error = %v, want PermissionDenied", err)

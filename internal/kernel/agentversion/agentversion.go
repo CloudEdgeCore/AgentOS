@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	APIVersion = "agentos.dev/v1alpha1"
-	Kind       = "AgentVersion"
+	APIVersion       = "agentos.dev/v1"
+	LegacyAPIVersion = "agentos.dev/v1alpha1"
+	Kind             = "AgentVersion"
 
 	MaxNameLength    = 128
 	MaxVersionLength = 128
@@ -138,11 +139,38 @@ func CanonicalizeSpec(raw json.RawMessage) (json.RawMessage, [sha256.Size]byte, 
 // Unknown fields are ignored so that later spec stages can evolve without a
 // breaking change. Failures mean the publication must be rejected.
 func ValidateSpec(raw json.RawMessage) error {
+	// AgentVersion specs published before GA did not carry their own API
+	// version. Detect the frozen runtime-interface discriminator so N-1 specs
+	// remain readable while mixed-version specs fail closed.
+	var envelope struct {
+		Runtimes []RuntimeTarget `json:"runtimes"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("agent version spec is not valid for v1: %w", err)
+	}
+	seenInterface := ""
+	for _, target := range envelope.Runtimes {
+		if target.Interface != RuntimeInterfaceV1 && target.Interface != RuntimeInterfaceV1Alpha1 {
+			continue
+		}
+		if seenInterface != "" && seenInterface != target.Interface {
+			return fmt.Errorf("agent version spec mixes runtime interface versions")
+		}
+		seenInterface = target.Interface
+	}
+	runtimeInterface := RuntimeInterfaceV1
+	if seenInterface == RuntimeInterfaceV1Alpha1 {
+		runtimeInterface = RuntimeInterfaceV1Alpha1
+	}
+	return validateSpecForInterface(raw, runtimeInterface)
+}
+
+func validateSpecForInterface(raw json.RawMessage, runtimeInterface string) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var spec Spec
 	if err := decoder.Decode(&spec); err != nil {
-		return fmt.Errorf("agent version spec is not valid for v1alpha1: %w", err)
+		return fmt.Errorf("agent version spec is not valid for v1: %w", err)
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
 		return err
@@ -179,7 +207,7 @@ func ValidateSpec(raw json.RawMessage) error {
 			return fmt.Errorf("image.digest must be sha256:<64 lowercase hex>")
 		}
 	}
-	if err := validatePlatformSpec(spec); err != nil {
+	if err := validatePlatformSpecForInterface(spec, runtimeInterface); err != nil {
 		return err
 	}
 	return nil

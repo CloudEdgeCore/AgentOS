@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out immutable tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: go.sum
+
+      - name: Verify release identity and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_version="$(go run ./cmd/agentos version -json | jq -r .semver)"
+          test "$GITHUB_REF_NAME" = "v${source_version}"
+          test "$(git tag --points-at HEAD)" = "$GITHUB_REF_NAME"
+          git diff --exit-code
+          go mod verify
+
+      - name: Run GA gates
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+          go tool govulncheck ./...
+          go build ./cmd/...
+
+      - name: Install pinned supply-chain tools
+        env:
+          GOBIN: ${{ runner.temp }}/bin
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.0
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+
+      - name: Build reproducible release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          commands=(agentos agentos-conformance agentos-control agentos-controller agentos-gateway agentos-migrate agentos-outbox agentos-pkg agentos-projector agentos-runtime-adapter agentos-runtime-control agentos-runtime-oci agentos-runtime-reference agentos-slo agentos-svid)
+          platforms=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64)
+          commit="$(git rev-parse HEAD)"
+          build_time="$(git show -s --format=%cI HEAD)"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          ldflags="-s -w -X github.com/CloudEdgeCore/AgentOS/internal/version.Commit=${commit} -X github.com/CloudEdgeCore/AgentOS/internal/version.BuildTime=${build_time}"
+          for platform in "${platforms[@]}"; do
+            goos="${platform%-*}"
+            goarch="${platform#*-}"
+            stage="${RUNNER_TEMP}/agentos-${GITHUB_REF_NAME}-${platform}"
+            mkdir -p "$stage"
+            for command in "${commands[@]}"; do
+              suffix=""
+              if [[ "$goos" == windows ]]; then suffix=".exe"; fi
+              CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$ldflags" -o "$stage/${command}${suffix}" "./cmd/${command}"
+            done
+            if [[ "$goos" == windows ]]; then
+              (cd "$stage" && zip -q -9 -r "${GITHUB_WORKSPACE}/dist/agentos-${GITHUB_REF_NAME}-${platform}.zip" .)
+            else
+              tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -C "$stage" -czf "dist/agentos-${GITHUB_REF_NAME}-${platform}.tar.gz" .
+            fi
+          done
+          python3 -m pip wheel --no-deps --wheel-dir dist sdk/python
+      - name: Generate SBOM, checksums, and keyless signature
+        shell: bash
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          cyclonedx-gomod mod -json -output-version 1.6 -output "dist/agentos-${GITHUB_REF_NAME}.cdx.json" .
+          (cd dist && sha256sum *.tar.gz *.zip *.whl *.cdx.json > checksums.txt)
+          cosign sign-blob --yes --bundle "dist/checksums.txt.sigstore.json" "dist/checksums.txt"
+
+      - name: Publish immutable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "AgentOS $GITHUB_REF_NAME"

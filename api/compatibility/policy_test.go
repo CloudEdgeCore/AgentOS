@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 )
 
 func TestV1PromotionPolicyIsMachineComplete(t *testing.T) {
@@ -17,15 +17,26 @@ func TestV1PromotionPolicyIsMachineComplete(t *testing.T) {
 	}
 	var policy struct {
 		Kind    string
+		Release struct {
+			ProductVersion string
+			SemVer         string
+			Stage          string
+		}
 		Current struct {
 			AgentManifest    string
 			RuntimeInterface string
 		}
+		Legacy struct {
+			AgentManifest    string
+			RuntimeInterface string
+			RemoveNotBefore  string
+			ReadCompatible   bool
+		}
 		Policy struct {
-			MinimumDeprecationDays             int
-			NMinusOneReadCompatibility         bool
-			AdditiveChangesOnlyBeforePromotion bool
-			UnknownFieldsFailClosed            bool
+			MinimumDeprecationDays         int
+			NMinusOneReadCompatibility     bool
+			StableChangesRequireNewVersion bool
+			UnknownFieldsFailClosed        bool
 		}
 		FrozenRuntimeLifecycle []string
 		PromotionGates         []string
@@ -36,11 +47,17 @@ func TestV1PromotionPolicyIsMachineComplete(t *testing.T) {
 	if policy.Kind != "CompatibilityPromotion" ||
 		policy.Current.AgentManifest != agentversion.ManifestAPIVersion ||
 		policy.Current.RuntimeInterface != agent.ProtocolVersion ||
-		agentversion.RuntimeInterfaceV1Alpha1 != agent.ProtocolVersion {
+		agentversion.RuntimeInterfaceV1 != agent.ProtocolVersion ||
+		policy.Legacy.AgentManifest != agentversion.LegacyManifestAPIVersion ||
+		policy.Legacy.RuntimeInterface != agent.LegacyProtocolVersion || !policy.Legacy.ReadCompatible {
 		t.Fatalf("policy drifted from code constants: %+v", policy)
 	}
+	if policy.Release.ProductVersion != "1.0.0.0" || policy.Release.SemVer != "1.0.0" || policy.Release.Stage != "GA" ||
+		policy.Legacy.RemoveNotBefore != "2027-02-17" {
+		t.Fatalf("release identity is incomplete: %+v", policy)
+	}
 	if policy.Policy.MinimumDeprecationDays < 180 || !policy.Policy.NMinusOneReadCompatibility ||
-		!policy.Policy.AdditiveChangesOnlyBeforePromotion || !policy.Policy.UnknownFieldsFailClosed {
+		!policy.Policy.StableChangesRequireNewVersion || !policy.Policy.UnknownFieldsFailClosed {
 		t.Fatalf("unsafe promotion policy: %+v", policy.Policy)
 	}
 	for _, lifecycle := range []string{"health", "start", "stop", "event", "result", "checkpoint", "restore"} {

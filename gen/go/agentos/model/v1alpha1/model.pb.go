@@ -624,7 +624,7 @@ const file_agentos_model_v1alpha1_model_proto_rawDesc = "" +
 	"\x13ModelGatewayService\x12T\n" +
 	"\x05Begin\x12$.agentos.model.v1alpha1.BeginRequest\x1a%.agentos.model.v1alpha1.BeginResponse\x12W\n" +
 	"\x06Settle\x12%.agentos.model.v1alpha1.SettleRequest\x1a&.agentos.model.v1alpha1.SettleResponse\x12W\n" +
-	"\x06Finish\x12%.agentos.model.v1alpha1.FinishRequest\x1a&.agentos.model.v1alpha1.FinishResponseBQZOgithub.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1;modelv1alpha1b\x06proto3"
+	"\x06Finish\x12%.agentos.model.v1alpha1.FinishRequest\x1a&.agentos.model.v1alpha1.FinishResponseBNZLgithub.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1alpha1;modelv1alpha1b\x06proto3"
 
 var (
 	file_agentos_model_v1alpha1_model_proto_rawDescOnce sync.Once

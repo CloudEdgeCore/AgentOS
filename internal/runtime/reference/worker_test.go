@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/gateway"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	runtimecontrol "github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -313,7 +313,7 @@ func newTestWorkerWithGateway(t *testing.T, repository store.RuntimeStore, insta
 	worker := newTestWorker(t, repository, instanceID)
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, gateway.NewService(invoker, "tenant-a"))
+	gatewayv1.RegisterToolGatewayServiceServer(server, gateway.NewService(invoker, "tenant-a"))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufconn", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -322,7 +322,7 @@ func newTestWorkerWithGateway(t *testing.T, repository store.RuntimeStore, insta
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
-	return worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(connection))
+	return worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(connection))
 }
 
 func newTestWorker(t *testing.T, repository store.RuntimeStore, instanceID string) *Worker {
@@ -334,7 +334,7 @@ func newTestWorkerWithTTL(t *testing.T, repository store.RuntimeStore, instanceI
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
-	runtimev1alpha1.RegisterRuntimeControlServiceServer(server, runtimecontrol.NewService(repository, "tenant-a", time.Minute))
+	runtimev1.RegisterRuntimeControlServiceServer(server, runtimecontrol.NewService(repository, "tenant-a", time.Minute))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufconn", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -347,7 +347,7 @@ func newTestWorkerWithTTL(t *testing.T, repository store.RuntimeStore, instanceI
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifacts,
+	return NewWorker(runtimev1.NewRuntimeControlServiceClient(connection), artifacts,
 		"tenant-a", instanceID, heartbeatTTL)
 }
 
@@ -437,7 +437,7 @@ func newTestWorkerWithGatewayWithTTL(t *testing.T, repository store.RuntimeStore
 	worker := newTestWorkerWithTTL(t, repository, instanceID, heartbeatTTL)
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, gateway.NewService(invoker, "tenant-a"))
+	gatewayv1.RegisterToolGatewayServiceServer(server, gateway.NewService(invoker, "tenant-a"))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufconn", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -446,5 +446,5 @@ func newTestWorkerWithGatewayWithTTL(t *testing.T, repository store.RuntimeStore
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
-	return worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(connection))
+	return worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(connection))
 }

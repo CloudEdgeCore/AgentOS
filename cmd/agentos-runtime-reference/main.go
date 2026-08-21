@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/mcp"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/reference"
+	"github.com/CloudEdgeCore/AgentOS/cmd/mtlsutil"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/grpcx"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/reference"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -90,7 +90,7 @@ func main() {
 		}
 		slog.Info("artifact garbage collection", "deleted", deleted, "retention", *artifactGC)
 	}
-	worker := reference.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifactStore,
+	worker := reference.NewWorker(runtimev1.NewRuntimeControlServiceClient(connection), artifactStore,
 		*tenantID, *runtimeInstanceID, *heartbeatTTL)
 	var gatewayConnection *grpc.ClientConn
 	if strings.TrimSpace(*gatewayAddress) != "" {
@@ -101,7 +101,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer gatewayConnection.Close()
-		worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(gatewayConnection))
+		worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(gatewayConnection))
 		slog.Info("reference runtime wired to Tool Gateway", "address", *gatewayAddress)
 	}
 	if strings.TrimSpace(*modelGatewayAddress) != "" {
@@ -112,7 +112,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer modelConnection.Close()
-		worker.WithModelGateway(modelv1alpha1.NewModelGatewayServiceClient(modelConnection))
+		worker.WithModelGateway(modelv1.NewModelGatewayServiceClient(modelConnection))
 		slog.Info("reference runtime wired to Model Gateway", "address", *modelGatewayAddress)
 	}
 	if strings.TrimSpace(*mcpListen) != "" {
@@ -121,8 +121,8 @@ func main() {
 			os.Exit(2)
 		}
 		identitySlot := reference.NewIdentitySlot()
-		adapter := mcp.NewToolAdapter(reference.NewGrpcToolInvoker(gatewayv1alpha1.NewToolGatewayServiceClient(gatewayConnection)), identitySlot)
-		mcpServer := mcp.NewServer("agentos-runtime", "v0.1", adapter)
+		adapter := mcp.NewToolAdapter(reference.NewGrpcToolInvoker(gatewayv1.NewToolGatewayServiceClient(gatewayConnection)), identitySlot)
+		mcpServer := mcp.NewServer("agentos-runtime", "v1.0.0", adapter)
 		listener, err := net.Listen("tcp", *mcpListen)
 		if err != nil {
 			slog.Error("listen for sandbox Agent MCP endpoint", "error", err)

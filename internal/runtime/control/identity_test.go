@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
-	"github.com/bian-cloud-skill/agentos/internal/platform/spiffe"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/grpcx"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -75,7 +75,7 @@ func TestMTLSIdentityBoundary(t *testing.T) {
 	serverOptions = append(serverOptions, grpcx.ServerOptions()...)
 	server := grpc.NewServer(serverOptions...)
 	service := NewService(&stubRuntimeStore{}, "tenant-a", 2*time.Minute, WithSpiffeClaimBinding(spiffe.DefaultTrustDomain))
-	runtimev1alpha1.RegisterRuntimeControlServiceServer(server, service)
+	runtimev1.RegisterRuntimeControlServiceServer(server, service)
 	go server.Serve(listener)
 	t.Cleanup(server.Stop)
 
@@ -88,8 +88,8 @@ func TestMTLSIdentityBoundary(t *testing.T) {
 		defer connection.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, err = runtimev1alpha1.NewRuntimeControlServiceClient(connection).PollAssignment(ctx,
-			&runtimev1alpha1.PollAssignmentRequest{TenantId: tenant, RuntimeInstanceId: instance})
+		_, err = runtimev1.NewRuntimeControlServiceClient(connection).PollAssignment(ctx,
+			&runtimev1.PollAssignmentRequest{TenantId: tenant, RuntimeInstanceId: instance})
 		return err
 	}
 
@@ -137,8 +137,8 @@ func TestMTLSIdentityBoundary(t *testing.T) {
 	defer plain.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = runtimev1alpha1.NewRuntimeControlServiceClient(plain).PollAssignment(ctx,
-		&runtimev1alpha1.PollAssignmentRequest{TenantId: "tenant-a", RuntimeInstanceId: "worker-1"})
+	_, err = runtimev1.NewRuntimeControlServiceClient(plain).PollAssignment(ctx,
+		&runtimev1.PollAssignmentRequest{TenantId: "tenant-a", RuntimeInstanceId: "worker-1"})
 	if err == nil {
 		t.Fatal("certificate-less client was accepted")
 	}

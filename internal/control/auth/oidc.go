@@ -35,6 +35,10 @@ func OIDCMiddleware(issuer, clientID, tenantClaim string, next http.Handler) (ht
 	}
 	verifier := provider.Verifier(&oidc.Config{ClientID: clientID})
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/healthz" || request.URL.Path == "/readyz" || request.URL.Path == "/versionz" {
+			next.ServeHTTP(writer, request)
+			return
+		}
 		header := request.Header.Get("Authorization")
 		token, ok := strings.CutPrefix(header, "Bearer ")
 		if !ok || strings.TrimSpace(token) == "" {

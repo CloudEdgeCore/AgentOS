@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	controlapi "github.com/bian-cloud-skill/agentos/internal/control/api"
-	"github.com/bian-cloud-skill/agentos/internal/control/auth"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	controlapi "github.com/CloudEdgeCore/AgentOS/internal/control/api"
+	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
 
@@ -45,6 +45,31 @@ func TestCreateTaskRequiresIdentityAndIdempotency(t *testing.T) {
 		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
 	}
 	assertReason(t, response, "INVALID_IDEMPOTENCY_KEY")
+}
+
+func TestOperationalProbesSeparateLivenessReadinessAndVersion(t *testing.T) {
+	backend := newMemoryStore()
+	ready := controlapi.NewHandler(backend, backend, backend, backend,
+		controlapi.WithReadiness(func(context.Context) error { return nil }))
+	for path, want := range map[string]string{
+		"/healthz":  `"status":"ok"`,
+		"/readyz":   `"status":"ready"`,
+		"/versionz": `"productVersion":"1.0.0.0"`,
+	} {
+		response := httptest.NewRecorder()
+		ready.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+
+	notReady := controlapi.NewHandler(backend, backend, backend, backend,
+		controlapi.WithReadiness(func(context.Context) error { return errors.New("database unavailable") }))
+	response := httptest.NewRecorder()
+	notReady.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestCreateTaskIsStrictAndIdempotent(t *testing.T) {
@@ -248,7 +273,7 @@ func TestPublishAgentManifestNormalizesIntoAgentVersion(t *testing.T) {
 		published.Namespace != manifest.Metadata.Namespace || published.Ref != manifest.Ref() {
 		t.Fatalf("manifest identity was not normalized: %+v", published)
 	}
-	if len(published.Spec.Runtimes) != 1 || published.Spec.Runtimes[0].Interface != agentversion.RuntimeInterfaceV1Alpha1 {
+	if len(published.Spec.Runtimes) != 1 || published.Spec.Runtimes[0].Interface != agentversion.RuntimeInterfaceV1 {
 		t.Fatalf("portable runtime contract was not preserved: %+v", published.Spec)
 	}
 
@@ -499,7 +524,7 @@ func validAgentManifest() agentversion.Manifest {
 		Spec: agentversion.Spec{
 			RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"wasmtime"}, Preferred: "wasmtime"},
 			Runtimes: []agentversion.RuntimeTarget{{
-				Class: "wasmtime", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+				Class: "wasmtime", Interface: agentversion.RuntimeInterfaceV1,
 				RuntimeABI: "wasi-preview1", Entrypoint: []string{"agent.wasm"},
 			}},
 			Capabilities: &agentversion.Capabilities{

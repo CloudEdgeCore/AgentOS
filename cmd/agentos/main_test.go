@@ -12,9 +12,53 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 )
+
+func TestVersionAndManifestMigration(t *testing.T) {
+	var output bytes.Buffer
+	if err := run([]string{"version", "-json"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"productVersion":"1.0.0.0"`) || !strings.Contains(output.String(), `"releaseStage":"GA"`) {
+		t.Fatalf("unexpected version output: %s", output.String())
+	}
+
+	legacy := agentversion.Manifest{
+		APIVersion: agentversion.LegacyManifestAPIVersion, Kind: agentversion.ManifestKind,
+		Metadata: agentversion.Metadata{Name: "legacy", Version: "0.9.0", Namespace: "default"},
+		Spec: agentversion.Spec{
+			RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
+			Runtimes:           []agentversion.RuntimeTarget{{Class: "remote", Interface: agentversion.RuntimeInterfaceV1Alpha1, RuntimeABI: "agentos.remote/v1", Entrypoint: []string{"http://127.0.0.1:8088"}}},
+			Capabilities:       &agentversion.Capabilities{Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{}},
+			Resources:          &agentversion.ResourceLimits{CPUMillis: 100, MemoryMiB: 128},
+			Budget:             &agentversion.Budget{WallSeconds: 60},
+			Checkpoint:         &agentversion.CheckpointPolicy{Mode: agentversion.CheckpointNone},
+		},
+	}
+	directory := t.TempDir()
+	legacyPath, stablePath := filepath.Join(directory, "legacy.json"), filepath.Join(directory, "stable.json")
+	if err := os.WriteFile(legacyPath, mustMarshal(t, legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"migrate", "-manifest", legacyPath, "-out", stablePath}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	stable, _, _, err := loadManifest(stablePath)
+	if err != nil || stable.APIVersion != agentversion.ManifestAPIVersion || stable.Spec.Runtimes[0].Interface != agentversion.RuntimeInterfaceV1 {
+		t.Fatalf("stable=%+v err=%v", stable, err)
+	}
+}
+
+func mustMarshal(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
 
 func TestInitValidatePackageAndSignWorkflow(t *testing.T) {
 	for _, adapter := range []string{"go", "python", "langgraph", "a2a"} {
@@ -29,7 +73,7 @@ func TestInitValidatePackageAndSignWorkflow(t *testing.T) {
 				t.Fatal(err)
 			}
 			manifest, _, _, err := loadManifest(manifestPath)
-			if err != nil || manifest.Spec.Runtimes[0].Interface != agentversion.RuntimeInterfaceV1Alpha1 {
+			if err != nil || manifest.Spec.Runtimes[0].Interface != agentversion.RuntimeInterfaceV1 {
 				t.Fatalf("manifest=%+v err=%v", manifest, err)
 			}
 			if err := run([]string{"init", "-dir", directory, "-name", "sample-" + adapter, "-adapter", adapter}, &output, io.Discard); err == nil {

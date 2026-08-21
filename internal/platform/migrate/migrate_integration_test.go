@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/platform/migrate"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/migrate"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

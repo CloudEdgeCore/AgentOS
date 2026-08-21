@@ -15,17 +15,17 @@ import (
 	"testing"
 	"time"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/gateway"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
-	"github.com/bian-cloud-skill/agentos/internal/mcp"
-	"github.com/bian-cloud-skill/agentos/internal/platform/migrate"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/reference"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/migrate"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/reference"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,7 +63,7 @@ func TestSandboxAgentMcpEntryDrivesRealDecisionChain(t *testing.T) {
 		t.Fatalf("listen for Tool Gateway: %v", err)
 	}
 	gwServer := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(gwServer, gwService)
+	gatewayv1.RegisterToolGatewayServiceServer(gwServer, gwService)
 	go func() { _ = gwServer.Serve(listener) }()
 	t.Cleanup(gwServer.Stop)
 	connection, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -73,7 +73,7 @@ func TestSandboxAgentMcpEntryDrivesRealDecisionChain(t *testing.T) {
 	t.Cleanup(func() { _ = connection.Close() })
 
 	identitySlot := reference.NewIdentitySlot()
-	adapter := mcp.NewToolAdapter(reference.NewGrpcToolInvoker(gatewayv1alpha1.NewToolGatewayServiceClient(connection)), identitySlot)
+	adapter := mcp.NewToolAdapter(reference.NewGrpcToolInvoker(gatewayv1.NewToolGatewayServiceClient(connection)), identitySlot)
 	server := httptest.NewServer(mcp.NewServer("agentos-runtime", "v0.1", adapter))
 	t.Cleanup(server.Close)
 

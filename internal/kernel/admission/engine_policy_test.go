@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
 

@@ -4,7 +4,7 @@ package agentos.gateway.v1alpha1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1";
+option go_package = "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1";
 
 // ToolGateway is the fenced tool-invocation boundary runtime workers call on
 // behalf of an Attempt. The gateway enforces policy, approval binding, budget

@@ -10,12 +10,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 )
 
 type Report struct {
-	Adapter string
-	Checks  []string
+	Adapter  string   `json:"adapter"`
+	Protocol string   `json:"protocol"`
+	Checks   []string `json:"checks"`
 }
 
 // Run exercises protocol negotiation, idempotent start, conflict rejection,
@@ -29,10 +30,12 @@ func Run(ctx context.Context, client *agent.Client) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("health: %w", err)
 	}
-	if health.Status != "SERVING" || len(health.ProtocolVersions) != 1 || health.ProtocolVersions[0] != agent.ProtocolVersion {
+	if health.Status != "SERVING" || len(health.ProtocolVersions) != 1 ||
+		(health.ProtocolVersions[0] != agent.ProtocolVersion && health.ProtocolVersions[0] != agent.LegacyProtocolVersion) {
 		return report, fmt.Errorf("health negotiation is non-conformant: %+v", health)
 	}
 	report.Adapter = health.Adapter
+	report.Protocol = health.ProtocolVersions[0]
 	report.Checks = append(report.Checks, "health", "protocol-negotiation")
 
 	request := fixture("conformance-main")
@@ -101,7 +104,7 @@ func Run(ctx context.Context, client *agent.Client) (Report, error) {
 
 func fixture(id string) agent.StartRequest {
 	return agent.StartRequest{
-		ExecutionID: id, AgentVersionRef: "conformance-agent@0.9.0", Goal: "prove adapter conformance",
+		ExecutionID: id, AgentVersionRef: "conformance-agent@1.0.0", Goal: "prove adapter conformance",
 		Input: json.RawMessage("{\"message\":\"hello\"}"),
 		Capabilities: agent.CapabilityGrant{
 			Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{},

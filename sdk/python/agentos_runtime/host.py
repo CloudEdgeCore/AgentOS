@@ -1,4 +1,4 @@
-"""Standard-library host for agentos.runtime.interface/v1alpha1.
+"""Standard-library host for stable agentos.runtime.interface/v1.
 
 Framework adapters implement AgentRuntime; this module owns transport,
 idempotency, bounded events, cancellation, checkpoint/restore and results.
@@ -16,7 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, urlparse
 
-PROTOCOL_VERSION = "agentos.runtime.interface/v1alpha1"
+PROTOCOL_VERSION = "agentos.runtime.interface/v1"
+LEGACY_PROTOCOL_VERSION = "agentos.runtime.interface/v1alpha1"
 MAX_BODY = 2 << 20
 
 
@@ -73,7 +74,7 @@ class RuntimeHost:
         host = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "AgentOSRuntime/0.9"
+            server_version = "AgentOSRuntime/1.0"
 
             def do_GET(self) -> None:  # noqa: N802
                 host._handle(self, "GET")
@@ -88,7 +89,15 @@ class RuntimeHost:
 
     def _handle(self, handler: BaseHTTPRequestHandler, method: str) -> None:
         parsed = urlparse(handler.path)
-        if method == "GET" and parsed.path == "/v1alpha1/health":
+        if parsed.path == "/v1" or parsed.path.startswith("/v1/"):
+            prefix, protocol = "/v1", PROTOCOL_VERSION
+        elif parsed.path == "/v1alpha1" or parsed.path.startswith("/v1alpha1/"):
+            prefix, protocol = "/v1alpha1", LEGACY_PROTOCOL_VERSION
+        else:
+            self._problem(handler, 404, "ROUTE_NOT_FOUND", "runtime interface route not found")
+            return
+        handler.agentos_protocol = protocol
+        if method == "GET" and parsed.path == f"{prefix}/health":
             with self.lock:
                 active = self.active
             self._write(
@@ -96,21 +105,21 @@ class RuntimeHost:
                 200,
                 {
                     "status": "SERVING",
-                    "protocolVersions": [PROTOCOL_VERSION],
+                    "protocolVersions": [protocol],
                     "adapter": self.adapter,
                     "maxConcurrent": self.max_concurrent,
                     "activeExecutions": active,
                 },
             )
             return
-        if method == "POST" and parsed.path == "/v1alpha1/executions:start":
+        if method == "POST" and parsed.path == f"{prefix}/executions:start":
             self._start(handler)
             return
-        prefix = "/v1alpha1/executions/"
-        if not parsed.path.startswith(prefix):
+        execution_prefix = f"{prefix}/executions/"
+        if not parsed.path.startswith(execution_prefix):
             self._problem(handler, 404, "ROUTE_NOT_FOUND", "runtime interface route not found")
             return
-        remainder = parsed.path[len(prefix) :]
+        remainder = parsed.path[len(execution_prefix) :]
         actions = {
             ":stop": "stop",
             ":checkpoint": "checkpoint",
@@ -362,7 +371,7 @@ class RuntimeHost:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(encoded)))
-        handler.send_header("AgentOS-Runtime-Interface", PROTOCOL_VERSION)
+        handler.send_header("AgentOS-Runtime-Interface", getattr(handler, "agentos_protocol", PROTOCOL_VERSION))
         handler.end_headers()
         handler.wfile.write(encoded)
 
