@@ -9,6 +9,14 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 : "${CONTAINERD_ADDRESS:?CONTAINERD_ADDRESS is required}"
 : "${AGENTOS_OCI_IMAGE:?AGENTOS_OCI_IMAGE must be a digest-pinned image}"
 
+CAP_DROP_FLAGS=()
+for capability in \
+  CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL \
+  CAP_MKNOD CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETFCAP CAP_SETGID \
+  CAP_SETPCAP CAP_SETUID CAP_SYS_CHROOT; do
+  CAP_DROP_FLAGS+=(--cap-drop "$capability")
+done
+
 NAMESPACE="${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}"
 RUNTIME="${AGENTOS_OCI_RUNTIME:-io.containerd.runsc.v1}"
 RUNTIME_CONFIG="${AGENTOS_OCI_RUNTIME_CONFIG:-/etc/containerd/runsc.toml}"
@@ -50,7 +58,7 @@ if ! timeout --signal=KILL 120 ctr -n "$NAMESPACE" run \
   --runtime-config-path "$RUNTIME_CONFIG" \
   --snapshotter "$SNAPSHOTTER" \
   --read-only \
-  --cap-drop ALL \
+  "${CAP_DROP_FLAGS[@]}" \
   --seccomp \
   --cpu-quota 100000 \
   --memory-limit 67108864 \
@@ -77,7 +85,7 @@ timeout 120 ctr -n "$NAMESPACE" run \
   --runtime-config-path "$RUNTIME_CONFIG" \
   --snapshotter "$SNAPSHOTTER" \
   --read-only \
-  --cap-drop ALL \
+  "${CAP_DROP_FLAGS[@]}" \
   --seccomp \
   --cpu-quota 100000 \
   --memory-limit 67108864 \

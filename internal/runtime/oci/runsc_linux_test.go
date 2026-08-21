@@ -69,7 +69,6 @@ exit 0
 		{"--runtime-config-path", "/etc/containerd/runsc.toml"},
 		{"--snapshotter", "overlayfs"},
 		{"--read-only"},
-		{"--cap-drop", "ALL"},
 		{"--seccomp"},
 		{"--cpu-quota", "250000"},
 		{"--memory-limit", "134217728"},
@@ -77,6 +76,14 @@ exit 0
 		if !containsSequence(runArgs, want) {
 			t.Errorf("ctr run arguments missing %q: %q", want, runArgs)
 		}
+	}
+	for _, capability := range defaultCapabilitiesToDrop {
+		if !containsSequence(runArgs, []string{"--cap-drop", capability}) {
+			t.Errorf("ctr run arguments do not drop %s: %q", capability, runArgs)
+		}
+	}
+	if containsSequence(runArgs, []string{"--cap-drop", "ALL"}) {
+		t.Errorf("ctr requires concrete CAP_ names, not Docker's ALL alias: %q", runArgs)
 	}
 	if containsSequence(runArgs, []string{"--memory"}) {
 		t.Errorf("unsupported ctr --memory flag present: %q", runArgs)

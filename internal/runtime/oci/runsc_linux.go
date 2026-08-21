@@ -17,6 +17,23 @@ import (
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 )
 
+var defaultCapabilitiesToDrop = []string{
+	"CAP_AUDIT_WRITE",
+	"CAP_CHOWN",
+	"CAP_DAC_OVERRIDE",
+	"CAP_FOWNER",
+	"CAP_FSETID",
+	"CAP_KILL",
+	"CAP_MKNOD",
+	"CAP_NET_BIND_SERVICE",
+	"CAP_NET_RAW",
+	"CAP_SETFCAP",
+	"CAP_SETGID",
+	"CAP_SETPCAP",
+	"CAP_SETUID",
+	"CAP_SYS_CHROOT",
+}
+
 // ctrExecutor drives the pinned containerd CLI with the gVisor runtime. The
 // command surface is deliberately fail-closed: a read-only root filesystem,
 // no Linux capabilities, the containerd default seccomp profile, explicit
@@ -94,9 +111,11 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 	args = append(args,
 		"--snapshotter", e.snapshotter,
 		"--read-only",
-		"--cap-drop", "ALL",
 		"--seccomp",
 	)
+	for _, capability := range defaultCapabilitiesToDrop {
+		args = append(args, "--cap-drop", capability)
+	}
 	for _, mount := range e.mounts(inputPath, spec.WorkspaceBytes) {
 		args = append(args, "--mount", mount)
 	}

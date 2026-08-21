@@ -14,6 +14,14 @@ set -euo pipefail
 # the step log) instead of hanging until the CI job timeout kills the step.
 command -v timeout >/dev/null 2>&1 || { echo "coreutils timeout is required" >&2; exit 1; }
 
+CAP_DROP_FLAGS=()
+for capability in \
+  CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL \
+  CAP_MKNOD CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETFCAP CAP_SETGID \
+  CAP_SETPCAP CAP_SETUID CAP_SYS_CHROOT; do
+  CAP_DROP_FLAGS+=(--cap-drop "$capability")
+done
+
 CONTAINERD_VERSION="${CONTAINERD_VERSION:?set a pinned containerd release (e.g. 2.0.2)}"
 CONTAINERD_SHA256="${CONTAINERD_SHA256:?set the approved containerd archive SHA-256}"
 RUNSC_TAG="${RUNSC_TAG:?set a pinned gVisor release tag (e.g. 20260810.0)}"
@@ -172,7 +180,7 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   --runtime-config-path "$RUNSC_CONFIG_PATH" \
   --snapshotter "$SNAPSHOTTER" \
   --read-only \
-  --cap-drop ALL \
+  "${CAP_DROP_FLAGS[@]}" \
   --seccomp \
   --cpu-quota 100000 \
   --memory-limit 67108864 \
