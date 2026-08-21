@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bian-cloud-skill/agentos/internal/mcp"
+	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 	"github.com/google/uuid"
 )
 

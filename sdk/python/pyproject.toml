@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentos-runtime"
+version = "1.0.0"
+description = "Stable AgentOS Runtime Interface SDK"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{name = "AgentOS maintainers"}]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[tool.setuptools]
+packages = ["agentos_runtime"]

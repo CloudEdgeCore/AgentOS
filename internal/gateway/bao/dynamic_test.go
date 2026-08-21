@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 )
 
 // fakeDatabaseEngine simulates the OpenBao database secrets engine and the

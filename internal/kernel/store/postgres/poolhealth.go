@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
 var _ kernelstore.PoolHealthStore = (*Store)(nil)

@@ -154,6 +154,22 @@ func TestPatternMatching(t *testing.T) {
 	}
 }
 
+func TestWorkerClaimsAreExactAndTenantBound(t *testing.T) {
+	trustDomain, tenant, instance, err := WorkerClaims("spiffe://agentos.dev/ns/tenant-a/worker/worker-1")
+	if err != nil || trustDomain != "agentos.dev" || tenant != "tenant-a" || instance != "worker-1" {
+		t.Fatalf("claims=%q/%q/%q err=%v", trustDomain, tenant, instance, err)
+	}
+	for _, invalid := range []string{
+		"spiffe://agentos.dev/ns/system/control",
+		"spiffe://agentos.dev/ns/*/worker/worker-1",
+		"https://agentos.dev/ns/tenant-a/worker/worker-1",
+	} {
+		if _, _, _, err := WorkerClaims(invalid); err == nil {
+			t.Fatalf("invalid worker identity %q was accepted", invalid)
+		}
+	}
+}
+
 func TestPeerIdentityFromContext(t *testing.T) {
 	ca := testCA(t)
 	svid, err := ca.IssueSVID("tenant-a", "worker-1", fixedNow(), time.Hour)

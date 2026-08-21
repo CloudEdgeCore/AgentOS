@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 )
 
 // fakeBao simulates an OpenBao KV v2 endpoint.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )

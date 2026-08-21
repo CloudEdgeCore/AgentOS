@@ -19,15 +19,15 @@ import (
 	"sync"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 )
 
 // Options configures one keeper run.
 type Options struct {
 	// Client is the fenced Runtime Protocol client.
-	Client runtimev1alpha1.RuntimeControlServiceClient
+	Client runtimev1.RuntimeControlServiceClient
 	// Identity is the fenced AttemptIdentity of the assignment.
-	Identity *runtimev1alpha1.AttemptIdentity
+	Identity *runtimev1.AttemptIdentity
 	// AttemptID is the attempt ID string used to derive idempotency keys.
 	AttemptID string
 	// HeartbeatTTL is the lease TTL the worker requests on every renewal.
@@ -119,7 +119,7 @@ func (k *Keeper) renew(ctx context.Context, cancelExec context.CancelFunc) bool 
 	k.mu.Unlock()
 
 	rpcCtx, cancel := context.WithTimeout(ctx, k.opts.RPCTimeout)
-	response, err := k.opts.Client.Heartbeat(rpcCtx, &runtimev1alpha1.HeartbeatRequest{
+	response, err := k.opts.Client.Heartbeat(rpcCtx, &runtimev1.HeartbeatRequest{
 		Identity: k.opts.Identity, ExpectedLeaseVersion: leaseVersion,
 		IdempotencyKey:      k.opts.AttemptID + ":lease-renew",
 		RequestedTtlSeconds: int64(k.opts.HeartbeatTTL / time.Second),
@@ -140,7 +140,7 @@ func (k *Keeper) renew(ctx context.Context, cancelExec context.CancelFunc) bool 
 		// same idempotency key the worker uses for its own acks makes a
 		// concurrent ack converge.
 		ackCtx, ackCancel := context.WithTimeout(ctx, k.opts.RPCTimeout)
-		_, ackErr := k.opts.Client.AcknowledgeCancellation(ackCtx, &runtimev1alpha1.AcknowledgeCancellationRequest{
+		_, ackErr := k.opts.Client.AcknowledgeCancellation(ackCtx, &runtimev1.AcknowledgeCancellationRequest{
 			Identity: k.opts.Identity, ExpectedAttemptVersion: response.GetAttemptVersion(),
 			IdempotencyKey: k.opts.AttemptID + ":cancel",
 		})

@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/platform/migrate"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/control"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/migrate"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
@@ -135,7 +135,7 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 		t.Fatalf("run attempt: %v", err)
 	}
 
-	staleIdentity := &runtimev1alpha1.AttemptIdentity{
+	staleIdentity := &runtimev1.AttemptIdentity{
 		TenantId: "tenant-a", AttemptId: owned.Attempt.ID.String(), FencingToken: owned.Attempt.FencingToken,
 	}
 
@@ -165,7 +165,7 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 	}
 
 	// Stale heartbeat: rejected.
-	_, err = service.Heartbeat(ctx, &runtimev1alpha1.HeartbeatRequest{
+	_, err = service.Heartbeat(ctx, &runtimev1.HeartbeatRequest{
 		Identity: staleIdentity, ExpectedLeaseVersion: owned.Attempt.FencingToken,
 		RequestedTtlSeconds: 30, IdempotencyKey: "replay-heartbeat-1",
 	})
@@ -175,12 +175,12 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 
 	// Stale checkpoint: rejected before any durable state is written.
 	digest := sha256.Sum256([]byte("stale-state"))
-	_, err = service.CommitCheckpoint(ctx, &runtimev1alpha1.CommitCheckpointRequest{
+	_, err = service.CommitCheckpoint(ctx, &runtimev1.CommitCheckpointRequest{
 		Identity: staleIdentity, CheckpointId: uuid.New().String(),
 		ExpectedAttemptVersion: running.ResourceVersion, IdempotencyKey: "replay-checkpoint-1",
 		AgentVersionRef: "research-agent@1.0.0", Provider: "reference-go",
 		RuntimeAbi: "agentos.reference/v1", SchemaVersion: "state/v1",
-		State: &runtimev1alpha1.ArtifactReference{
+		State: &runtimev1.ArtifactReference{
 			Uri: "artifact://tenant-a/sha256/stale", Sha256: hex.EncodeToString(digest[:]),
 			SizeBytes: int64(len("stale-state")), MediaType: "application/octet-stream",
 		},
@@ -197,16 +197,16 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 	}
 
 	// Stale transition: rejected.
-	_, err = service.TransitionAttempt(ctx, &runtimev1alpha1.TransitionAttemptRequest{
+	_, err = service.TransitionAttempt(ctx, &runtimev1.TransitionAttemptRequest{
 		Identity: staleIdentity, ExpectedAttemptVersion: running.ResourceVersion,
-		IdempotencyKey: "replay-transition-1", TargetPhase: runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_FAILED,
+		IdempotencyKey: "replay-transition-1", TargetPhase: runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED,
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("stale transition error = %v, want PermissionDenied", err)
 	}
 
 	// Stale assignment read: rejected.
-	if _, err := service.GetAssignment(ctx, &runtimev1alpha1.GetAssignmentRequest{Identity: staleIdentity}); status.Code(err) != codes.PermissionDenied {
+	if _, err := service.GetAssignment(ctx, &runtimev1.GetAssignmentRequest{Identity: staleIdentity}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("stale assignment read error = %v, want PermissionDenied", err)
 	}
 
@@ -226,14 +226,14 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 func TestTenantEscapeRejectedOnRealStore(t *testing.T) {
 	pool := prepareSecurity(t)
 	service := control.NewService(postgresstore.New(pool), "tenant-a", 2*time.Minute)
-	_, err := service.PollAssignment(context.Background(), &runtimev1alpha1.PollAssignmentRequest{
+	_, err := service.PollAssignment(context.Background(), &runtimev1.PollAssignmentRequest{
 		TenantId: "tenant-b", RuntimeInstanceId: "worker-1",
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("cross-tenant poll error = %v, want PermissionDenied", err)
 	}
-	if _, err := service.GetAssignment(context.Background(), &runtimev1alpha1.GetAssignmentRequest{
-		Identity: &runtimev1alpha1.AttemptIdentity{TenantId: "tenant-b", AttemptId: uuid.New().String(), FencingToken: 1},
+	if _, err := service.GetAssignment(context.Background(), &runtimev1.GetAssignmentRequest{
+		Identity: &runtimev1.AttemptIdentity{TenantId: "tenant-b", AttemptId: uuid.New().String(), FencingToken: 1},
 	}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("cross-tenant assignment error = %v, want PermissionDenied", err)
 	}

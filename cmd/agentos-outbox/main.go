@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
-	"github.com/bian-cloud-skill/agentos/internal/platform/outbox"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/outbox"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"

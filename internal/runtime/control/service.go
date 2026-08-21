@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/platform/spiffe"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -21,7 +21,7 @@ import (
 )
 
 type Service struct {
-	runtimev1alpha1.UnimplementedRuntimeControlServiceServer
+	runtimev1.UnimplementedRuntimeControlServiceServer
 	store             store.RuntimeStore
 	allowedTenant     string
 	maxLeaseTTL       time.Duration
@@ -47,7 +47,7 @@ func NewService(repository store.RuntimeStore, allowedTenant string, maxLeaseTTL
 	return service
 }
 
-func (s *Service) PollAssignment(ctx context.Context, request *runtimev1alpha1.PollAssignmentRequest) (*runtimev1alpha1.PollAssignmentResponse, error) {
+func (s *Service) PollAssignment(ctx context.Context, request *runtimev1.PollAssignmentRequest) (*runtimev1.PollAssignmentResponse, error) {
 	if request == nil || strings.TrimSpace(request.GetRuntimeInstanceId()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "runtime instance ID is required")
 	}
@@ -61,10 +61,10 @@ func (s *Service) PollAssignment(ctx context.Context, request *runtimev1alpha1.P
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.PollAssignmentResponse{Assignment: assignmentProto(assignment)}, nil
+	return &runtimev1.PollAssignmentResponse{Assignment: assignmentProto(assignment)}, nil
 }
 
-func (s *Service) GetAssignment(ctx context.Context, request *runtimev1alpha1.GetAssignmentRequest) (*runtimev1alpha1.GetAssignmentResponse, error) {
+func (s *Service) GetAssignment(ctx context.Context, request *runtimev1.GetAssignmentRequest) (*runtimev1.GetAssignmentResponse, error) {
 	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
@@ -73,10 +73,10 @@ func (s *Service) GetAssignment(ctx context.Context, request *runtimev1alpha1.Ge
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.GetAssignmentResponse{Assignment: assignmentProto(assignment)}, nil
+	return &runtimev1.GetAssignmentResponse{Assignment: assignmentProto(assignment)}, nil
 }
 
-func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1alpha1.TransitionAttemptRequest) (*runtimev1alpha1.TransitionAttemptResponse, error) {
+func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1.TransitionAttemptRequest) (*runtimev1.TransitionAttemptResponse, error) {
 	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
@@ -96,12 +96,12 @@ func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1alpha
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.TransitionAttemptResponse{
+	return &runtimev1.TransitionAttemptResponse{
 		Phase: protoPhase(updated.Phase), AttemptVersion: updated.ResourceVersion,
 	}, nil
 }
 
-func (s *Service) Heartbeat(ctx context.Context, request *runtimev1alpha1.HeartbeatRequest) (*runtimev1alpha1.HeartbeatResponse, error) {
+func (s *Service) Heartbeat(ctx context.Context, request *runtimev1.HeartbeatRequest) (*runtimev1.HeartbeatResponse, error) {
 	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
@@ -123,13 +123,13 @@ func (s *Service) Heartbeat(ctx context.Context, request *runtimev1alpha1.Heartb
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.HeartbeatResponse{
+	return &runtimev1.HeartbeatResponse{
 		LeaseVersion: lease.ResourceVersion, ExpiresAt: timestamppb.New(lease.ExpiresAt),
 		CancelRequested: status.CancelRequested, AttemptVersion: status.AttemptVersion,
 	}, nil
 }
 
-func (s *Service) CommitCheckpoint(ctx context.Context, request *runtimev1alpha1.CommitCheckpointRequest) (*runtimev1alpha1.CommitCheckpointResponse, error) {
+func (s *Service) CommitCheckpoint(ctx context.Context, request *runtimev1.CommitCheckpointRequest) (*runtimev1.CommitCheckpointResponse, error) {
 	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
@@ -152,12 +152,12 @@ func (s *Service) CommitCheckpoint(ctx context.Context, request *runtimev1alpha1
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.CommitCheckpointResponse{
+	return &runtimev1.CommitCheckpointResponse{
 		Checkpoint: checkpointProto(checkpoint), AttemptVersion: attempt.ResourceVersion,
 	}, nil
 }
 
-func (s *Service) CompleteAttempt(ctx context.Context, request *runtimev1alpha1.CompleteAttemptRequest) (*runtimev1alpha1.CompleteAttemptResponse, error) {
+func (s *Service) CompleteAttempt(ctx context.Context, request *runtimev1.CompleteAttemptRequest) (*runtimev1.CompleteAttemptResponse, error) {
 	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
@@ -173,13 +173,13 @@ func (s *Service) CompleteAttempt(ctx context.Context, request *runtimev1alpha1.
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.CompleteAttemptResponse{
+	return &runtimev1.CompleteAttemptResponse{
 		AttemptVersion: result.Attempt.ResourceVersion, RunVersion: result.Run.ResourceVersion,
 		TaskVersion: result.Task.ResourceVersion, ResultRef: result.Task.ResultRef,
 	}, nil
 }
 
-func (s *Service) AcknowledgeCancellation(ctx context.Context, request *runtimev1alpha1.AcknowledgeCancellationRequest) (*runtimev1alpha1.AcknowledgeCancellationResponse, error) {
+func (s *Service) AcknowledgeCancellation(ctx context.Context, request *runtimev1.AcknowledgeCancellationRequest) (*runtimev1.AcknowledgeCancellationResponse, error) {
 	identity, attemptID, err := s.parseIdentity(ctx, request.GetIdentity())
 	if err != nil {
 		return nil, err
@@ -191,13 +191,13 @@ func (s *Service) AcknowledgeCancellation(ctx context.Context, request *runtimev
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1alpha1.AcknowledgeCancellationResponse{
+	return &runtimev1.AcknowledgeCancellationResponse{
 		AttemptVersion: result.Attempt.ResourceVersion, RunVersion: result.Run.ResourceVersion,
 		TaskVersion: result.Task.ResourceVersion,
 	}, nil
 }
 
-func (s *Service) parseIdentity(ctx context.Context, identity *runtimev1alpha1.AttemptIdentity) (*runtimev1alpha1.AttemptIdentity, uuid.UUID, error) {
+func (s *Service) parseIdentity(ctx context.Context, identity *runtimev1.AttemptIdentity) (*runtimev1.AttemptIdentity, uuid.UUID, error) {
 	if identity == nil || identity.GetFencingToken() <= 0 {
 		return nil, uuid.Nil, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
@@ -215,7 +215,9 @@ func (s *Service) parseIdentity(ctx context.Context, identity *runtimev1alpha1.A
 }
 
 func (s *Service) authorizeTenant(tenantID string) error {
-	if strings.TrimSpace(tenantID) == "" || tenantID != s.allowedTenant {
+	if strings.TrimSpace(tenantID) == "" ||
+		(s.allowedTenant == "*" && s.spiffeTrustDomain == "") ||
+		(s.allowedTenant != "*" && tenantID != s.allowedTenant) {
 		return status.Error(codes.PermissionDenied, "tenant is not authorized by this runtime endpoint")
 	}
 	return nil
@@ -235,21 +237,21 @@ func (s *Service) authorizePeer(ctx context.Context, tenantID, runtimeInstanceID
 	if err != nil {
 		return status.Error(codes.Unauthenticated, "mutual TLS worker identity is required: "+err.Error())
 	}
-	workerPrefix := "spiffe://" + s.spiffeTrustDomain + "/ns/" + tenantID + "/worker/"
-	if !strings.HasPrefix(identity, workerPrefix) {
+	trustDomain, peerTenant, peerInstance, err := spiffe.WorkerClaims(identity)
+	if err != nil || trustDomain != s.spiffeTrustDomain || peerTenant != tenantID {
 		return status.Error(codes.PermissionDenied, "peer SPIFFE identity does not match the tenant claim")
 	}
 	if runtimeInstanceID != "" {
-		if identity != spiffe.Identity(s.spiffeTrustDomain, tenantID, runtimeInstanceID) {
+		if peerInstance != runtimeInstanceID {
 			return status.Error(codes.PermissionDenied, "peer SPIFFE identity does not match the runtime instance claim")
 		}
 	}
 	return nil
 }
 
-func assignmentProto(assignment store.RuntimeAssignment) *runtimev1alpha1.Assignment {
-	result := &runtimev1alpha1.Assignment{
-		Identity: &runtimev1alpha1.AttemptIdentity{
+func assignmentProto(assignment store.RuntimeAssignment) *runtimev1.Assignment {
+	result := &runtimev1.Assignment{
+		Identity: &runtimev1.AttemptIdentity{
 			TenantId: assignment.Attempt.TenantID, AttemptId: assignment.Attempt.ID.String(),
 			FencingToken: assignment.Attempt.FencingToken,
 		},
@@ -272,8 +274,8 @@ func assignmentProto(assignment store.RuntimeAssignment) *runtimev1alpha1.Assign
 	return result
 }
 
-func checkpointProto(checkpoint store.Checkpoint) *runtimev1alpha1.CheckpointReference {
-	return &runtimev1alpha1.CheckpointReference{
+func checkpointProto(checkpoint store.Checkpoint) *runtimev1.CheckpointReference {
+	return &runtimev1.CheckpointReference{
 		CheckpointId: checkpoint.ID.String(), AgentVersionRef: checkpoint.AgentVersionRef,
 		RuntimeClass: checkpoint.RuntimeClass, Provider: checkpoint.Provider, RuntimeAbi: checkpoint.RuntimeABI,
 		SchemaVersion: checkpoint.SchemaVersion, State: artifactProto(checkpoint.State),
@@ -282,13 +284,13 @@ func checkpointProto(checkpoint store.Checkpoint) *runtimev1alpha1.CheckpointRef
 	}
 }
 
-func artifactProto(artifact store.ArtifactReference) *runtimev1alpha1.ArtifactReference {
-	return &runtimev1alpha1.ArtifactReference{
+func artifactProto(artifact store.ArtifactReference) *runtimev1.ArtifactReference {
+	return &runtimev1.ArtifactReference{
 		Uri: artifact.URI, Sha256: artifact.DigestHex(), SizeBytes: artifact.SizeBytes, MediaType: artifact.MediaType,
 	}
 }
 
-func artifactFromProto(artifact *runtimev1alpha1.ArtifactReference) (store.ArtifactReference, error) {
+func artifactFromProto(artifact *runtimev1.ArtifactReference) (store.ArtifactReference, error) {
 	var result store.ArtifactReference
 	if artifact == nil {
 		return result, fmt.Errorf("artifact reference is required")
@@ -304,53 +306,53 @@ func artifactFromProto(artifact *runtimev1alpha1.ArtifactReference) (store.Artif
 	return result, result.Validate()
 }
 
-func domainPhase(phase runtimev1alpha1.AttemptPhase) (domain.AttemptPhase, error) {
+func domainPhase(phase runtimev1.AttemptPhase) (domain.AttemptPhase, error) {
 	switch phase {
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_STARTING:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_STARTING:
 		return domain.AttemptStarting, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_RUNNING:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING:
 		return domain.AttemptRunning, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_WAITING_TOOL:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_WAITING_TOOL:
 		return domain.AttemptWaitingTool, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_WAITING_AGENT:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_WAITING_AGENT:
 		return domain.AttemptWaitingAgent, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_WAITING_APPROVAL:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_WAITING_APPROVAL:
 		return domain.AttemptWaitingApproval, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_CHECKPOINTING:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_CHECKPOINTING:
 		return domain.AttemptCheckpointing, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_FAILED:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED:
 		return domain.AttemptFailed, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_CANCEL_REQUESTED:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_CANCEL_REQUESTED:
 		return domain.AttemptCancelRequested, nil
-	case runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_CANCELLED:
+	case runtimev1.AttemptPhase_ATTEMPT_PHASE_CANCELLED:
 		return domain.AttemptCancelled, nil
 	default:
 		return "", fmt.Errorf("unsupported attempt phase %s", phase)
 	}
 }
 
-func protoPhase(phase domain.AttemptPhase) runtimev1alpha1.AttemptPhase {
+func protoPhase(phase domain.AttemptPhase) runtimev1.AttemptPhase {
 	switch phase {
 	case domain.AttemptStarting:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_STARTING
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_STARTING
 	case domain.AttemptRunning:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_RUNNING
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING
 	case domain.AttemptWaitingTool:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_WAITING_TOOL
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_WAITING_TOOL
 	case domain.AttemptWaitingAgent:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_WAITING_AGENT
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_WAITING_AGENT
 	case domain.AttemptWaitingApproval:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_WAITING_APPROVAL
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_WAITING_APPROVAL
 	case domain.AttemptCheckpointing:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_CHECKPOINTING
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_CHECKPOINTING
 	case domain.AttemptFailed:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_FAILED
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED
 	case domain.AttemptCancelRequested:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_CANCEL_REQUESTED
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_CANCEL_REQUESTED
 	case domain.AttemptCancelled:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_CANCELLED
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_CANCELLED
 	default:
-		return runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_UNSPECIFIED
+		return runtimev1.AttemptPhase_ATTEMPT_PHASE_UNSPECIFIED
 	}
 }
 

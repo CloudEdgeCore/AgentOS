@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/bian-cloud-skill/agentos/internal/mcp"
+	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 )
 
 // ErrNoActiveAttempt reports an MCP call outside an assignment execution

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 )
@@ -48,40 +48,40 @@ func (r *runtimeFixture) Restore(_ context.Context, request agent.RestoreRequest
 }
 
 type fakeControl struct {
-	assignment  *runtimev1alpha1.Assignment
+	assignment  *runtimev1.Assignment
 	version     int64
-	completed   *runtimev1alpha1.CompleteAttemptRequest
+	completed   *runtimev1.CompleteAttemptRequest
 	failure     string
 	checkpoints int
 }
 
-func (f *fakeControl) PollAssignment(context.Context, *runtimev1alpha1.PollAssignmentRequest, ...grpc.CallOption) (*runtimev1alpha1.PollAssignmentResponse, error) {
-	return &runtimev1alpha1.PollAssignmentResponse{Assignment: f.assignment}, nil
+func (f *fakeControl) PollAssignment(context.Context, *runtimev1.PollAssignmentRequest, ...grpc.CallOption) (*runtimev1.PollAssignmentResponse, error) {
+	return &runtimev1.PollAssignmentResponse{Assignment: f.assignment}, nil
 }
-func (f *fakeControl) GetAssignment(context.Context, *runtimev1alpha1.GetAssignmentRequest, ...grpc.CallOption) (*runtimev1alpha1.GetAssignmentResponse, error) {
-	return &runtimev1alpha1.GetAssignmentResponse{Assignment: f.assignment}, nil
+func (f *fakeControl) GetAssignment(context.Context, *runtimev1.GetAssignmentRequest, ...grpc.CallOption) (*runtimev1.GetAssignmentResponse, error) {
+	return &runtimev1.GetAssignmentResponse{Assignment: f.assignment}, nil
 }
-func (f *fakeControl) TransitionAttempt(_ context.Context, request *runtimev1alpha1.TransitionAttemptRequest, _ ...grpc.CallOption) (*runtimev1alpha1.TransitionAttemptResponse, error) {
+func (f *fakeControl) TransitionAttempt(_ context.Context, request *runtimev1.TransitionAttemptRequest, _ ...grpc.CallOption) (*runtimev1.TransitionAttemptResponse, error) {
 	f.version++
 	if request.FailureCode != "" {
 		f.failure = request.FailureCode + ": " + request.FailureMessage
 	}
-	return &runtimev1alpha1.TransitionAttemptResponse{AttemptVersion: f.version, Phase: request.TargetPhase}, nil
+	return &runtimev1.TransitionAttemptResponse{AttemptVersion: f.version, Phase: request.TargetPhase}, nil
 }
-func (f *fakeControl) Heartbeat(context.Context, *runtimev1alpha1.HeartbeatRequest, ...grpc.CallOption) (*runtimev1alpha1.HeartbeatResponse, error) {
-	return &runtimev1alpha1.HeartbeatResponse{LeaseVersion: 2, AttemptVersion: f.version}, nil
+func (f *fakeControl) Heartbeat(context.Context, *runtimev1.HeartbeatRequest, ...grpc.CallOption) (*runtimev1.HeartbeatResponse, error) {
+	return &runtimev1.HeartbeatResponse{LeaseVersion: 2, AttemptVersion: f.version}, nil
 }
-func (f *fakeControl) CommitCheckpoint(_ context.Context, _ *runtimev1alpha1.CommitCheckpointRequest, _ ...grpc.CallOption) (*runtimev1alpha1.CommitCheckpointResponse, error) {
+func (f *fakeControl) CommitCheckpoint(_ context.Context, _ *runtimev1.CommitCheckpointRequest, _ ...grpc.CallOption) (*runtimev1.CommitCheckpointResponse, error) {
 	f.checkpoints++
 	f.version++
-	return &runtimev1alpha1.CommitCheckpointResponse{AttemptVersion: f.version}, nil
+	return &runtimev1.CommitCheckpointResponse{AttemptVersion: f.version}, nil
 }
-func (f *fakeControl) CompleteAttempt(_ context.Context, request *runtimev1alpha1.CompleteAttemptRequest, _ ...grpc.CallOption) (*runtimev1alpha1.CompleteAttemptResponse, error) {
+func (f *fakeControl) CompleteAttempt(_ context.Context, request *runtimev1.CompleteAttemptRequest, _ ...grpc.CallOption) (*runtimev1.CompleteAttemptResponse, error) {
 	f.completed = request
-	return &runtimev1alpha1.CompleteAttemptResponse{AttemptVersion: f.version + 1}, nil
+	return &runtimev1.CompleteAttemptResponse{AttemptVersion: f.version + 1}, nil
 }
-func (f *fakeControl) AcknowledgeCancellation(context.Context, *runtimev1alpha1.AcknowledgeCancellationRequest, ...grpc.CallOption) (*runtimev1alpha1.AcknowledgeCancellationResponse, error) {
-	return &runtimev1alpha1.AcknowledgeCancellationResponse{}, nil
+func (f *fakeControl) AcknowledgeCancellation(context.Context, *runtimev1.AcknowledgeCancellationRequest, ...grpc.CallOption) (*runtimev1.AcknowledgeCancellationResponse, error) {
+	return &runtimev1.AcknowledgeCancellationResponse{}, nil
 }
 
 type memoryArtifacts struct {
@@ -118,7 +118,7 @@ func TestWorkerExecutesManifestThroughRuntimeInterface(t *testing.T) {
 	spec := agentversion.Spec{
 		RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
 		Runtimes: []agentversion.RuntimeTarget{{
-			Class: "remote", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+			Class: "remote", Interface: agentversion.RuntimeInterfaceV1,
 			RuntimeABI: "agentos.remote/v1", Entrypoint: []string{server.URL},
 		}},
 		Capabilities: &agentversion.Capabilities{
@@ -133,8 +133,8 @@ func TestWorkerExecutesManifestThroughRuntimeInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	attemptID := uuid.NewString()
-	control := &fakeControl{version: 1, assignment: &runtimev1alpha1.Assignment{
-		Identity: &runtimev1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID, FencingToken: 1},
+	control := &fakeControl{version: 1, assignment: &runtimev1.Assignment{
+		Identity: &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID, FencingToken: 1},
 		RunId:    uuid.NewString(), TaskId: uuid.NewString(), AgentVersionRef: "fixture@0.9.0",
 		Goal: "execute", WorkloadSpecJson: []byte("{}"), AgentVersionSpecJson: specJSON,
 		RuntimeClass: "remote", RuntimePoolId: "remote-pool", RuntimeInstanceId: "adapter-1",
@@ -174,7 +174,7 @@ func TestWorkerHonorsCheckpointNone(t *testing.T) {
 	spec := agentversion.Spec{
 		RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
 		Runtimes: []agentversion.RuntimeTarget{{
-			Class: "remote", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+			Class: "remote", Interface: agentversion.RuntimeInterfaceV1,
 			RuntimeABI: "agentos.remote/v1", Entrypoint: []string{server.URL},
 		}},
 		Capabilities: &agentversion.Capabilities{
@@ -188,8 +188,8 @@ func TestWorkerHonorsCheckpointNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	control := &fakeControl{version: 1, assignment: &runtimev1alpha1.Assignment{
-		Identity: &runtimev1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1},
+	control := &fakeControl{version: 1, assignment: &runtimev1.Assignment{
+		Identity: &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1},
 		RunId:    uuid.NewString(), TaskId: uuid.NewString(), AgentVersionRef: "fixture@0.9.0",
 		Goal: "execute", WorkloadSpecJson: []byte("{}"), AgentVersionSpecJson: specJSON,
 		RuntimeClass: "remote", RuntimePoolId: "remote-pool", RuntimeInstanceId: "adapter-1",

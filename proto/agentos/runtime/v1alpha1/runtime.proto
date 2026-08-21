@@ -4,7 +4,7 @@ package agentos.runtime.v1alpha1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1;runtimev1alpha1";
+option go_package = "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1alpha1;runtimev1alpha1";
 
 // RuntimeControl is the fenced control-plane boundary used by runtime workers.
 // Large payloads are represented by content-addressed artifact references.

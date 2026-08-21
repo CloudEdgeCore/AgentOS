@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
 

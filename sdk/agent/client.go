@@ -15,8 +15,10 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL  string
+	http     *http.Client
+	protocol string
+	prefix   string
 }
 
 func NewClient(baseURL string, client *http.Client) (*Client, error) {
@@ -31,18 +33,29 @@ func NewClient(baseURL string, client *http.Client) (*Client, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Client{baseURL: parsed.String(), http: client}, nil
+	return &Client{baseURL: parsed.String(), http: client, protocol: ProtocolVersion, prefix: "/v1"}, nil
+}
+
+// NewLegacyClient creates an explicit N-1 client for the deprecated alpha
+// endpoint. New integrations must use NewClient, which negotiates stable v1.
+func NewLegacyClient(baseURL string, client *http.Client) (*Client, error) {
+	legacy, err := NewClient(baseURL, client)
+	if err != nil {
+		return nil, err
+	}
+	legacy.protocol, legacy.prefix = LegacyProtocolVersion, "/v1alpha1"
+	return legacy, nil
 }
 
 func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 	var response HealthResponse
-	err := c.call(ctx, http.MethodGet, "/v1alpha1/health", nil, http.StatusOK, &response)
+	err := c.call(ctx, http.MethodGet, c.prefix+"/health", nil, http.StatusOK, &response)
 	return response, err
 }
 
 func (c *Client) Start(ctx context.Context, request StartRequest) (StartResponse, error) {
 	var response StartResponse
-	err := c.call(ctx, http.MethodPost, "/v1alpha1/executions:start", request, http.StatusAccepted, &response)
+	err := c.call(ctx, http.MethodPost, c.prefix+"/executions:start", request, http.StatusAccepted, &response)
 	if httpError := new(HTTPError); errors.As(err, &httpError) && httpError.Status == http.StatusOK {
 		if decodeErr := json.Unmarshal(httpError.Body, &response); decodeErr != nil {
 			return StartResponse{}, decodeErr
@@ -54,32 +67,32 @@ func (c *Client) Start(ctx context.Context, request StartRequest) (StartResponse
 
 func (c *Client) Stop(ctx context.Context, executionID string) (StopResponse, error) {
 	var response StopResponse
-	err := c.call(ctx, http.MethodPost, executionPath(executionID, ":stop"), struct{}{}, http.StatusAccepted, &response)
+	err := c.call(ctx, http.MethodPost, c.executionPath(executionID, ":stop"), struct{}{}, http.StatusAccepted, &response)
 	return response, err
 }
 
 func (c *Client) Checkpoint(ctx context.Context, executionID string) (CheckpointResponse, error) {
 	var response CheckpointResponse
-	err := c.call(ctx, http.MethodPost, executionPath(executionID, ":checkpoint"), struct{}{}, http.StatusOK, &response)
+	err := c.call(ctx, http.MethodPost, c.executionPath(executionID, ":checkpoint"), struct{}{}, http.StatusOK, &response)
 	return response, err
 }
 
 func (c *Client) Restore(ctx context.Context, request RestoreRequest) (RestoreResponse, error) {
 	var response RestoreResponse
-	err := c.call(ctx, http.MethodPost, executionPath(request.ExecutionID, ":restore"), request, http.StatusOK, &response)
+	err := c.call(ctx, http.MethodPost, c.executionPath(request.ExecutionID, ":restore"), request, http.StatusOK, &response)
 	return response, err
 }
 
 func (c *Client) Events(ctx context.Context, executionID string, after int64) (EventList, error) {
 	var response EventList
-	path := executionPath(executionID, "/events") + "?after=" + strconv.FormatInt(after, 10)
+	path := c.executionPath(executionID, "/events") + "?after=" + strconv.FormatInt(after, 10)
 	err := c.call(ctx, http.MethodGet, path, nil, http.StatusOK, &response)
 	return response, err
 }
 
 func (c *Client) Result(ctx context.Context, executionID string) (Result, bool, error) {
 	var response Result
-	err := c.call(ctx, http.MethodGet, executionPath(executionID, "/result"), nil, http.StatusOK, &response)
+	err := c.call(ctx, http.MethodGet, c.executionPath(executionID, "/result"), nil, http.StatusOK, &response)
 	if httpError := new(HTTPError); errors.As(err, &httpError) && httpError.Status == http.StatusAccepted {
 		if decodeErr := json.Unmarshal(httpError.Body, &response); decodeErr != nil {
 			return Result{}, false, decodeErr
@@ -148,7 +161,7 @@ func (c *Client) call(ctx context.Context, method, path string, body any, expect
 	if len(encoded) > maxInterfaceBody {
 		return errors.New("runtime interface response exceeds 2 MiB")
 	}
-	if reply.Header.Get("AgentOS-Runtime-Interface") != ProtocolVersion {
+	if reply.Header.Get("AgentOS-Runtime-Interface") != c.protocol {
 		return errors.New("runtime interface protocol negotiation failed")
 	}
 	if reply.StatusCode != expected {
@@ -169,6 +182,6 @@ func (c *Client) call(ctx context.Context, method, path string, body any, expect
 	return nil
 }
 
-func executionPath(executionID, suffix string) string {
-	return "/v1alpha1/executions/" + url.PathEscape(executionID) + suffix
+func (c *Client) executionPath(executionID, suffix string) string {
+	return c.prefix + "/executions/" + url.PathEscape(executionID) + suffix
 }

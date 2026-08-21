@@ -159,6 +159,30 @@ func Identity(trustDomain, tenantID, instanceID string) string {
 	return "spiffe://" + trustDomain + "/ns/" + tenantID + "/worker/" + instanceID
 }
 
+// WorkerClaims parses the tenant and runtime instance from an exact worker
+// SPIFFE ID. It rejects wildcard patterns and non-worker identities.
+func WorkerClaims(identity string) (trustDomain, tenantID, instanceID string, err error) {
+	parsed, err := parseSpiffeID(identity)
+	if err != nil {
+		return "", "", "", err
+	}
+	if len(parsed.segments) != 4 || parsed.segments[0] != "ns" || parsed.segments[2] != "worker" ||
+		parsed.segments[1] == "" || parsed.segments[3] == "" || parsed.segments[1] == "*" || parsed.segments[3] == "*" {
+		return "", "", "", fmt.Errorf("SPIFFE ID %q is not an exact worker identity", identity)
+	}
+	return parsed.trustDomain, parsed.segments[1], parsed.segments[3], nil
+}
+
+// PeerWorkerClaims extracts an exact worker identity from the verified gRPC
+// peer certificate.
+func PeerWorkerClaims(ctx context.Context) (trustDomain, tenantID, instanceID string, err error) {
+	identity, err := PeerIdentity(ctx)
+	if err != nil {
+		return "", "", "", err
+	}
+	return WorkerClaims(identity)
+}
+
 // ControlPlaneIdentity renders the SPIFFE ID of the control plane itself.
 func ControlPlaneIdentity(trustDomain string) string {
 	return "spiffe://" + trustDomain + "/ns/" + SystemNamespace + "/control"

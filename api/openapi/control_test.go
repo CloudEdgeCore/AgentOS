@@ -8,7 +8,7 @@ import (
 )
 
 func TestControlContractIsValidOpenAPI(t *testing.T) {
-	for _, filename := range []string{"control-v1alpha1.yaml", "runtime-interface-v1alpha1.yaml"} {
+	for _, filename := range []string{"control-v1.yaml", "runtime-interface-v1.yaml", "control-v1alpha1.yaml", "runtime-interface-v1alpha1.yaml"} {
 		t.Run(filename, func(t *testing.T) {
 			loader := openapi3.NewLoader()
 			document, err := loader.LoadFromFile(filename)

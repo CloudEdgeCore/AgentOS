@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/leasekeeper"
-	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/leasekeeper"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,7 +38,7 @@ type ArtifactStore interface {
 }
 
 type Worker struct {
-	control           runtimev1alpha1.RuntimeControlServiceClient
+	control           runtimev1.RuntimeControlServiceClient
 	artifacts         ArtifactStore
 	runtime           *agent.Client
 	endpoint          string
@@ -49,7 +49,7 @@ type Worker struct {
 }
 
 func NewWorker(
-	control runtimev1alpha1.RuntimeControlServiceClient,
+	control runtimev1.RuntimeControlServiceClient,
 	artifacts ArtifactStore,
 	endpoint, tenantID, runtimeInstanceID string,
 	heartbeatTTL time.Duration,
@@ -74,7 +74,7 @@ func NewWorker(
 
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	pollCtx, cancel := context.WithTimeout(ctx, controlRPCTimeout)
-	polled, err := w.control.PollAssignment(pollCtx, &runtimev1alpha1.PollAssignmentRequest{
+	polled, err := w.control.PollAssignment(pollCtx, &runtimev1.PollAssignmentRequest{
 		TenantId: w.tenantID, RuntimeInstanceId: w.runtimeInstanceID,
 	})
 	cancel()
@@ -97,7 +97,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	identity := assignment.GetIdentity()
 	version, err := w.transition(ctx, identity, assignment.GetAttemptVersion(),
-		runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_STARTING, "", "")
+		runtimev1.AttemptPhase_ATTEMPT_PHASE_STARTING, "", "")
 	if err != nil {
 		if status.Code(err) == codes.Aborted {
 			return false, nil
@@ -105,7 +105,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	version, err = w.transition(ctx, identity, version,
-		runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_RUNNING, "", "")
+		runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING, "", "")
 	if err != nil {
 		return false, err
 	}
@@ -190,7 +190,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("persist adapter result: %w", err)
 	}
-	if _, err := w.control.CompleteAttempt(executionCtx, &runtimev1alpha1.CompleteAttemptRequest{
+	if _, err := w.control.CompleteAttempt(executionCtx, &runtimev1.CompleteAttemptRequest{
 		Identity: identity, ExpectedAttemptVersion: version,
 		IdempotencyKey: operationKey(assignment, "complete"), Result: artifactProto(resultArtifact),
 	}); err != nil {
@@ -199,7 +199,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func (w *Worker) target(assignment *runtimev1alpha1.Assignment) (agentversion.RuntimeTarget, agent.CapabilityGrant, agentversion.CheckpointPolicy, error) {
+func (w *Worker) target(assignment *runtimev1.Assignment) (agentversion.RuntimeTarget, agent.CapabilityGrant, agentversion.CheckpointPolicy, error) {
 	var spec agentversion.Spec
 	decoder := json.NewDecoder(bytes.NewReader(assignment.GetAgentVersionSpecJson()))
 	decoder.DisallowUnknownFields()
@@ -213,7 +213,7 @@ func (w *Worker) target(assignment *runtimev1alpha1.Assignment) (agentversion.Ru
 		if target.Class != assignment.GetRuntimeClass() {
 			continue
 		}
-		if target.Interface != agentversion.RuntimeInterfaceV1Alpha1 || len(target.Entrypoint) != 1 ||
+		if (target.Interface != agentversion.RuntimeInterfaceV1 && target.Interface != agentversion.RuntimeInterfaceV1Alpha1) || len(target.Entrypoint) != 1 ||
 			strings.TrimRight(target.Entrypoint[0], "/") != w.endpoint {
 			return agentversion.RuntimeTarget{}, agent.CapabilityGrant{}, agentversion.CheckpointPolicy{},
 				fmt.Errorf("runtime target does not bind the configured Runtime Interface endpoint")
@@ -281,7 +281,7 @@ func (w *Worker) wait(ctx context.Context, executionID string, checkpointInterva
 
 func (w *Worker) commitLogicalCheckpoint(
 	ctx context.Context,
-	assignment *runtimev1alpha1.Assignment,
+	assignment *runtimev1.Assignment,
 	target agentversion.RuntimeTarget,
 	policy agentversion.CheckpointPolicy,
 	version int64,
@@ -307,7 +307,7 @@ func (w *Worker) commitLogicalCheckpoint(
 	if err != nil {
 		return version, err
 	}
-	committed, err := w.control.CommitCheckpoint(ctx, &runtimev1alpha1.CommitCheckpointRequest{
+	committed, err := w.control.CommitCheckpoint(ctx, &runtimev1.CommitCheckpointRequest{
 		Identity: assignment.GetIdentity(), ExpectedAttemptVersion: version,
 		IdempotencyKey: operationKey(assignment, operation), CheckpointId: checkpointID.String(),
 		AgentVersionRef: assignment.GetAgentVersionRef(), Provider: ProviderName,
@@ -319,7 +319,7 @@ func (w *Worker) commitLogicalCheckpoint(
 	return committed.GetAttemptVersion(), nil
 }
 
-func (w *Worker) restore(ctx context.Context, assignment *runtimev1alpha1.Assignment, target agentversion.RuntimeTarget, policy agentversion.CheckpointPolicy) error {
+func (w *Worker) restore(ctx context.Context, assignment *runtimev1.Assignment, target agentversion.RuntimeTarget, policy agentversion.CheckpointPolicy) error {
 	checkpoint := assignment.GetResumeCheckpoint()
 	if checkpoint.GetAgentVersionRef() != assignment.GetAgentVersionRef() ||
 		checkpoint.GetRuntimeClass() != assignment.GetRuntimeClass() ||
@@ -352,10 +352,10 @@ func (w *Worker) restore(ctx context.Context, assignment *runtimev1alpha1.Assign
 	return err
 }
 
-func (w *Worker) heartbeat(ctx context.Context, assignment *runtimev1alpha1.Assignment) (*runtimev1alpha1.HeartbeatResponse, error) {
+func (w *Worker) heartbeat(ctx context.Context, assignment *runtimev1.Assignment) (*runtimev1.HeartbeatResponse, error) {
 	rpcCtx, cancel := context.WithTimeout(ctx, controlRPCTimeout)
 	defer cancel()
-	response, err := w.control.Heartbeat(rpcCtx, &runtimev1alpha1.HeartbeatRequest{
+	response, err := w.control.Heartbeat(rpcCtx, &runtimev1.HeartbeatRequest{
 		Identity: assignment.GetIdentity(), ExpectedLeaseVersion: assignment.GetLeaseVersion(),
 		IdempotencyKey: operationKey(assignment, "heartbeat"), RequestedTtlSeconds: int64(w.heartbeatTTL / time.Second),
 	})
@@ -363,7 +363,7 @@ func (w *Worker) heartbeat(ctx context.Context, assignment *runtimev1alpha1.Assi
 		return nil, fmt.Errorf("renew adapter lease: %w", err)
 	}
 	if response.GetCancelRequested() {
-		_, err := w.control.AcknowledgeCancellation(rpcCtx, &runtimev1alpha1.AcknowledgeCancellationRequest{
+		_, err := w.control.AcknowledgeCancellation(rpcCtx, &runtimev1.AcknowledgeCancellationRequest{
 			Identity: assignment.GetIdentity(), ExpectedAttemptVersion: response.GetAttemptVersion(),
 			IdempotencyKey: operationKey(assignment, "cancel"),
 		})
@@ -376,14 +376,14 @@ func (w *Worker) heartbeat(ctx context.Context, assignment *runtimev1alpha1.Assi
 
 func (w *Worker) transition(
 	ctx context.Context,
-	identity *runtimev1alpha1.AttemptIdentity,
+	identity *runtimev1.AttemptIdentity,
 	version int64,
-	phase runtimev1alpha1.AttemptPhase,
+	phase runtimev1.AttemptPhase,
 	failureCode, failureMessage string,
 ) (int64, error) {
 	rpcCtx, cancel := context.WithTimeout(ctx, controlRPCTimeout)
 	defer cancel()
-	response, err := w.control.TransitionAttempt(rpcCtx, &runtimev1alpha1.TransitionAttemptRequest{
+	response, err := w.control.TransitionAttempt(rpcCtx, &runtimev1.TransitionAttemptRequest{
 		Identity: identity, ExpectedAttemptVersion: version,
 		IdempotencyKey: identity.GetAttemptId() + ":" + strings.ToLower(phase.String()),
 		TargetPhase:    phase, FailureCode: failureCode, FailureMessage: failureMessage,
@@ -396,29 +396,29 @@ func (w *Worker) transition(
 
 func (w *Worker) fail(
 	ctx context.Context,
-	identity *runtimev1alpha1.AttemptIdentity,
+	identity *runtimev1.AttemptIdentity,
 	version int64,
 	code string,
 	cause error,
 ) (bool, error) {
 	if _, err := w.transition(ctx, identity, version,
-		runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_FAILED, code, cause.Error()); err != nil {
+		runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED, code, cause.Error()); err != nil {
 		return false, fmt.Errorf("mark adapter attempt failed (%s): %w", code, err)
 	}
 	return true, nil
 }
 
-func operationKey(assignment *runtimev1alpha1.Assignment, operation string) string {
+func operationKey(assignment *runtimev1.Assignment, operation string) string {
 	return assignment.GetIdentity().GetAttemptId() + ":adapter:" + operation
 }
 
-func artifactProto(reference store.ArtifactReference) *runtimev1alpha1.ArtifactReference {
-	return &runtimev1alpha1.ArtifactReference{
+func artifactProto(reference store.ArtifactReference) *runtimev1.ArtifactReference {
+	return &runtimev1.ArtifactReference{
 		Uri: reference.URI, Sha256: reference.DigestHex(), SizeBytes: reference.SizeBytes, MediaType: reference.MediaType,
 	}
 }
 
-func artifactFromProto(reference *runtimev1alpha1.ArtifactReference) (store.ArtifactReference, error) {
+func artifactFromProto(reference *runtimev1.ArtifactReference) (store.ArtifactReference, error) {
 	var result store.ArtifactReference
 	if reference == nil {
 		return result, fmt.Errorf("checkpoint artifact reference is required")

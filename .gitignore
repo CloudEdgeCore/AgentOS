@@ -10,6 +10,8 @@
 *.test
 __pycache__/
 *.py[cod]
+*.egg-info/
+/sdk/python/build/
 
 # Local configuration and credentials
 .env

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
 )
 
 // fakePoolHealth is a scriptable store.PoolHealthStore.

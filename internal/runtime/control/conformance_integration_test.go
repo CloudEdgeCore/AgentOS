@@ -16,25 +16,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/gateway"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	kernelmodel "github.com/bian-cloud-skill/agentos/internal/kernel/model"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	"github.com/bian-cloud-skill/agentos/internal/platform/migrate"
-	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/reference"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/migrate"
+	runtimecontrol "github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/reference"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,6 +57,26 @@ const (
 	ociSchema           = "agentos.oci-logical/v1"
 	terminalWaitTimeout = 60 * time.Second
 )
+
+// lockedBuffer keeps subprocess diagnostics safe to inspect while the child
+// is still running. Timeout paths intentionally report stderr before test
+// cleanup terminates the process.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *lockedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *lockedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
 
 // scenario describes one provider leg of the conformance run.
 type scenario struct {
@@ -196,7 +217,7 @@ func (env *conformanceEnv) driveReferenceWorker(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	worker := reference.NewWorker(
-		runtimev1alpha1.NewRuntimeControlServiceClient(connection),
+		runtimev1.NewRuntimeControlServiceClient(connection),
 		artifacts, env.tenant, "worker-reference-1", 30*time.Second,
 	)
 	ctx := context.Background()
@@ -245,7 +266,7 @@ func (env *conformanceEnv) driveWasmtimeWorker(t *testing.T) {
 		"--package-root", packageRoot,
 		"--artifact-root", t.TempDir(),
 	)
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		t.Fatalf("start Wasmtime provider: %v", err)
@@ -325,7 +346,7 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		commandArgs = append(commandArgs, "--containerd-snapshotter", snapshotter)
 	}
 	command := exec.Command(binaryPath, commandArgs...)
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		t.Fatalf("start OCI provider: %v", err)
@@ -488,7 +509,7 @@ func newConformanceEnv(t *testing.T) *conformanceEnv {
 		t.Fatalf("listen for Runtime Protocol: %v", err)
 	}
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	runtimev1alpha1.RegisterRuntimeControlServiceServer(server,
+	runtimev1.RegisterRuntimeControlServiceServer(server,
 		runtimecontrol.NewService(repository, conformanceTenant, 2*time.Minute))
 	go func() {
 		_ = server.Serve(listener)
@@ -540,7 +561,7 @@ func TestTaskToolCallFlowThroughGateway(t *testing.T) {
 		t.Fatalf("listen for Tool Gateway: %v", err)
 	}
 	gwServer := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(gwServer, gwService)
+	gatewayv1.RegisterToolGatewayServiceServer(gwServer, gwService)
 	go func() { _ = gwServer.Serve(gwListener) }()
 	t.Cleanup(gwServer.Stop)
 
@@ -559,10 +580,10 @@ func TestTaskToolCallFlowThroughGateway(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = gwConnection.Close() })
 	worker := reference.NewWorker(
-		runtimev1alpha1.NewRuntimeControlServiceClient(connection),
+		runtimev1.NewRuntimeControlServiceClient(connection),
 		artifacts, env.tenant, "worker-tool-1", 30*time.Second,
 	)
-	worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(gwConnection))
+	worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(gwConnection))
 
 	deadline := time.Now().Add(terminalWaitTimeout)
 	for {
@@ -741,7 +762,7 @@ func wireWorkerWithGateway(t *testing.T, env *conformanceEnv, instanceID string,
 		t.Fatalf("listen for Tool Gateway: %v", err)
 	}
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, gatewayService)
+	gatewayv1.RegisterToolGatewayServiceServer(server, gatewayService)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient(env.grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -758,9 +779,9 @@ func wireWorkerWithGateway(t *testing.T, env *conformanceEnv, instanceID string,
 	if err != nil {
 		t.Fatalf("create artifact store: %v", err)
 	}
-	worker := reference.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifacts,
+	worker := reference.NewWorker(runtimev1.NewRuntimeControlServiceClient(connection), artifacts,
 		env.tenant, instanceID, 30*time.Second)
-	return worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(gwConnection))
+	return worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(gwConnection))
 }
 
 // driveUntil runs the worker until the predicate holds or the deadline passes.
@@ -850,7 +871,7 @@ func TestTaskModelCallFlowThroughGateway(t *testing.T) {
 		t.Fatalf("listen for Model Gateway: %v", err)
 	}
 	modelServer := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	modelv1alpha1.RegisterModelGatewayServiceServer(modelServer, modelService)
+	modelv1.RegisterModelGatewayServiceServer(modelServer, modelService)
 	go func() { _ = modelServer.Serve(modelListener) }()
 	t.Cleanup(modelServer.Stop)
 
@@ -869,10 +890,10 @@ func TestTaskModelCallFlowThroughGateway(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = modelConnection.Close() })
 	worker := reference.NewWorker(
-		runtimev1alpha1.NewRuntimeControlServiceClient(connection),
+		runtimev1.NewRuntimeControlServiceClient(connection),
 		artifacts, env.tenant, "worker-model-1", 30*time.Second,
 	)
-	worker.WithModelGateway(modelv1alpha1.NewModelGatewayServiceClient(modelConnection))
+	worker.WithModelGateway(modelv1.NewModelGatewayServiceClient(modelConnection))
 
 	driveUntil(t, env, func(task kernelstore.Task) bool { return task.Phase.Terminal() }, worker)
 	task, err := env.store.GetTask(ctx, env.tenant, env.taskID)

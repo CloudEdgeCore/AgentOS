@@ -10,21 +10,21 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/oci"
+	"github.com/CloudEdgeCore/AgentOS/cmd/mtlsutil"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/grpcx"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/oci"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
 	controlAddress := flag.String("control-address", "127.0.0.1:9090", "Runtime Protocol control endpoint")
-	tenantID := flag.String("tenant", "", "development tenant")
+	tenantID := flag.String("tenant", "", "tenant encoded in the worker X.509-SVID")
 	runtimeInstanceID := flag.String("runtime-instance-id", "", "assigned runtime instance ID")
-	artifactRoot := flag.String("artifact-root", "", "development content-addressed artifact directory")
+	artifactRoot := flag.String("artifact-root", "", "content-addressed artifact directory")
 	artifactGC := flag.Duration("artifact-gc-retention", 0, "delete artifacts older than this retention at startup (0 = disabled; O7)")
 	imageRef := flag.String("image-ref", "", "digest-pinned OCI image that runs the published AgentVersion")
 	namespace := flag.String("containerd-namespace", "agentos", "containerd namespace for sandboxed containers")
@@ -41,14 +41,15 @@ func main() {
 	workspaceBytes := flag.Int64("workspace-bytes", 0, "tmpfs workspace size in bytes (0 = Admission decides)")
 	pollInterval := flag.Duration("poll-interval", 250*time.Millisecond, "assignment polling interval")
 	heartbeatTTL := flag.Duration("heartbeat-ttl", 30*time.Second, "requested runtime lease TTL")
-	devMode := flag.Bool("dev-mode", false, "acknowledge the v0.1 engineering-baseline provider (not a hardened sandbox)")
+	devMode := flag.Bool("dev-mode", false, "allow plaintext Runtime Protocol for local development")
 	tlsCert := flag.String("tls-cert", "", "worker X.509-SVID certificate (PEM)")
 	tlsKey := flag.String("tls-key", "", "worker X.509-SVID private key (PEM)")
 	trustBundle := flag.String("trust-bundle", "", "SPIFFE trust bundle (PEM CA certificates)")
 	flag.Parse()
+	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
 	if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*runtimeInstanceID) == "" || strings.TrimSpace(*artifactRoot) == "" ||
-		strings.TrimSpace(*imageRef) == "" || *pollInterval <= 0 || *heartbeatTTL <= 0 || !*devMode {
-		slog.Error("tenant, runtime instance, artifact root, digest-pinned image, positive intervals, and explicit -dev-mode are required")
+		strings.TrimSpace(*imageRef) == "" || *pollInterval <= 0 || *heartbeatTTL <= 0 || (!*devMode && !tlsConfigured) {
+		slog.Error("tenant, runtime instance, artifact root, digest-pinned image, positive intervals, and mTLS (or explicit dev mode) are required")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -78,7 +79,6 @@ func main() {
 		slog.Error("create OCI/gVisor executor", "error", err)
 		os.Exit(1)
 	}
-	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
 	controlCredentials, err := mtlsutil.ClientCredentials(tlsConfigured, *tlsCert, *tlsKey, *trustBundle)
 	if err != nil {
 		slog.Error("configure worker mTLS credentials", "error", err)
@@ -99,7 +99,7 @@ func main() {
 	defer connection.Close()
 	artifactStore, err := artifact.NewFilesystem(*artifactRoot, 64<<20)
 	if err != nil {
-		slog.Error("create development artifact store", "error", err)
+		slog.Error("create artifact store", "error", err)
 		os.Exit(1)
 	}
 	if *artifactGC > 0 {
@@ -110,7 +110,7 @@ func main() {
 		}
 		slog.Info("artifact garbage collection", "deleted", deleted, "retention", *artifactGC)
 	}
-	worker := oci.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifactStore, executor,
+	worker := oci.NewWorker(runtimev1.NewRuntimeControlServiceClient(connection), artifactStore, executor,
 		*tenantID, *runtimeInstanceID, *heartbeatTTL, *imageRef)
 	worker.WithResourceLimits(*cpuQuotaMillis, *memoryLimitMiB, *workspaceBytes)
 	ticker := time.NewTicker(*pollInterval)

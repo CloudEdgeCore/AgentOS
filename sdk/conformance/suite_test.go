@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 )
 
 type conformantRuntime struct{}

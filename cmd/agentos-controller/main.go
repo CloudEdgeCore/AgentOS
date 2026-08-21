@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/recovery"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/recovery"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

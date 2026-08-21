@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	runtimecontrol "github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -259,7 +259,7 @@ func newTestWorkerWithArtifacts(t *testing.T, repository store.RuntimeStore, exe
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer()
-	runtimev1alpha1.RegisterRuntimeControlServiceServer(server, runtimecontrol.NewService(repository, "tenant-a", time.Minute))
+	runtimev1.RegisterRuntimeControlServiceServer(server, runtimecontrol.NewService(repository, "tenant-a", time.Minute))
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufconn", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -274,7 +274,7 @@ func newTestWorkerWithArtifacts(t *testing.T, repository store.RuntimeStore, exe
 			t.Fatal(err)
 		}
 	}
-	return NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifacts, executor,
+	return NewWorker(runtimev1.NewRuntimeControlServiceClient(connection), artifacts, executor,
 		"tenant-a", instanceID, 30*time.Second, imageRef)
 }
 

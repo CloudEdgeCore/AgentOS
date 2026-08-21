@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 )
 
 func cliManifest() agentversion.Manifest {
@@ -21,7 +21,7 @@ func cliManifest() agentversion.Manifest {
 		Spec: agentversion.Spec{
 			RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"wasmtime"}, Preferred: "wasmtime"},
 			Runtimes: []agentversion.RuntimeTarget{{
-				Class: "wasmtime", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+				Class: "wasmtime", Interface: agentversion.RuntimeInterfaceV1,
 				RuntimeABI: "agentos.wasm-component/v1", Entrypoint: []string{"agent.wasm"},
 			}},
 			Capabilities: &agentversion.Capabilities{

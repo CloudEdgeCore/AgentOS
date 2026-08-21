@@ -6,10 +6,10 @@ import (
 	"errors"
 	"strings"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,7 +33,7 @@ type RuntimeFence interface {
 // existing Control API remains an operator surface; Agent runtimes use this
 // service so they cannot choose a tenant, version, or namespace grant.
 type MemoryService struct {
-	gatewayv1alpha1.UnimplementedMemoryGatewayServiceServer
+	gatewayv1.UnimplementedMemoryGatewayServiceServer
 	memories      MemoryInvoker
 	fences        RuntimeFence
 	allowedTenant string
@@ -44,7 +44,7 @@ func NewMemoryService(memories MemoryInvoker, fences RuntimeFence, allowedTenant
 	return &MemoryService{memories: memories, fences: fences, allowedTenant: allowedTenant, capabilities: capabilities}
 }
 
-func (s *MemoryService) SearchMemory(ctx context.Context, request *gatewayv1alpha1.SearchMemoryRequest) (*gatewayv1alpha1.SearchMemoryResponse, error) {
+func (s *MemoryService) SearchMemory(ctx context.Context, request *gatewayv1.SearchMemoryRequest) (*gatewayv1.SearchMemoryResponse, error) {
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
@@ -69,14 +69,14 @@ func (s *MemoryService) SearchMemory(ctx context.Context, request *gatewayv1alph
 	if err != nil {
 		return nil, memoryRPCError(err)
 	}
-	response := &gatewayv1alpha1.SearchMemoryResponse{Records: make([]*gatewayv1alpha1.MemoryRecord, 0, len(records))}
+	response := &gatewayv1.SearchMemoryResponse{Records: make([]*gatewayv1.MemoryRecord, 0, len(records))}
 	for _, record := range records {
 		response.Records = append(response.Records, memoryRecord(record))
 	}
 	return response, nil
 }
 
-func (s *MemoryService) PutMemory(ctx context.Context, request *gatewayv1alpha1.PutMemoryRequest) (*gatewayv1alpha1.PutMemoryResponse, error) {
+func (s *MemoryService) PutMemory(ctx context.Context, request *gatewayv1.PutMemoryRequest) (*gatewayv1.PutMemoryResponse, error) {
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
@@ -113,16 +113,16 @@ func (s *MemoryService) PutMemory(ctx context.Context, request *gatewayv1alpha1.
 	if err != nil {
 		return nil, memoryRPCError(err)
 	}
-	return &gatewayv1alpha1.PutMemoryResponse{Record: memoryRecord(record), Replayed: replayed}, nil
+	return &gatewayv1.PutMemoryResponse{Record: memoryRecord(record), Replayed: replayed}, nil
 }
 
-func (s *MemoryService) authorize(ctx context.Context, identity *gatewayv1alpha1.AttemptIdentity, versionRef, namespace, operation string) (store.RuntimeAssignment, error) {
+func (s *MemoryService) authorize(ctx context.Context, identity *gatewayv1.AttemptIdentity, versionRef, namespace, operation string) (store.RuntimeAssignment, error) {
 	var zero store.RuntimeAssignment
 	if identity == nil || identity.GetFencingToken() <= 0 {
 		return zero, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
-	if strings.TrimSpace(identity.GetTenantId()) == "" || identity.GetTenantId() != s.allowedTenant {
-		return zero, status.Error(codes.PermissionDenied, "tenant is not authorized by this gateway endpoint")
+	if err := authorizeTenant(ctx, s.allowedTenant, identity.GetTenantId()); err != nil {
+		return zero, err
 	}
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(versionRef) == "" {
 		return zero, status.Error(codes.InvalidArgument, "namespace and agent version reference are required")
@@ -148,8 +148,8 @@ func (s *MemoryService) authorize(ctx context.Context, identity *gatewayv1alpha1
 	return assignment, nil
 }
 
-func memoryRecord(record store.MemoryRecord) *gatewayv1alpha1.MemoryRecord {
-	return &gatewayv1alpha1.MemoryRecord{
+func memoryRecord(record store.MemoryRecord) *gatewayv1.MemoryRecord {
+	return &gatewayv1.MemoryRecord{
 		Id: record.ID.String(), Namespace: record.Namespace, Key: record.Key, ContentType: record.ContentType,
 		Content: record.Content, Sensitivity: record.Sensitivity, ResourceVersion: record.ResourceVersion,
 		CreatedAt: timestamppb.New(record.CreatedAt), UpdatedAt: timestamppb.New(record.UpdatedAt),

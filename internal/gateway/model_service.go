@@ -3,12 +3,11 @@ package gateway
 import (
 	"context"
 	"errors"
-	"strings"
 
-	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/model"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,7 +26,7 @@ type ModelInvoker interface {
 // mode accepts a fixed tenant on a loopback-only listener; production
 // exposure requires SPIFFE mTLS.
 type ModelService struct {
-	modelv1alpha1.UnimplementedModelGatewayServiceServer
+	modelv1.UnimplementedModelGatewayServiceServer
 	invoker       ModelInvoker
 	allowedTenant string
 	capabilities  *capability.Authorizer
@@ -41,11 +40,11 @@ func NewModelService(invoker ModelInvoker, allowedTenant string, capabilities ..
 	return service
 }
 
-func (s *ModelService) Begin(ctx context.Context, request *modelv1alpha1.BeginRequest) (*modelv1alpha1.BeginResponse, error) {
+func (s *ModelService) Begin(ctx context.Context, request *modelv1.BeginRequest) (*modelv1.BeginResponse, error) {
 	if request == nil || request.GetIdentity() == nil || request.GetIdentity().GetFencingToken() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
-	if err := s.authorizeTenant(request.GetIdentity().GetTenantId()); err != nil {
+	if err := authorizeTenant(ctx, s.allowedTenant, request.GetIdentity().GetTenantId()); err != nil {
 		return nil, err
 	}
 	if s.capabilities != nil {
@@ -75,18 +74,18 @@ func (s *ModelService) Begin(ctx context.Context, request *modelv1alpha1.BeginRe
 	if err != nil {
 		return nil, modelRPCError(err)
 	}
-	return &modelv1alpha1.BeginResponse{
+	return &modelv1.BeginResponse{
 		CallId: result.Call.ID.String(), ModelRef: result.Call.ModelRef,
 		Status: string(result.Call.Status), PriceRevision: result.Call.PriceRevision,
 		PolicyRevision: result.PolicyRevision, ResourceVersion: result.Call.ResourceVersion,
 	}, nil
 }
 
-func (s *ModelService) Settle(ctx context.Context, request *modelv1alpha1.SettleRequest) (*modelv1alpha1.SettleResponse, error) {
+func (s *ModelService) Settle(ctx context.Context, request *modelv1.SettleRequest) (*modelv1.SettleResponse, error) {
 	if request == nil || request.GetIdentity() == nil || request.GetIdentity().GetFencingToken() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
-	if err := s.authorizeTenant(request.GetIdentity().GetTenantId()); err != nil {
+	if err := authorizeTenant(ctx, s.allowedTenant, request.GetIdentity().GetTenantId()); err != nil {
 		return nil, err
 	}
 	if request.GetSequence() < 1 {
@@ -105,14 +104,14 @@ func (s *ModelService) Settle(ctx context.Context, request *modelv1alpha1.Settle
 	}); err != nil {
 		return nil, modelRPCError(err)
 	}
-	return &modelv1alpha1.SettleResponse{CallId: callID.String()}, nil
+	return &modelv1.SettleResponse{CallId: callID.String()}, nil
 }
 
-func (s *ModelService) Finish(ctx context.Context, request *modelv1alpha1.FinishRequest) (*modelv1alpha1.FinishResponse, error) {
+func (s *ModelService) Finish(ctx context.Context, request *modelv1.FinishRequest) (*modelv1.FinishResponse, error) {
 	if request == nil || request.GetIdentity() == nil || request.GetIdentity().GetFencingToken() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
-	if err := s.authorizeTenant(request.GetIdentity().GetTenantId()); err != nil {
+	if err := authorizeTenant(ctx, s.allowedTenant, request.GetIdentity().GetTenantId()); err != nil {
 		return nil, err
 	}
 	callID, err := parseUUID(request.GetCallId(), "call ID")
@@ -132,18 +131,11 @@ func (s *ModelService) Finish(ctx context.Context, request *modelv1alpha1.Finish
 	if err != nil {
 		return nil, modelRPCError(err)
 	}
-	return &modelv1alpha1.FinishResponse{
+	return &modelv1.FinishResponse{
 		CallId: finished.ID.String(), ModelRef: finished.ModelRef, Status: string(finished.Status),
 		InputTokens: finished.InputTokens, OutputTokens: finished.OutputTokens,
 		CostUsd: finished.CostUSD, PriceRevision: finished.PriceRevision, FinishReason: finished.FinishReason,
 	}, nil
-}
-
-func (s *ModelService) authorizeTenant(tenantID string) error {
-	if strings.TrimSpace(tenantID) == "" || tenantID != s.allowedTenant {
-		return status.Error(codes.PermissionDenied, "tenant is not authorized by this gateway endpoint")
-	}
-	return nil
 }
 
 func modelRPCError(err error) error {

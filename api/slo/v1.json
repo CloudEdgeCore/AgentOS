@@ -1,0 +1,16 @@
+{
+  "schema": "agentos.slo/v1",
+  "productVersion": "1.0.0.0",
+  "windowDays": 30,
+  "objectives": {
+    "controlApiAvailability": {"operator": ">=", "target": 0.999},
+    "acceptedTaskPersistentLoss": {"operator": "=", "target": 0},
+    "schedulingDecisionP99Seconds": {"operator": "<", "target": 2},
+    "runtimeRecoveryP99Seconds": {"operator": "<", "target": 60},
+    "budgetHardStopP99Seconds": {"operator": "<", "target": 5},
+    "auditEventCompleteness": {"operator": "=", "target": 1},
+    "tenantStateRPOSeconds": {"operator": "=", "target": 0},
+    "controlPlaneRTOSeconds": {"operator": "<", "target": 900},
+    "unauthorizedHighRiskExecutions": {"operator": "=", "target": 0}
+  }
+}

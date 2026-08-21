@@ -1,5 +1,4 @@
-// Command agentos is the v0.9 developer workflow: initialize, validate,
-// package, sign, publish, run and observe portable Agents.
+// Command agentos is the stable developer and operator workflow.
 package main
 
 import (
@@ -19,8 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/version"
 	"github.com/google/uuid"
 )
 
@@ -35,11 +35,15 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentos <init|validate|package|sign|publish|run|logs> [flags]")
+		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs> [flags]")
 	}
 	switch args[0] {
+	case "version":
+		return runVersion(args[1:], stdout, stderr)
 	case "init":
 		return runInit(args[1:], stdout, stderr)
+	case "migrate":
+		return runMigrate(args[1:], stdout, stderr)
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
 	case "package":
@@ -55,6 +59,53 @@ func run(args []string, stdout, stderr io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runVersion(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("version", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit machine-readable release information")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	info := version.Current()
+	if *jsonOutput {
+		encoded, err := json.Marshal(info)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, string(encoded))
+		return err
+	}
+	_, err := fmt.Fprintf(stdout, "%s %s (semver v%s, %s)\n", info.Product, info.ProductVersion, info.SemVer, info.ReleaseStage)
+	return err
+}
+
+func runMigrate(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	path := flags.String("manifest", "agent.json", "legacy or stable Agent Manifest file")
+	out := flags.String("out", "agent.v1.json", "stable v1 Agent Manifest output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	manifest, _, _, err := loadManifest(*path)
+	if err != nil {
+		return err
+	}
+	promoted, err := manifest.PromoteToV1()
+	if err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(promoted, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeExclusive(*out, append(encoded, '\n')); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "stable manifest written to %s ref=%s\n", *out, promoted.Ref())
+	return err
 }
 
 func runInit(args []string, stdout, stderr io.Writer) error {
@@ -93,7 +144,7 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 		Spec: agentversion.Spec{
 			RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
 			Runtimes: []agentversion.RuntimeTarget{{
-				Class: "remote", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+				Class: "remote", Interface: agentversion.RuntimeInterfaceV1,
 				RuntimeABI: runtimeABI, Entrypoint: []string{strings.TrimRight(*endpoint, "/")},
 			}},
 			Capabilities: &agentversion.Capabilities{
@@ -443,7 +494,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 )
 
 type runtime struct{ states sync.Map }

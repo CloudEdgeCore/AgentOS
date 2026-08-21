@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
 	"github.com/google/uuid"
 )
 

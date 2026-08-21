@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	controlapi "github.com/bian-cloud-skill/agentos/internal/control/api"
-	"github.com/bian-cloud-skill/agentos/internal/control/auth"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	controlapi "github.com/CloudEdgeCore/AgentOS/internal/control/api"
+	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
 func TestTenantQuotaEndpointsDisabledWithoutStore(t *testing.T) {

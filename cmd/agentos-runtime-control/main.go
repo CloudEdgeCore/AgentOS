@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
-	"github.com/bian-cloud-skill/agentos/internal/platform/spiffe"
-	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/grpcx"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
+	runtimecontrol "github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -36,13 +36,22 @@ func main() {
 	spiffePattern := flag.String("spiffe-pattern", "spiffe://agentos.dev/ns/*/worker/*", "SPIFFE ID pattern authorized to call the Runtime Protocol")
 	flag.Parse()
 
-	if *databaseURL == "" || strings.TrimSpace(*devTenant) == "" || *maxLeaseTTL <= 0 || !*devMode || !loopback(*listenAddress) {
-		slog.Error("database URL, dev tenant, positive max lease TTL, loopback listener, and explicit -dev-mode are required")
+	if *databaseURL == "" || *maxLeaseTTL <= 0 {
+		slog.Error("database URL and positive max lease TTL are required")
 		os.Exit(2)
 	}
 	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
 	if tlsConfigured && (*tlsCert == "" || *tlsKey == "" || *trustBundle == "") {
 		slog.Error("-tls-cert, -tls-key and -trust-bundle must be provided together for the mTLS boundary")
+		os.Exit(2)
+	}
+	if *devMode {
+		if strings.TrimSpace(*devTenant) == "" || !loopback(*listenAddress) {
+			slog.Error("development mode requires a fixed tenant and loopback listener")
+			os.Exit(2)
+		}
+	} else if strings.TrimSpace(*devTenant) != "" || !tlsConfigured {
+		slog.Error("production mode requires SPIFFE mTLS and forbids a fixed development tenant")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -103,9 +112,19 @@ func main() {
 		slog.Warn("Runtime Protocol has NO transport identity boundary: workers connect in plaintext (dev mode only)")
 	}
 	server := grpc.NewServer(serverOptions...)
-	runtimev1alpha1.RegisterRuntimeControlServiceServer(server,
-		runtimecontrol.NewService(postgresstore.New(pool), *devTenant, *maxLeaseTTL, serviceOptions...))
+	allowedTenant := *devTenant
+	if !*devMode {
+		allowedTenant = "*"
+	}
+	runtimeService := runtimecontrol.NewService(postgresstore.New(pool), allowedTenant, *maxLeaseTTL, serviceOptions...)
+	runtimev1.RegisterRuntimeControlServiceServer(server, runtimeService)
+	if err := grpcx.RegisterLegacyServiceAlias(server, runtimev1.RuntimeControlService_ServiceDesc, runtimeService,
+		"agentos.runtime.v1alpha1.RuntimeControlService"); err != nil {
+		slog.Error("register legacy Runtime Protocol alias", "error", err)
+		os.Exit(1)
+	}
 	healthServer := health.NewServer()
+	healthServer.SetServingStatus("agentos.runtime.v1.RuntimeControlService", grpc_health_v1.HealthCheckResponse_SERVING)
 	healthServer.SetServingStatus("agentos.runtime.v1alpha1.RuntimeControlService", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(server, healthServer)
 	go func() {
@@ -122,7 +141,7 @@ func main() {
 			server.Stop()
 		}
 	}()
-	slog.Info("Agent OS development Runtime Protocol listening", "address", *listenAddress, "tenant", *devTenant)
+	slog.Info("Agent OS Runtime Protocol listening", "address", *listenAddress, "devMode", *devMode, "tenant", allowedTenant)
 	if err := server.Serve(listener); err != nil && ctx.Err() == nil {
 		slog.Error("serve Runtime Protocol", "error", err)
 		os.Exit(1)

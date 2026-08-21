@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	// ManifestAPIVersion and ManifestKind identify the strict v0.9 developer
-	// contract. The API remains alpha until the v1 compatibility review.
-	ManifestAPIVersion = "agentos.dev/v1alpha1"
-	ManifestKind       = "AgentManifest"
-	// RuntimeInterfaceV1Alpha1 is the provider-neutral lifecycle boundary an
-	// adapter implements. Provider-specific state stays behind RuntimeABI.
+	// ManifestAPIVersion identifies the frozen GA Agent Manifest contract.
+	// LegacyManifestAPIVersion remains readable for the published N-1 window.
+	ManifestAPIVersion       = "agentos.dev/v1"
+	LegacyManifestAPIVersion = "agentos.dev/v1alpha1"
+	ManifestKind             = "AgentManifest"
+	// RuntimeInterfaceV1 is the frozen provider-neutral lifecycle boundary.
+	RuntimeInterfaceV1 = "agentos.runtime.interface/v1"
+	// RuntimeInterfaceV1Alpha1 is accepted only for legacy manifests.
 	RuntimeInterfaceV1Alpha1 = "agentos.runtime.interface/v1alpha1"
 
 	CheckpointNone    = "none"
@@ -109,8 +111,14 @@ func DecodeManifest(raw []byte) (Manifest, json.RawMessage, [sha256.Size]byte, e
 }
 
 func (m Manifest) Validate() error {
-	if m.APIVersion != ManifestAPIVersion {
-		return fmt.Errorf("agent manifest apiVersion must be %s", ManifestAPIVersion)
+	var runtimeInterface string
+	switch m.APIVersion {
+	case ManifestAPIVersion:
+		runtimeInterface = RuntimeInterfaceV1
+	case LegacyManifestAPIVersion:
+		runtimeInterface = RuntimeInterfaceV1Alpha1
+	default:
+		return fmt.Errorf("agent manifest apiVersion must be %s or legacy %s", ManifestAPIVersion, LegacyManifestAPIVersion)
 	}
 	if m.Kind != ManifestKind {
 		return fmt.Errorf("agent manifest kind must be %s", ManifestKind)
@@ -143,7 +151,7 @@ func (m Manifest) Validate() error {
 	if err != nil {
 		return fmt.Errorf("encode agent manifest spec: %w", err)
 	}
-	if err := ValidateSpec(encoded); err != nil {
+	if err := validateSpecForInterface(encoded, runtimeInterface); err != nil {
 		return fmt.Errorf("agent manifest spec: %w", err)
 	}
 	return nil
@@ -151,7 +159,32 @@ func (m Manifest) Validate() error {
 
 func (m Manifest) Ref() string { return m.Metadata.Name + "@" + m.Metadata.Version }
 
+// PromoteToV1 performs the only supported alpha-to-GA schema migration. The
+// v1 schema is otherwise wire-identical, so canonical identity changes solely
+// because the two explicit contract identifiers are promoted.
+func (m Manifest) PromoteToV1() (Manifest, error) {
+	if err := m.Validate(); err != nil {
+		return Manifest{}, err
+	}
+	if m.APIVersion == ManifestAPIVersion {
+		return m, nil
+	}
+	m.APIVersion = ManifestAPIVersion
+	m.Spec.Runtimes = append([]RuntimeTarget(nil), m.Spec.Runtimes...)
+	for index := range m.Spec.Runtimes {
+		m.Spec.Runtimes[index].Interface = RuntimeInterfaceV1
+	}
+	if err := m.Validate(); err != nil {
+		return Manifest{}, fmt.Errorf("promote agent manifest: %w", err)
+	}
+	return m, nil
+}
+
 func validatePlatformSpec(spec Spec) error {
+	return validatePlatformSpecForInterface(spec, RuntimeInterfaceV1)
+}
+
+func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error {
 	if len(spec.Runtimes) > 16 {
 		return fmt.Errorf("runtimes must contain at most 16 targets")
 	}
@@ -165,8 +198,8 @@ func validatePlatformSpec(spec Spec) error {
 				return fmt.Errorf("runtimes contains duplicate class %q", target.Class)
 			}
 			seen[target.Class] = struct{}{}
-			if target.Interface != RuntimeInterfaceV1Alpha1 {
-				return fmt.Errorf("runtimes[%d].interface must be %s", index, RuntimeInterfaceV1Alpha1)
+			if target.Interface != runtimeInterface {
+				return fmt.Errorf("runtimes[%d].interface must be %s", index, runtimeInterface)
 			}
 			if !contractRefPattern.MatchString(target.RuntimeABI) {
 				return fmt.Errorf("runtimes[%d].runtimeABI is invalid", index)

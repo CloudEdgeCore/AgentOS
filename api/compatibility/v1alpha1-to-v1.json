@@ -1,21 +1,34 @@
 {
   "kind": "CompatibilityPromotion",
-  "current": {
-    "controlApi": "v1alpha1",
-    "agentManifest": "agentos.dev/v1alpha1",
-    "runtimeProtocol": "agentos.runtime.v1alpha1",
-    "runtimeInterface": "agentos.runtime.interface/v1alpha1"
+  "release": {
+    "productVersion": "1.0.0.0",
+    "semver": "1.0.0",
+    "stage": "GA",
+    "releasedAt": "2026-08-21"
   },
-  "candidate": {
+  "current": {
     "controlApi": "v1",
     "agentManifest": "agentos.dev/v1",
     "runtimeProtocol": "agentos.runtime.v1",
-    "runtimeInterface": "agentos.runtime.interface/v1"
+    "runtimeInterface": "agentos.runtime.interface/v1",
+    "gatewayProtocol": "agentos.gateway.v1",
+    "modelProtocol": "agentos.model.v1"
+  },
+  "legacy": {
+    "controlApi": "v1alpha1",
+    "agentManifest": "agentos.dev/v1alpha1",
+    "runtimeProtocol": "agentos.runtime.v1alpha1",
+    "runtimeInterface": "agentos.runtime.interface/v1alpha1",
+    "gatewayProtocol": "agentos.gateway.v1alpha1",
+    "modelProtocol": "agentos.model.v1alpha1",
+    "deprecatedAt": "2026-08-21",
+    "removeNotBefore": "2027-02-17",
+    "readCompatible": true
   },
   "policy": {
     "minimumDeprecationDays": 180,
     "nMinusOneReadCompatibility": true,
-    "additiveChangesOnlyBeforePromotion": true,
+    "stableChangesRequireNewVersion": true,
     "unknownFieldsFailClosed": true
   },
   "frozenRuntimeLifecycle": [
@@ -30,13 +43,16 @@
   "promotionGates": [
     "openapi-valid",
     "protobuf-generated-diff-clean",
+    "protobuf-alpha-wire-alias",
     "native-go-conformance",
     "python-remote-conformance",
     "langgraph-conformance",
     "a2a-conformance",
-    "legacy-agentversion-publication",
+    "legacy-manifest-migration",
     "gateway-capability-default-deny",
     "memory-gateway-fencing",
-    "secret-broker-no-implicit-issuance"
+    "secret-broker-no-implicit-issuance",
+    "supply-chain-provenance",
+    "slo-regression"
   ]
 }

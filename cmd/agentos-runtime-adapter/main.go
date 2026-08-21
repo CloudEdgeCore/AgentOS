@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bian-cloud-skill/agentos/cmd/mtlsutil"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	"github.com/bian-cloud-skill/agentos/internal/platform/grpcx"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
-	runtimeadapter "github.com/bian-cloud-skill/agentos/internal/runtime/adapter"
+	"github.com/CloudEdgeCore/AgentOS/cmd/mtlsutil"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/grpcx"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
+	runtimeadapter "github.com/CloudEdgeCore/AgentOS/internal/runtime/adapter"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -48,7 +48,7 @@ func main() {
 	}
 	ip := net.ParseIP(parsed.Hostname())
 	if parsed.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		slog.Error("v0.9 adapter endpoint must be co-located on loopback", "endpoint", *endpoint)
+		slog.Error("v1 adapter endpoint must be co-located on loopback", "endpoint", *endpoint)
 		os.Exit(2)
 	}
 	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
@@ -88,7 +88,7 @@ func main() {
 		slog.Error("create artifact store", "error", err)
 		os.Exit(1)
 	}
-	worker, err := runtimeadapter.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(connection), artifacts,
+	worker, err := runtimeadapter.NewWorker(runtimev1.NewRuntimeControlServiceClient(connection), artifacts,
 		*endpoint, *tenantID, *runtimeInstanceID, *heartbeatTTL, nil)
 	if err != nil {
 		slog.Error("create adapter worker", "error", err)

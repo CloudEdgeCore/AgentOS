@@ -13,7 +13,7 @@ use tonic::{Code, Request};
 use uuid::Uuid;
 
 pub mod protocol {
-    tonic::include_proto!("agentos.runtime.v1alpha1");
+    tonic::include_proto!("agentos.runtime.v1");
 }
 
 use protocol::runtime_control_service_client::RuntimeControlServiceClient;

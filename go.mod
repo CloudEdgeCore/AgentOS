@@ -1,4 +1,4 @@
-module github.com/bian-cloud-skill/agentos
+module github.com/CloudEdgeCore/AgentOS
 
 go 1.26.0
 

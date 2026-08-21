@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/workload"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/leasekeeper"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/leasekeeper"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -31,7 +31,7 @@ const controlRPCTimeout = 15 * time.Second
 // resource version, and a caller that loses a response must re-read the
 // assignment before retrying (ADR-006).
 type Worker struct {
-	client            runtimev1alpha1.RuntimeControlServiceClient
+	client            runtimev1.RuntimeControlServiceClient
 	artifacts         ArtifactStore
 	executor          Executor
 	tenantID          string
@@ -46,7 +46,7 @@ type Worker struct {
 // NewWorker constructs a worker. imageRef is the digest-pinned OCI image that
 // runs the published AgentVersion; resource limits are worker configuration
 // until Admission passes them through the Assignment.
-func NewWorker(client runtimev1alpha1.RuntimeControlServiceClient, artifacts ArtifactStore, executor Executor,
+func NewWorker(client runtimev1.RuntimeControlServiceClient, artifacts ArtifactStore, executor Executor,
 	tenantID, runtimeInstanceID string, heartbeatTTL time.Duration, imageRef string) *Worker {
 	return &Worker{
 		client: client, artifacts: artifacts, executor: executor,
@@ -65,7 +65,7 @@ func (w *Worker) WithResourceLimits(cpuQuotaMillis, memoryLimitMiB, workspaceByt
 // It returns processed=true when an assignment was consumed (completed,
 // failed, or cancelled) and false when no assignment was available.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	polled, err := w.client.PollAssignment(ctx, &runtimev1alpha1.PollAssignmentRequest{
+	polled, err := w.client.PollAssignment(ctx, &runtimev1.PollAssignmentRequest{
 		TenantId: w.tenantID, RuntimeInstanceId: w.runtimeInstanceID,
 	})
 	if status.Code(err) == codes.NotFound {
@@ -83,16 +83,16 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	identity, version := assignment.GetIdentity(), assignment.GetAttemptVersion()
 
-	version, err = w.transition(ctx, identity, version, runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_STARTING, "", "")
+	version, err = w.transition(ctx, identity, version, runtimev1.AttemptPhase_ATTEMPT_PHASE_STARTING, "", "")
 	if err != nil {
 		return false, err
 	}
-	version, err = w.transition(ctx, identity, version, runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_RUNNING, "", "")
+	version, err = w.transition(ctx, identity, version, runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING, "", "")
 	if err != nil {
 		return false, err
 	}
 
-	heartbeat, err := w.client.Heartbeat(ctx, &runtimev1alpha1.HeartbeatRequest{
+	heartbeat, err := w.client.Heartbeat(ctx, &runtimev1.HeartbeatRequest{
 		Identity: identity, ExpectedLeaseVersion: assignment.GetLeaseVersion(),
 		IdempotencyKey: operationKey(assignment, "heartbeat"), RequestedTtlSeconds: int64(w.heartbeatTTL / time.Second),
 	})
@@ -100,7 +100,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("renew runtime lease: %w", err)
 	}
 	if heartbeat.GetCancelRequested() {
-		_, err := w.client.AcknowledgeCancellation(ctx, &runtimev1alpha1.AcknowledgeCancellationRequest{
+		_, err := w.client.AcknowledgeCancellation(ctx, &runtimev1.AcknowledgeCancellationRequest{
 			Identity: identity, ExpectedAttemptVersion: heartbeat.GetAttemptVersion(),
 			IdempotencyKey: operationKey(assignment, "cancel"),
 		})
@@ -240,7 +240,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("create checkpoint ID: %w", err)
 	}
-	committed, err := w.client.CommitCheckpoint(ctx, &runtimev1alpha1.CommitCheckpointRequest{
+	committed, err := w.client.CommitCheckpoint(ctx, &runtimev1.CommitCheckpointRequest{
 		Identity: identity, ExpectedAttemptVersion: version,
 		IdempotencyKey: operationKey(assignment, "checkpoint-executed"), CheckpointId: checkpointID.String(),
 		AgentVersionRef: assignment.GetAgentVersionRef(), Provider: ProviderName, RuntimeAbi: RuntimeABI,
@@ -265,7 +265,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("persist runtime result: %w", err)
 	}
-	if _, err := w.client.CompleteAttempt(ctx, &runtimev1alpha1.CompleteAttemptRequest{
+	if _, err := w.client.CompleteAttempt(ctx, &runtimev1.CompleteAttemptRequest{
 		Identity: identity, ExpectedAttemptVersion: version,
 		IdempotencyKey: operationKey(assignment, "complete"), Result: artifactProto(resultArtifact),
 	}); err != nil {
@@ -276,18 +276,18 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 
 // fail marks the Attempt ATTEMPT_FAILED with a machine-readable code, mirroring
 // ADR-007: the recovery controller decides retry vs. terminal failure.
-func (w *Worker) fail(ctx context.Context, identity *runtimev1alpha1.AttemptIdentity, version int64, code string, cause error) (bool, error) {
-	if _, err := w.transition(ctx, identity, version, runtimev1alpha1.AttemptPhase_ATTEMPT_PHASE_FAILED, code, cause.Error()); err != nil {
+func (w *Worker) fail(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64, code string, cause error) (bool, error) {
+	if _, err := w.transition(ctx, identity, version, runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED, code, cause.Error()); err != nil {
 		return false, fmt.Errorf("mark attempt failed (%s): %w", code, err)
 	}
 	return true, nil
 }
 
-func (w *Worker) transition(ctx context.Context, identity *runtimev1alpha1.AttemptIdentity, version int64,
-	phase runtimev1alpha1.AttemptPhase, failureCode, failureMessage string) (int64, error) {
+func (w *Worker) transition(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64,
+	phase runtimev1.AttemptPhase, failureCode, failureMessage string) (int64, error) {
 	rpcCtx, cancel := context.WithTimeout(ctx, controlRPCTimeout)
 	defer cancel()
-	response, err := w.client.TransitionAttempt(rpcCtx, &runtimev1alpha1.TransitionAttemptRequest{
+	response, err := w.client.TransitionAttempt(rpcCtx, &runtimev1.TransitionAttemptRequest{
 		Identity: identity, ExpectedAttemptVersion: version,
 		IdempotencyKey: identity.GetAttemptId() + ":" + strings.ToLower(phase.String()),
 		TargetPhase:    phase, FailureCode: failureCode, FailureMessage: failureMessage,
@@ -301,7 +301,7 @@ func (w *Worker) transition(ctx context.Context, identity *runtimev1alpha1.Attem
 // verifyCheckpoint enforces ADR-007 envelope compatibility before resuming:
 // Provider, Runtime ABI, Checkpoint schema and AgentVersion must match the
 // assignment, and the logical state must belong to the same goal.
-func (w *Worker) verifyCheckpoint(ctx context.Context, assignment *runtimev1alpha1.Assignment, goalDigest [sha256.Size]byte) error {
+func (w *Worker) verifyCheckpoint(ctx context.Context, assignment *runtimev1.Assignment, goalDigest [sha256.Size]byte) error {
 	checkpoint := assignment.GetResumeCheckpoint()
 	if checkpoint.GetAgentVersionRef() != assignment.GetAgentVersionRef() ||
 		checkpoint.GetRuntimeClass() != assignment.GetRuntimeClass() ||
@@ -337,17 +337,17 @@ type checkpointState struct {
 	UsageMillis int64  `json:"usageMillis,omitempty"`
 }
 
-func operationKey(assignment *runtimev1alpha1.Assignment, operation string) string {
+func operationKey(assignment *runtimev1.Assignment, operation string) string {
 	return assignment.GetIdentity().GetAttemptId() + ":" + operation
 }
 
-func artifactProto(reference store.ArtifactReference) *runtimev1alpha1.ArtifactReference {
-	return &runtimev1alpha1.ArtifactReference{
+func artifactProto(reference store.ArtifactReference) *runtimev1.ArtifactReference {
+	return &runtimev1.ArtifactReference{
 		Uri: reference.URI, Sha256: reference.DigestHex(), SizeBytes: reference.SizeBytes, MediaType: reference.MediaType,
 	}
 }
 
-func artifactFromProto(reference *runtimev1alpha1.ArtifactReference) (store.ArtifactReference, error) {
+func artifactFromProto(reference *runtimev1.ArtifactReference) (store.ArtifactReference, error) {
 	var result store.ArtifactReference
 	if reference == nil {
 		return result, fmt.Errorf("checkpoint artifact reference is required")

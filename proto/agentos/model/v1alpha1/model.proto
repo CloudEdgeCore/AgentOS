@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package agentos.model.v1alpha1;
 
-option go_package = "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1;modelv1alpha1";
+option go_package = "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1alpha1;modelv1alpha1";
 
 // ModelGateway is the fenced model-invocation boundary runtime workers and
 // sandboxed Agents use for streaming model calls. The gateway enforces model

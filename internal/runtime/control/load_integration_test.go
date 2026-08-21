@@ -21,19 +21,19 @@ import (
 	"testing"
 	"time"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/gateway"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
-	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
-	"github.com/bian-cloud-skill/agentos/internal/platform/artifact"
-	"github.com/bian-cloud-skill/agentos/internal/platform/migrate"
-	runtimecontrol "github.com/bian-cloud-skill/agentos/internal/runtime/control"
-	"github.com/bian-cloud-skill/agentos/internal/runtime/reference"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/artifact"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/migrate"
+	runtimecontrol "github.com/CloudEdgeCore/AgentOS/internal/runtime/control"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/reference"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -208,7 +208,7 @@ func driveLoadWorkers(t *testing.T, ctx context.Context, store *postgresstore.St
 		return
 	}
 	runtimeServer := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	runtimev1alpha1.RegisterRuntimeControlServiceServer(runtimeServer,
+	runtimev1.RegisterRuntimeControlServiceServer(runtimeServer,
 		runtimecontrol.NewService(store, tenant, 2*time.Minute))
 	go func() { _ = runtimeServer.Serve(runtimeListener) }()
 	t.Cleanup(runtimeServer.Stop)
@@ -231,9 +231,9 @@ func driveLoadWorkers(t *testing.T, ctx context.Context, store *postgresstore.St
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			worker := reference.NewWorker(runtimev1alpha1.NewRuntimeControlServiceClient(runtimeConnection), artifacts,
+			worker := reference.NewWorker(runtimev1.NewRuntimeControlServiceClient(runtimeConnection), artifacts,
 				tenant, fmt.Sprintf("load-worker-%d", w), 30*time.Second)
-			worker.WithToolGateway(gatewayv1alpha1.NewToolGatewayServiceClient(gatewayConnection))
+			worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(gatewayConnection))
 			for {
 				select {
 				case <-stop:
@@ -430,7 +430,7 @@ func serveLoadGateway(t *testing.T, store *postgresstore.Store, engine *policy.E
 		t.Fatalf("listen for Tool Gateway: %v", err)
 	}
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, service)
+	gatewayv1.RegisterToolGatewayServiceServer(server, service)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	return listener.Addr().String()

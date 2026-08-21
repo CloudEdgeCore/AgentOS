@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"strings"
 
-	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -34,7 +34,7 @@ type ToolInvoker interface {
 // accepts a fixed tenant on a loopback-only listener; production exposure
 // requires SPIFFE mTLS (ADR-006).
 type Service struct {
-	gatewayv1alpha1.UnimplementedToolGatewayServiceServer
+	gatewayv1.UnimplementedToolGatewayServiceServer
 	invoker       ToolInvoker
 	allowedTenant string
 	capabilities  *capability.Authorizer
@@ -48,18 +48,18 @@ func NewService(invoker ToolInvoker, allowedTenant string, capabilities ...*capa
 	return service
 }
 
-func (s *Service) ListTools(ctx context.Context, request *gatewayv1alpha1.ListToolsRequest) (*gatewayv1alpha1.ListToolsResponse, error) {
+func (s *Service) ListTools(ctx context.Context, request *gatewayv1.ListToolsRequest) (*gatewayv1.ListToolsResponse, error) {
 	if request == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	if err := s.authorizeTenant(request.GetTenantId()); err != nil {
+	if err := authorizeTenant(ctx, s.allowedTenant, request.GetTenantId()); err != nil {
 		return nil, err
 	}
 	descriptors, err := s.invoker.ListTools(ctx, request.GetTenantId())
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	response := &gatewayv1alpha1.ListToolsResponse{Tools: make([]*gatewayv1alpha1.ToolDescriptor, 0, len(descriptors))}
+	response := &gatewayv1.ListToolsResponse{Tools: make([]*gatewayv1.ToolDescriptor, 0, len(descriptors))}
 	for _, descriptor := range descriptors {
 		if s.capabilities != nil {
 			if err := s.capabilities.Authorize(ctx, request.GetTenantId(), request.GetAgentVersionRef(),
@@ -70,7 +70,7 @@ func (s *Service) ListTools(ctx context.Context, request *gatewayv1alpha1.ListTo
 				return nil, status.Error(codes.Internal, "agent capability lookup failed")
 			}
 		}
-		response.Tools = append(response.Tools, &gatewayv1alpha1.ToolDescriptor{
+		response.Tools = append(response.Tools, &gatewayv1.ToolDescriptor{
 			Name: descriptor.Name, Version: descriptor.Version,
 			SideEffectRisk: string(descriptor.SideEffectRisk),
 			Actions:        descriptor.Actions, ResourcePatterns: descriptor.ResourcePatterns,
@@ -80,11 +80,11 @@ func (s *Service) ListTools(ctx context.Context, request *gatewayv1alpha1.ListTo
 	return response, nil
 }
 
-func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1alpha1.InvokeToolRequest) (*gatewayv1alpha1.InvokeToolResponse, error) {
+func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1.InvokeToolRequest) (*gatewayv1.InvokeToolResponse, error) {
 	if request == nil || request.GetIdentity() == nil || request.GetIdentity().GetFencingToken() <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "attempt identity and positive fencing token are required")
 	}
-	if err := s.authorizeTenant(request.GetIdentity().GetTenantId()); err != nil {
+	if err := authorizeTenant(ctx, s.allowedTenant, request.GetIdentity().GetTenantId()); err != nil {
 		return nil, err
 	}
 	if len(request.GetArgsJson()) > maxArgsBytes {
@@ -139,7 +139,7 @@ func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1alpha1.Invok
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	response := &gatewayv1alpha1.InvokeToolResponse{
+	response := &gatewayv1.InvokeToolResponse{
 		Outcome: string(result.Outcome), ResultJson: result.Result,
 		DenyReasons: result.DenyReasons, PolicyRevision: result.PolicyRevision,
 		ReceiptOperation: result.ReceiptOperation,
@@ -162,13 +162,6 @@ func parseUUID(value, field string) (uuid.UUID, error) {
 		return uuid.Nil, status.Errorf(codes.InvalidArgument, "%s must be a UUID", field)
 	}
 	return parsed, nil
-}
-
-func (s *Service) authorizeTenant(tenantID string) error {
-	if strings.TrimSpace(tenantID) == "" || tenantID != s.allowedTenant {
-		return status.Error(codes.PermissionDenied, "tenant is not authorized by this gateway endpoint")
-	}
-	return nil
 }
 
 func rpcError(err error) error {

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 )
 
 // DevExecutor is the v0.1 development tool executor: it echoes the normalized

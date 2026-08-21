@@ -69,6 +69,12 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
+      - name: Verify stable release contracts and Python SDK
+        run: |
+          test "$(go run ./cmd/agentos version -json | jq -r .productVersion)" = "1.0.0.0"
+          python3 -m compileall -q sdk/python/agentos_runtime adapters examples/agents
+          python3 -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheels" sdk/python
+
       - name: Vet
         run: go vet ./...
 

@@ -16,7 +16,7 @@ func validManifest() Manifest {
 		Spec: Spec{
 			RuntimeClassPolicy: RuntimeClassPolicy{Allowed: []string{"oci"}, Preferred: "oci"},
 			Runtimes: []RuntimeTarget{{
-				Class: "oci", Interface: RuntimeInterfaceV1Alpha1,
+				Class: "oci", Interface: RuntimeInterfaceV1,
 				RuntimeABI: "agentos.oci/v1", Entrypoint: []string{"/agent/bin/research", "serve"},
 			}},
 			Capabilities: &Capabilities{
@@ -149,4 +149,50 @@ func TestValidateSpecChecksPlatformFieldsWhenPresent(t *testing.T) {
 	if err := ValidateSpec(encoded); err == nil {
 		t.Fatal("invalid platform budget was accepted")
 	}
+}
+
+func TestLegacyManifestPromotesDeterministicallyToV1(t *testing.T) {
+	legacy := validManifest()
+	legacy.APIVersion = LegacyManifestAPIVersion
+	legacy.Spec.Runtimes[0].Interface = RuntimeInterfaceV1Alpha1
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, legacyDigest, err := DecodeManifest(encoded)
+	if err != nil {
+		t.Fatalf("legacy manifest must remain readable: %v", err)
+	}
+	promoted, err := decoded.PromoteToV1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted.APIVersion != ManifestAPIVersion || promoted.Spec.Runtimes[0].Interface != RuntimeInterfaceV1 {
+		t.Fatalf("manifest was not promoted: %+v", promoted)
+	}
+	stable, _, stableDigest, err := DecodeManifest(mustJSON(t, promoted))
+	if err != nil || stable.Ref() != legacy.Ref() || stableDigest == legacyDigest {
+		t.Fatalf("stable=%+v legacyDigest=%x stableDigest=%x err=%v", stable, legacyDigest, stableDigest, err)
+	}
+}
+
+func TestAgentVersionSpecRejectsMixedRuntimeInterfaceVersions(t *testing.T) {
+	manifest := validManifest()
+	legacy := manifest.Spec.Runtimes[0]
+	legacy.Class = "remote"
+	legacy.Interface = RuntimeInterfaceV1Alpha1
+	manifest.Spec.Runtimes = append(manifest.Spec.Runtimes, legacy)
+	manifest.Spec.RuntimeClassPolicy.Allowed = []string{"oci", "remote"}
+	if err := ValidateSpec(mustJSON(t, manifest.Spec)); err == nil {
+		t.Fatal("mixed stable and legacy runtime interfaces were accepted")
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

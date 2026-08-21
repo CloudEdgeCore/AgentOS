@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	controlapi "github.com/bian-cloud-skill/agentos/internal/control/api"
-	"github.com/bian-cloud-skill/agentos/internal/control/auth"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
-	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
-	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
-	"github.com/bian-cloud-skill/agentos/internal/platform/otel"
+	controlapi "github.com/CloudEdgeCore/AgentOS/internal/control/api"
+	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -31,12 +31,16 @@ func main() {
 	oidcIssuer := flag.String("oidc-issuer", "", "OIDC issuer for Bearer ID-token authentication")
 	oidcClientID := flag.String("oidc-client-id", "", "OIDC client ID the API's audience must match")
 	oidcTenantClaim := flag.String("oidc-tenant-claim", "tenant", "OIDC claim carrying the tenant scope")
+	tlsCert := flag.String("tls-cert", "", "production HTTPS certificate (PEM)")
+	tlsKey := flag.String("tls-key", "", "production HTTPS private key (PEM)")
+	embeddingEndpoint := flag.String("embedding-endpoint", "", "production HTTPS embedding service")
+	embeddingToken := flag.String("embedding-token", os.Getenv("AGENTOS_EMBEDDING_TOKEN"), "embedding service bearer token (or AGENTOS_EMBEDDING_TOKEN)")
 	var packageTrustKeys []string
 	flag.Func("package-trust-key", "trusted package signing key as keyID=base64rawpub (repeatable; ADR-010 publish admission)", func(value string) error {
 		packageTrustKeys = append(packageTrustKeys, value)
 		return nil
 	})
-	auditSigningKey := flag.String("audit-signing-key", "", "base64 raw std ed25519 private key that signs audit exports (ADR-014; absent = unsigned dev exports)")
+	auditSigningKey := flag.String("audit-signing-key", os.Getenv("AGENTOS_AUDIT_SIGNING_KEY"), "audit signing key (or AGENTOS_AUDIT_SIGNING_KEY; absent only in development)")
 	auditSigningKeyID := flag.String("audit-signing-key-id", "control-plane-audit", "key identity recorded on signed audit exports")
 	flag.Parse()
 
@@ -52,6 +56,11 @@ func main() {
 	}
 	if devMode && !loopbackAddress(*listen) {
 		slog.Error("static development identity may only listen on loopback", "listen", *listen)
+		os.Exit(2)
+	}
+	if oidcMode && (*tlsCert == "" || *tlsKey == "" || strings.TrimSpace(*embeddingEndpoint) == "" ||
+		strings.TrimSpace(*auditSigningKey) == "") {
+		slog.Error("production mode requires HTTPS, a production embedding service, and audit signing")
 		os.Exit(2)
 	}
 
@@ -80,17 +89,22 @@ func main() {
 
 	repository := postgresstore.New(pool)
 	var options []controlapi.Option
-	if registry, err := packageTrustRegistry(packageTrustKeys); err != nil {
+	registry, err := packageTrustRegistry(packageTrustKeys)
+	if err != nil {
 		slog.Error("configure package trust registry", "error", err)
 		os.Exit(1)
 	} else if registry != nil {
 		options = append(options, controlapi.WithPackageAdmission(registry))
 		slog.Info("publish admission active: agent versions require a signed package", "trustedKeys", registry.Len())
+	} else if oidcMode {
+		slog.Error("production mode requires at least one package trust key")
+		os.Exit(2)
 	} else {
 		slog.Warn("publish admission is OFF: unsigned agent version publications are allowed (dev mode)")
 	}
 	options = append(options, controlapi.WithAuditStore(repository))
 	options = append(options, controlapi.WithTenantQuotaStore(repository))
+	options = append(options, controlapi.WithReadiness(pool.Ping))
 	if strings.TrimSpace(*auditSigningKey) != "" {
 		decoded, err := agentpkg.DecodePrivateKey(*auditSigningKey)
 		if err != nil {
@@ -102,8 +116,16 @@ func main() {
 	} else {
 		slog.Warn("audit exports are UNSIGNED (dev mode); configure -audit-signing-key for signed WORM archives")
 	}
+	var embedder memory.Embedder = memory.DevEmbedder{}
+	if oidcMode {
+		embedder, err = memory.NewHTTPEmbedder(*embeddingEndpoint, *embeddingToken, nil)
+		if err != nil {
+			slog.Error("configure production embedding service", "error", err)
+			os.Exit(2)
+		}
+	}
 	handler := controlapi.NewHandler(repository, repository, repository,
-		memory.NewGateway(memory.DevEmbedder{}, repository), options...)
+		memory.NewGateway(embedder, repository), options...)
 	if devMode {
 		handler = auth.StaticMiddleware(auth.Principal{Subject: "local-developer", TenantID: *devTenant}, handler)
 		slog.Info("control API using static development identity", "tenant", *devTenant)
@@ -134,9 +156,15 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	slog.Info("Agent OS development control API listening", "address", *listen, "tenant", *devTenant)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("serve control API", "error", err)
+	slog.Info("Agent OS control API listening", "address", *listen, "devMode", devMode, "tenant", *devTenant)
+	var serveErr error
+	if devMode {
+		serveErr = server.ListenAndServe()
+	} else {
+		serveErr = server.ListenAndServeTLS(*tlsCert, *tlsKey)
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		slog.Error("serve control API", "error", serveErr)
 		os.Exit(1)
 	}
 }
