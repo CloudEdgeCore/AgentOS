@@ -28,7 +28,6 @@ trap cleanup EXIT
 # Expansion is intentionally deferred until /bin/sh runs inside the sandbox.
 # shellcheck disable=SC2016
 probe='set -eu
-grep -qi gvisor /proc/version
 test "$(awk "/^CapEff:/{print \$2}" /proc/self/status)" = "0000000000000000"
 test "$(awk "/^NoNewPrivs:/{print \$2}" /proc/self/status)" = "1"
 test "$(awk "/^Seccomp:/{print \$2}" /proc/self/status)" = "2"
@@ -42,7 +41,7 @@ if dd if=/dev/zero of=/agentos/workspace/over-limit bs=1048576 count=9 2>/dev/nu
   exit 1
 fi
 test "$(ls -1 /sys/class/net | sort | tr "\n" " ")" = "lo "
-echo "gvisor identity, read-only rootfs, bounded workspace, zero capabilities, no-new-privileges, seccomp, and network isolation: PASS"'
+echo "read-only rootfs, bounded workspace, zero capabilities, no-new-privileges, seccomp, and network isolation: PASS"'
 
 echo ">> asserting OCI/gVisor sandbox isolation (bounded 120s)"
 if ! timeout --signal=KILL 120 ctr -n "$NAMESPACE" run \
@@ -87,6 +86,8 @@ timeout 120 ctr -n "$NAMESPACE" run \
 
 timeout 15 ctr -n "$NAMESPACE" containers info --spec "$HOST_PROBE_ID" |
   jq -e '.linux.resources.cpu.quota == 100000 and .linux.resources.memory.limit == 67108864' >/dev/null
+timeout 15 ctr -n "$NAMESPACE" containers info "$HOST_PROBE_ID" |
+  jq -e --arg runtime "$RUNTIME" '(.Runtime.Name // .runtime.name) == $runtime' >/dev/null
 TASK_PID="$(ctr -n "$NAMESPACE" tasks list | awk -v id="$HOST_PROBE_ID" '$1 == id { print $2 }')"
 if [ -z "$TASK_PID" ] || [ ! -r "/proc/${TASK_PID}/status" ]; then
   echo "cannot resolve live gVisor sandbox PID" >&2
