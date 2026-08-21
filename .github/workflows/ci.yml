@@ -165,6 +165,8 @@ jobs:
       RUNSC_SYSTEMD_CGROUP: "false"
       # Apply the OCI seccomp profile inside gVisor's application kernel.
       RUNSC_OCI_SECCOMP: "true"
+      FIRECRACKER_VERSION: "v1.9.0"
+      FIRECRACKER_SHA256: "95c13740c7ca1a6dfb40e0f51cd0a9eefee1f223cd2c3538755d03c3a9ba5237"
 
     steps:
       - name: Check out source
@@ -178,6 +180,9 @@ jobs:
 
       - name: Install pinned containerd and runsc
         run: sudo -E bash deploy/ci/setup-containerd-runsc.sh
+
+      - name: Install pinned Firecracker
+        run: sudo -E bash deploy/ci/install-firecracker.sh
 
       - name: Environment fingerprint
         run: bash deploy/ci/env-fingerprint.sh | tee runtime-fingerprint.txt
