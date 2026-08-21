@@ -14,14 +14,6 @@ set -euo pipefail
 # the step log) instead of hanging until the CI job timeout kills the step.
 command -v timeout >/dev/null 2>&1 || { echo "coreutils timeout is required" >&2; exit 1; }
 
-CAP_DROP_FLAGS=()
-for capability in \
-  CAP_AUDIT_WRITE CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_KILL \
-  CAP_MKNOD CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETFCAP CAP_SETGID \
-  CAP_SETPCAP CAP_SETUID CAP_SYS_CHROOT; do
-  CAP_DROP_FLAGS+=(--cap-drop "$capability")
-done
-
 CONTAINERD_VERSION="${CONTAINERD_VERSION:?set a pinned containerd release (e.g. 2.0.2)}"
 CONTAINERD_SHA256="${CONTAINERD_SHA256:?set the approved containerd archive SHA-256}"
 RUNSC_TAG="${RUNSC_TAG:?set a pinned gVisor release tag (e.g. 20260810.0)}"
@@ -96,18 +88,19 @@ RUNSC_NETWORK="${RUNSC_NETWORK:-none}"
 RUNSC_SYSTEMD_CGROUP="${RUNSC_SYSTEMD_CGROUP:-false}"
 RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
 CONTAINERD_SOCKET_GID="${CONTAINERD_SOCKET_GID:-${SUDO_GID:-0}}"
-mkdir -p /tmp/agentos-runsc
+RUNSC_LOG_DIR="/var/log/agentos-runsc"
+mkdir -p "$RUNSC_LOG_DIR"
 # Keep runsc beside its release-bundled gvisor-bin sidecars, but interpose a
 # tiny launcher so a pre-log initialization failure is never invisible in CI.
-touch /tmp/agentos-runsc/runsc.stderr.log
+touch "$RUNSC_LOG_DIR/runsc.stderr.log"
 cat > /usr/local/bin/agentos-runsc <<'EOF'
 #!/bin/sh
-exec /usr/local/bin/runsc "$@" 2>>/tmp/agentos-runsc/runsc.stderr.log
+exec /usr/local/bin/runsc "$@" 2>>/var/log/agentos-runsc/runsc.stderr.log
 EOF
 chmod 0755 /usr/local/bin/agentos-runsc
 cat > "$RUNSC_CONFIG_PATH" <<EOF
 binary_name = "/usr/local/bin/agentos-runsc"
-log_path = "/tmp/agentos-runsc/shim.log"
+log_path = "${RUNSC_LOG_DIR}/shim.log"
 log_level = "debug"
 
 [runsc_config]
@@ -118,9 +111,27 @@ log_level = "debug"
   debug = "true"
   # A directory makes runsc create distinct logs for create/gofer/boot. This
   # avoids interleaved multiprocess output and preserves the exact boot stage.
-  debug-log = "/tmp/agentos-runsc/"
+  debug-log = "${RUNSC_LOG_DIR}/"
   alsologtostderr = "true"
 EOF
+
+# Validate the pinned runtime itself before involving containerd. This keeps a
+# host incompatibility distinct from a shim/OCI integration failure.
+echo ">> running direct runsc probe (bounded 30s)"
+mkdir -p /run/agentos-runsc-direct
+if ! timeout --signal=KILL 30 runsc \
+  --root=/run/agentos-runsc-direct \
+  --platform="$RUNSC_PLATFORM" \
+  --network=none \
+  --ignore-cgroups=true \
+  --debug=true \
+  --debug-log="${RUNSC_LOG_DIR}/" \
+  do /bin/true; then
+  echo ">> direct runsc probe: FAIL" >&2
+  find "$RUNSC_LOG_DIR" -maxdepth 4 -type f -print -exec tail -n 120 {} \; >&2 || true
+  exit 1
+fi
+echo ">> direct runsc probe: PASS"
 
 cat > /etc/containerd/config.toml <<EOF
 version = 3
@@ -191,11 +202,6 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   --runtime io.containerd.runsc.v1 \
   --runtime-config-path "$RUNSC_CONFIG_PATH" \
   --snapshotter "$SNAPSHOTTER" \
-  --read-only \
-  "${CAP_DROP_FLAGS[@]}" \
-  --seccomp \
-  --cpu-quota 100000 \
-  --memory-limit 67108864 \
   "$PROBE_IMAGE" agentos-runtime-probe \
   /bin/true \
   >/tmp/probe-out.log 2>&1; then
@@ -209,7 +215,7 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   echo ">> containerd log tail:" >&2
   tail -n 200 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc/shim logs:" >&2
-  find /tmp/agentos-runsc -type f -maxdepth 4 -print -exec tail -n 80 {} \; 2>/dev/null >&2 || true
+  find "$RUNSC_LOG_DIR" -maxdepth 4 -type f -print -exec tail -n 120 {} \; 2>/dev/null >&2 || true
   echo ">> dmesg tail:" >&2
   dmesg 2>/dev/null | tail -n 30 >&2 || true
   exit 1
