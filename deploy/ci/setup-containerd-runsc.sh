@@ -97,6 +97,9 @@ mkdir -p "$RUNSC_LOG_DIR"
 # to a regular file; other runsc commands must retain their protocol output.
 cat > /usr/local/bin/agentos-runsc <<'EOF'
 #!/bin/sh
+printf 'pid=%s argv=' "$$" >>/var/log/agentos-runsc/launcher.log
+printf ' <%s>' "$@" >>/var/log/agentos-runsc/launcher.log
+printf '\n' >>/var/log/agentos-runsc/launcher.log
 for arg do
   if [ "$arg" = "create" ]; then
     exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1
@@ -204,7 +207,8 @@ echo ">> pulling digest-pinned probe image (bounded 300s)"
 timeout 300 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" images pull \
   --snapshotter "$SNAPSHOTTER" "$PROBE_IMAGE" >/dev/null
 echo ">> running fail-closed runsc probe (bounded 120s)"
-if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" run \
+set +e
+timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" run \
   --rm \
   --runtime io.containerd.runsc.v1 \
   --runtime-config-path "$RUNSC_CONFIG_PATH" \
@@ -212,8 +216,11 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   "$PROBE_IMAGE" agentos-runtime-probe \
   /bin/true \
   </dev/null \
-  >/tmp/probe-out.log 2>&1; then
-  echo ">> runsc runtime probe: FAIL (the pinned matrix must be re-validated)" >&2
+  >/tmp/probe-out.log 2>&1
+PROBE_STATUS=$?
+set -e
+if [ "$PROBE_STATUS" -ne 0 ]; then
+  echo ">> runsc runtime probe: FAIL status=${PROBE_STATUS} (the pinned matrix must be re-validated)" >&2
   echo ">> probe output:" >&2
   cat /tmp/probe-out.log 2>/dev/null >&2 || true
   echo ">> requesting shim goroutine dump:" >&2
@@ -240,6 +247,7 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   echo ">> containerd log tail:" >&2
   tail -n 200 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc/shim logs:" >&2
+  ls -la "$RUNSC_LOG_DIR" >&2 || true
   find "$RUNSC_LOG_DIR" -maxdepth 4 -type f -print -exec tail -n 120 {} \; 2>/dev/null >&2 || true
   echo ">> dmesg tail:" >&2
   dmesg 2>/dev/null | tail -n 30 >&2 || true
