@@ -1,16 +1,16 @@
 # AgentOS
 
-AgentOS 是用于安全发布、调度、执行、恢复、治理和审计 AI Agent 的控制与运行平台。
+AgentOS is a control and runtime platform for securely publishing, scheduling, executing, recovering, governing, and auditing AI agents.
 
-> **当前版本：AgentOS 1.0.0.0（GA）**
+> **Current release: AgentOS 1.0.0.0 (GA)**
 >
-> SemVer / Git 标签：[`v1.0.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.0.0)
+> SemVer / Git tag: [`v1.0.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.0.0)
 >
-> 稳定契约：Control API v1、Agent Manifest v1、Runtime / Gateway / Model Protocol v1、Runtime Interface v1
+> Stable contracts: Control API v1, Agent Manifest v1, Runtime / Gateway / Model Protocol v1, and Runtime Interface v1
 
-AgentOS 不是聊天 UI、工作流画布或托管式 SaaS。它解决的是 Agent 在生产环境中的后端系统问题：不可变版本、持久任务、准入策略、预算硬限制、运行时隔离、多租户身份、工具与模型网关、检查点、故障恢复和审计。
+AgentOS is not a chat UI, a visual workflow builder, or a managed SaaS product. It addresses the backend systems problems that appear when agents move into production: immutable versions, durable tasks, admission policy, hard budget limits, runtime isolation, multi-tenant identity, tool and model gateways, checkpoints, failure recovery, and auditability.
 
-## 执行闭环
+## Execution lifecycle
 
 ```mermaid
 flowchart LR
@@ -29,37 +29,37 @@ flowchart LR
     C --> K["Checkpoint / Result / Audit"]
 ```
 
-一次任务的典型生命周期是：
+A typical task moves through the following lifecycle:
 
-1. 开发者提交稳定版 Agent Manifest，可选附带签名 Package；
-2. Control API 创建不可变 `AgentVersion` 和持久化 `Task`；
-3. Admission 校验版本、能力、策略、租户配额和任务预算；
-4. Scheduler 根据运行时类型、区域、容量和健康租约选择 Provider；
-5. Worker 通过 Runtime Protocol 获取 fenced assignment；
-6. Agent 在 Wasmtime、OCI/gVisor 或适配器运行时中执行；
-7. 模型、工具、记忆和密钥请求通过 Gateway 进行授权、计量和审计；
-8. Checkpoint、Result 和副作用回执持久化后，任务才进入终态；
-9. Worker 失联、租约过期或进程重启时，Recovery Controller 负责收敛和重调度。
+1. A developer submits a stable Agent Manifest and, optionally, a signed Agent Package.
+2. The Control API creates an immutable `AgentVersion` and a durable `Task`.
+3. Admission validates the version, capabilities, policy, tenant quota, and task budget.
+4. The Scheduler selects a provider using runtime class, region, capacity, and lease health.
+5. A worker receives a fenced assignment through Runtime Protocol v1.
+6. The agent executes in Wasmtime, OCI/gVisor, or a co-located adapter runtime.
+7. Model, tool, memory, and secret operations pass through gateways for authorization, metering, and audit.
+8. Checkpoints, results, and side-effect receipts are persisted before the task reaches a terminal state.
+9. If a worker disappears, a lease expires, or a process restarts, the Recovery Controller converges and reschedules the workload.
 
-## v1.0 能力
+## What v1.0 provides
 
-| 领域 | 已实现能力 |
+| Area | Implemented capability |
 | --- | --- |
-| Agent 生命周期 | 稳定 Manifest、不可变 AgentVersion、签名 Package、发布与版本查询 |
-| 任务内核 | `Task → Run → Attempt` 状态机、取消、重试、超时、SSE 事件流和结果持久化 |
-| 调度与恢复 | Admission、Rego 默认拒绝策略、容量感知调度、租约、fencing token、退避和孤儿恢复 |
-| 运行时 | Wasmtime/Wasm Provider、OCI Provider、Linux gVisor 隔离、Reference Provider、HTTP Adapter Worker |
-| Agent SDK | Go Runtime Interface SDK、Python 3.11+ Runtime Interface SDK、LangGraph 与 A2A 适配器 |
-| Gateway | 工具、模型、记忆和能力网关；审批、幂等回执、预算结算和失败关闭 |
-| 多租户 | tenant-scoped 存储、OIDC 主体、SPIFFE X.509-SVID、mTLS 身份与租户绑定 |
-| 密钥与供应链 | OpenBao Secret Broker、动态数据库凭据、Package 签名、OCI digest pinning、SBOM |
-| 数据与事件 | PostgreSQL/pgvector、NATS JetStream、transactional outbox/inbox、可选 OpenSearch 投影 |
-| 可观测性 | OpenTelemetry、`/healthz`、`/readyz`、`/versionz`、哈希链审计和签名导出 |
-| 质量门禁 | Race detector、真实 PostgreSQL/NATS 集成测试、双 Provider conformance、Go/Rust 漏洞审计 |
+| Agent lifecycle | Stable manifests, immutable AgentVersions, signed packages, publishing, and version lookup |
+| Task kernel | `Task → Run → Attempt` state machine, cancellation, retry, timeout, SSE event streams, and durable results |
+| Scheduling and recovery | Admission, default-deny Rego policy, capacity-aware placement, leases, fencing tokens, backoff, and orphan recovery |
+| Runtimes | Wasmtime/Wasm provider, OCI provider, Linux gVisor isolation, reference provider, and HTTP adapter worker |
+| Agent SDKs | Go Runtime Interface SDK, Python 3.11+ Runtime Interface SDK, LangGraph adapter, and A2A adapter |
+| Gateways | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
+| Multi-tenancy | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, and tenant binding |
+| Secrets and supply chain | OpenBao secret broker, dynamic database credentials, package signing, OCI digest pinning, and SBOM validation |
+| Data and events | PostgreSQL/pgvector, NATS JetStream, transactional outbox/inbox, and optional OpenSearch projection |
+| Operations | OpenTelemetry, `/healthz`, `/readyz`, `/versionz`, hash-chained audit records, and signed audit exports |
+| Quality gates | Race detector, real PostgreSQL/NATS integration tests, dual-provider conformance, and Go/Rust vulnerability audits |
 
-## 稳定契约与兼容策略
+## Stable contracts and compatibility
 
-| 契约 | 稳定版本 | 源文件 |
+| Contract | Stable version | Source |
 | --- | --- | --- |
 | Control REST API | `v1` | [`api/openapi/control-v1.yaml`](api/openapi/control-v1.yaml) |
 | Agent Manifest | `agentos.dev/v1` | [`internal/kernel/agentversion/manifest.go`](internal/kernel/agentversion/manifest.go) |
@@ -69,9 +69,9 @@ flowchart LR
 | Model Protocol | `agentos.model.v1` | [`proto/agentos/model/v1/model.proto`](proto/agentos/model/v1/model.proto) |
 | SLO contract | `agentos.slo/v1` | [`api/slo/v1.json`](api/slo/v1.json) |
 
-`v1alpha1` 是 v1.0 的 N-1 兼容版本：旧 Manifest 可读取并确定性迁移，旧 gRPC service name 在 wire-compatible 范围内保留别名。兼容窗口不早于 **2027-02-17** 结束；稳定契约的破坏性变化必须发布新版本，未知字段继续失败关闭。机器可读策略位于 [`api/compatibility/v1alpha1-to-v1.json`](api/compatibility/v1alpha1-to-v1.json)。
+`v1alpha1` is the N-1 compatibility level for v1.0. Legacy manifests remain readable and can be promoted deterministically, while legacy gRPC service names remain available as wire-compatible aliases. The compatibility window will not close before **2027-02-17**. Breaking changes to stable contracts require a new version, and unknown fields continue to fail closed. The machine-readable policy is stored in [`api/compatibility/v1alpha1-to-v1.json`](api/compatibility/v1alpha1-to-v1.json).
 
-迁移旧 Manifest：
+Promote a legacy manifest to v1:
 
 ```shell
 go run ./cmd/agentos migrate \
@@ -79,33 +79,33 @@ go run ./cmd/agentos migrate \
   -out agent.v1.json
 ```
 
-## 快速开始
+## Quick start
 
-### 环境要求
+### Requirements
 
-- Go `1.26.x`，CI 与正式发布使用 `1.26.6`；
-- Python `3.11+`，仅在开发 Python/框架适配器时需要；
-- Rust `1.97.1`，仅在构建 Wasmtime Provider 时需要；
-- Docker 与 Docker Compose，用于本地 PostgreSQL、NATS 和可选基础设施；
-- Linux、containerd 与 runsc，用于真实 OCI/gVisor Provider 验证。
+- Go `1.26.x`; CI and official releases use `1.26.6`.
+- Python `3.11+` when developing Python or framework adapters.
+- Rust `1.97.1` when building the Wasmtime provider.
+- Docker and Docker Compose for local PostgreSQL, NATS, and optional infrastructure.
+- Linux, containerd, and runsc for real OCI/gVisor provider validation.
 
-检查源码版本：
+Inspect the source release identity:
 
 ```shell
 go run ./cmd/agentos version -json
 ```
 
-构建全部 Go 命令：
+Build every Go command:
 
 ```shell
 go build ./cmd/...
 ```
 
-正式 Release 已提供 Linux AMD64/ARM64、macOS AMD64/ARM64、Windows AMD64 和 Python wheel，无需从源码构建。参见 [`v1.0.0` Release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.0.0)。
+The official [`v1.0.0` release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.0.0) contains complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64, plus a Python wheel.
 
-### 创建并认证一个 Python Agent Runtime
+### Create and certify a Python agent runtime
 
-下面的流程只启动一个本地 Runtime Interface，并使用独立 conformance 工具验证公开协议，不需要启动控制面：
+The following workflow starts a local Runtime Interface and certifies its public behavior without starting the control plane:
 
 ```shell
 python -m pip install -e ./sdk/python
@@ -113,15 +113,15 @@ go run ./cmd/agentos init -dir ./tmp/hello-agent -name hello-agent -adapter pyth
 python ./tmp/hello-agent/server.py
 ```
 
-在另一个终端执行：
+In another terminal, run:
 
 ```shell
 go run ./cmd/agentos-conformance -endpoint http://127.0.0.1:8088
 ```
 
-成功时输出 `agentos.conformance/v1` JSON 报告，并且 `passed` 为 `true`。`agentos init` 也支持 `go`、`langgraph` 和 `a2a` 适配器。
+A successful run emits an `agentos.conformance/v1` JSON report with `passed` set to `true`. `agentos init` also supports `go`, `langgraph`, and `a2a` adapters.
 
-### 启动本地控制面基础设施
+### Start local control-plane infrastructure
 
 ```powershell
 docker compose -f deploy/dev/compose.yaml up -d --wait postgres nats
@@ -130,7 +130,7 @@ $env:DATABASE_URL = "postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos
 go run ./cmd/agentos-migrate -database-url $env:DATABASE_URL
 ```
 
-本地开发时，将以下进程分别运行在独立终端：
+For local development, run each process below in its own terminal:
 
 ```powershell
 # HTTP Control API
@@ -138,7 +138,7 @@ go run ./cmd/agentos-control `
   -database-url $env:DATABASE_URL `
   -dev-tenant dev
 
-# Admission、Scheduler 与 Recovery
+# Admission, Scheduler, and Recovery
 go run ./cmd/agentos-controller `
   -database-url $env:DATABASE_URL `
   -controller-id dev-controller `
@@ -146,7 +146,7 @@ go run ./cmd/agentos-controller `
   -tenant-policies deploy/dev/tenant-policies.json `
   -dev-mode
 
-# Transactional outbox → NATS JetStream
+# Transactional outbox to NATS JetStream
 go run ./cmd/agentos-outbox `
   -database-url $env:DATABASE_URL `
   -nats-url nats://127.0.0.1:54222 `
@@ -159,7 +159,7 @@ go run ./cmd/agentos-runtime-control `
   -dev-tenant dev `
   -dev-mode
 
-# Tool / Model / Memory Gateway
+# Tool, Model, and Memory Gateway
 go run ./cmd/agentos-gateway `
   -database-url $env:DATABASE_URL `
   -listen 127.0.0.1:9091 `
@@ -168,7 +168,7 @@ go run ./cmd/agentos-gateway `
   -seed-dev-tools `
   -dev-mode
 
-# 非沙箱 Reference Provider，仅用于开发和确定性测试
+# Non-sandboxed reference provider for development and deterministic tests
 go run ./cmd/agentos-runtime-reference `
   -control-address 127.0.0.1:9090 `
   -gateway-address 127.0.0.1:9091 `
@@ -180,70 +180,70 @@ go run ./cmd/agentos-runtime-reference `
   -dev-mode
 ```
 
-这些命令使用固定开发租户、loopback 明文连接和开发执行器，只能用于本机开发。生产模式会拒绝这些降级配置。
+These commands use a fixed development tenant, loopback plaintext connections, and development executors. They are only safe for local development. Production mode rejects these downgraded settings.
 
-### CLI 工作流
+### CLI workflows
 
-主 CLI 提供以下稳定工作流：
+The main CLI exposes the following stable workflows:
 
 ```text
-agentos version   输出产品、提交和协议版本
-agentos init      创建 Go/Python/LangGraph/A2A Agent 项目
-agentos migrate   将旧 Manifest 提升到 v1
-agentos validate  严格校验 Manifest
-agentos package   生成带 provenance 的 Package Manifest
-agentos sign      使用 Ed25519 密钥签名 Package
-agentos publish   发布不可变 AgentVersion
-agentos run       提交持久任务
-agentos logs      读取任务 SSE 事件流
+agentos version   Print product, build, and protocol versions
+agentos init      Create a Go/Python/LangGraph/A2A agent project
+agentos migrate   Promote a legacy manifest to v1
+agentos validate  Strictly validate an Agent Manifest
+agentos package   Generate a package manifest with provenance
+agentos sign      Sign a package with an Ed25519 key
+agentos publish   Publish an immutable AgentVersion
+agentos run       Submit a durable task
+agentos logs      Stream task events over SSE
 ```
 
-`publish`、`run` 和 `logs` 默认访问 `http://127.0.0.1:8080`。生产环境通过 `-endpoint` 指定 HTTPS Control API，并使用 `AGENTOS_TOKEN` 提供 Bearer Token。
+`publish`, `run`, and `logs` use `http://127.0.0.1:8080` by default. In production, pass the HTTPS Control API through `-endpoint` and provide a bearer token through `AGENTOS_TOKEN`.
 
-## 生产安全基线
+## Production security baseline
 
-AgentOS 的生产模式是失败关闭的，缺少关键安全配置时进程会拒绝启动。
+AgentOS production mode is fail-closed. Processes refuse to start when required security configuration is missing.
 
-- **Control API**：必须使用 HTTPS、OIDC、生产 embedding endpoint、审计签名密钥和至少一个 Package trust key；
-- **Runtime Protocol**：必须使用 SPIFFE X.509-SVID mTLS，Worker 身份与 tenant 绑定；
-- **Gateway**：必须使用 mTLS，tenant 从对端 SVID 派生；工具必须映射到固定版本的 HTTPS endpoint；
-- **Secret Broker**：通过 OpenBao 获取受控密钥或动态数据库凭据，不向 Agent 暴露原始平台凭据；
-- **OCI Provider**：生产镜像必须 digest-pinned，Linux 隔离路径使用 containerd + gVisor/runsc；
-- **Agent Package**：发布时校验签名、provenance、镜像签名和 CycloneDX SBOM；
-- **审计**：使用事务内哈希链记录安全相关事件，并支持签名导出与完整性验证。
+- **Control API:** requires HTTPS, OIDC, a production embedding endpoint, an audit signing key, and at least one package trust key.
+- **Runtime Protocol:** requires SPIFFE X.509-SVID mTLS and binds worker identity to the tenant.
+- **Gateway:** requires mTLS, derives the tenant from the peer SVID, and maps immutable tool versions to HTTPS endpoints.
+- **Secret Broker:** obtains controlled secrets or dynamic database credentials through OpenBao instead of exposing platform credentials to agents.
+- **OCI Provider:** requires digest-pinned production images and uses containerd with gVisor/runsc on the Linux isolation path.
+- **Agent Package:** validates signatures, provenance, image signatures, and CycloneDX SBOMs during publication.
+- **Audit:** records security-relevant events in a transactional hash chain and supports signed export and integrity verification.
 
-开发模式只允许 loopback 或显式 `-dev-mode`，不得暴露到非可信网络。
+Development mode is restricted to loopback or requires explicit `-dev-mode`; never expose it to an untrusted network.
 
-## 可观测性与可选服务
+## Observability and optional services
 
-启用 OpenTelemetry 参考栈：
+Start the reference OpenTelemetry stack:
 
 ```powershell
 docker compose -f deploy/dev/compose.yaml --profile observability up -d
 $env:OTEL_EXPORTER_OTLP_ENDPOINT = "127.0.0.1:4317"
 ```
 
-- Grafana：`http://127.0.0.1:3300`
-- Prometheus：`http://127.0.0.1:9093`
-- Tempo：`http://127.0.0.1:3320`
-- Loki：`http://127.0.0.1:3310`
+- Grafana: `http://127.0.0.1:3300`
+- Prometheus: `http://127.0.0.1:9093`
+- Tempo: `http://127.0.0.1:3320`
+- Loki: `http://127.0.0.1:3310`
 
-其他可选开发服务：
+Optional development services:
 
 ```powershell
 docker compose -f deploy/dev/compose.yaml --profile secrets up -d  # OpenBao
 docker compose -f deploy/dev/compose.yaml --profile search up -d   # OpenSearch
 ```
 
-Control API 运维端点：
+Control API operational endpoints:
 
-- `GET /healthz`：进程存活；
-- `GET /readyz`：PostgreSQL 等必需依赖就绪；
-- `GET /versionz`：产品、构建提交和全部稳定协议版本。
+- `GET /healthz`: process liveness.
+- `GET /readyz`: readiness of PostgreSQL and other required dependencies.
+- `GET /versionz`: product identity, build commit, and every stable protocol version.
 
-## 测试与质量门禁
+## Tests and quality gates
 
-单元测试、格式、静态检查和 Go 漏洞扫描：
+Formatting, static analysis, unit tests, and Go vulnerability scanning:
 
 ```shell
 gofmt -l .
@@ -252,7 +252,7 @@ go test -race -count=1 ./...
 go tool govulncheck ./...
 ```
 
-真实 PostgreSQL/NATS 集成测试：
+Real PostgreSQL/NATS integration tests:
 
 ```powershell
 docker compose -f deploy/dev/compose.yaml up -d --wait postgres nats
@@ -261,9 +261,9 @@ $env:AGENTOS_TEST_NATS_URL = "nats://127.0.0.1:54222"
 go test -race -tags=integration -count=1 ./...
 ```
 
-> 集成测试会应用迁移并清理 AgentOS 测试表。不要将 `AGENTOS_TEST_DATABASE_URL` 指向包含持久业务数据的数据库。
+> The integration suite applies migrations and clears AgentOS test tables. Never point `AGENTOS_TEST_DATABASE_URL` at a database containing durable business data.
 
-Protobuf 兼容性和确定性生成：
+Protobuf compatibility and deterministic generation:
 
 ```shell
 buf lint
@@ -271,7 +271,7 @@ buf generate
 git diff --exit-code -- gen/go
 ```
 
-Wasmtime Provider：
+Wasmtime provider:
 
 ```shell
 cargo +1.97.1 fmt --all -- --check
@@ -279,57 +279,57 @@ cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
 cargo +1.97.1 test --workspace --locked
 ```
 
-Linux OCI/gVisor 真实隔离测试由 CI 的 `runtime-linux-leg` 执行；工具链和验收项位于 [`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md)。
+CI runs the real Linux OCI/gVisor isolation suite in the `runtime-linux-leg` job. The pinned toolchain and acceptance mapping are defined in [`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md).
 
-SLO 样本评估：
+Evaluate a measured SLO sample:
 
 ```shell
 go run ./cmd/agentos-slo -sample measured-slo.json
 ```
 
-## Release 与供应链验证
+## Releases and supply-chain verification
 
-正式发布工作流会执行 GA gates，并生成：
+The official release workflow runs the GA gates and generates:
 
-- Linux AMD64/ARM64、macOS AMD64/ARM64、Windows AMD64 完整命令归档；
-- `agentos-runtime` Python wheel；
-- CycloneDX 1.6 SBOM；
-- `checksums.txt`；
-- `checksums.txt.sigstore.json` 无密钥 Sigstore bundle。
+- complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64;
+- the `agentos-runtime` Python wheel;
+- a CycloneDX 1.6 SBOM;
+- `checksums.txt`;
+- a keyless `checksums.txt.sigstore.json` Sigstore bundle.
 
-下载并验证全部 Release 资产：
+Download and verify all release assets:
 
 ```shell
 gh release download v1.0.0 --repo CloudEdgeCore/AgentOS
 sha256sum -c checksums.txt
 ```
 
-发布流程定义在 [`.github/workflows/release.yml`](.github/workflows/release.yml)，Action 依赖固定到精确提交 SHA。
+The release process is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml), and every Action dependency is pinned to an exact commit SHA.
 
-## 仓库结构
+## Repository layout
 
-| 路径 | 内容 |
+| Path | Contents |
 | --- | --- |
-| `cmd/` | CLI、控制面、Gateway、Runtime Provider 和运维工具入口 |
-| `internal/kernel/` | Task/Run/Attempt、Admission、Scheduler、Policy、Budget、Recovery |
-| `internal/runtime/` | Runtime Control、Reference、Adapter 和 OCI Provider |
-| `internal/gateway/` | Tool、Model、Memory、Capability 和 Secret Broker |
+| `cmd/` | CLI, control-plane, gateway, runtime provider, and operator entry points |
+| `internal/kernel/` | Task/Run/Attempt, Admission, Scheduler, Policy, Budget, and Recovery |
+| `internal/runtime/` | Runtime Control, Reference, Adapter, and OCI providers |
+| `internal/gateway/` | Tool, Model, Memory, Capability, and Secret Broker implementations |
 | `sdk/agent/` | Go Runtime Interface SDK |
 | `sdk/python/` | Python Runtime Interface SDK |
-| `adapters/` | LangGraph 与 A2A 适配器 |
-| `api/openapi/` | 稳定与兼容 REST/HTTP 契约 |
-| `proto/agentos/` | Runtime、Gateway 和 Model Protobuf 契约 |
-| `db/migrations/` | PostgreSQL 迁移 |
-| `deploy/dev/` | 本地依赖与可观测性参考环境 |
-| `deploy/ci/` | OCI/gVisor 隔离与环境指纹测试 |
-| `modelcheck/tla/` | 内核状态机 TLA+ 模型 |
+| `adapters/` | LangGraph and A2A adapters |
+| `api/openapi/` | Stable and compatibility REST/HTTP contracts |
+| `proto/agentos/` | Runtime, Gateway, and Model Protobuf contracts |
+| `db/migrations/` | PostgreSQL migrations |
+| `deploy/dev/` | Local dependencies and reference observability environment |
+| `deploy/ci/` | OCI/gVisor isolation and environment fingerprint tests |
+| `modelcheck/tla/` | TLA+ model of the kernel state machine |
 
-## 当前边界
+## Current boundaries
 
-- v1.0 是 Agent 控制与执行后端，不包含完整 Web 管理控制台或托管云服务；
-- Reference Provider 是确定性开发实现，不是安全沙箱；生产执行应使用 Wasmtime 或 OCI/gVisor；
-- Firecracker 当前仅有 CI KVM 环境探针，不应视为已交付的 MicroVM Provider；
-- TypeScript 目录仍是后续客户端 SDK 的预留位置，不属于 v1.0 稳定 SDK；
-- 生产部署需要自行提供 PostgreSQL、NATS、OIDC、SPIFFE/SPIRE、OpenBao，以及实际模型、工具和 embedding 服务。
+- v1.0 is an agent control and execution backend; it does not include a complete web administration console or managed cloud service.
+- The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
+- Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
+- The TypeScript directory is reserved for a future client SDK and is not part of the v1.0 stable SDK surface.
+- Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
 
-以上边界是有意保留的：AgentOS v1.0 的交付目标是一个可验证、可恢复、默认拒绝且具有稳定公开契约的 Agent 运行内核。
+These boundaries are intentional. AgentOS v1.0 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.
