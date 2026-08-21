@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,26 @@ const (
 	ociSchema           = "agentos.oci-logical/v1"
 	terminalWaitTimeout = 60 * time.Second
 )
+
+// lockedBuffer keeps subprocess diagnostics safe to inspect while the child
+// is still running. Timeout paths intentionally report stderr before test
+// cleanup terminates the process.
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (buffer *lockedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *lockedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.buffer.String()
+}
 
 // scenario describes one provider leg of the conformance run.
 type scenario struct {
@@ -245,7 +266,7 @@ func (env *conformanceEnv) driveWasmtimeWorker(t *testing.T) {
 		"--package-root", packageRoot,
 		"--artifact-root", t.TempDir(),
 	)
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		t.Fatalf("start Wasmtime provider: %v", err)
@@ -325,7 +346,7 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		commandArgs = append(commandArgs, "--containerd-snapshotter", snapshotter)
 	}
 	command := exec.Command(binaryPath, commandArgs...)
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		t.Fatalf("start OCI provider: %v", err)
