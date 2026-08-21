@@ -147,7 +147,7 @@ cat > /etc/containerd/config.toml <<EOF
 version = 3
 
 [debug]
-  level = "debug"
+  level = "info"
 
 [grpc]
   gid = ${CONTAINERD_SOCKET_GID}
@@ -244,11 +244,18 @@ if [ "$PROBE_STATUS" -ne 0 ]; then
       timeout 2 tail -n 120 "$fd_path" 2>/dev/null >&2 || true
     done
   done < <(pgrep -f 'containerd-shim-runsc-v1|runsc-(gofer|sandbox)' || true)
-  echo ">> containerd log tail:" >&2
-  tail -n 200 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc/shim logs:" >&2
   ls -la "$RUNSC_LOG_DIR" >&2 || true
-  find "$RUNSC_LOG_DIR" -maxdepth 4 -type f -print -exec tail -n 120 {} \; 2>/dev/null >&2 || true
+  for runtime_log in \
+    launcher.log shim.log runsc.create.log \
+    gvisor.create.log gvisor.boot.log gvisor.start.log \
+    gvisor.wait.log gvisor.state.log gvisor.kill.log gvisor.delete.log; do
+    [ -f "$RUNSC_LOG_DIR/$runtime_log" ] || continue
+    echo "--- $runtime_log" >&2
+    tail -n 80 "$RUNSC_LOG_DIR/$runtime_log" >&2 || true
+  done
+  echo ">> containerd log tail:" >&2
+  tail -n 100 /tmp/agentos-containerd.log >&2 || true
   echo ">> dmesg tail:" >&2
   dmesg 2>/dev/null | tail -n 30 >&2 || true
   exit 1
