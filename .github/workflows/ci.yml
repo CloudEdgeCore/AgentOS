@@ -158,7 +158,7 @@ jobs:
       CONTAINERD_VERSION: "2.0.2"
       CONTAINERD_SHA256: "9bd5b6a1bdf505d520d9a329c520258ed0a17faa9fe3db12712ee858ad59aae3"
       RUNSC_TAG: "20260810.0"
-      RUNSC_PLATFORM: ptrace
+      RUNSC_PLATFORM: systrap
       RUNSC_NETWORK: none
       # ctr emits a cgroupfs-style OCI path. The runsc systemd driver expects
       # systemd slice:prefix:name syntax, so use runsc's cgroupfs driver here.

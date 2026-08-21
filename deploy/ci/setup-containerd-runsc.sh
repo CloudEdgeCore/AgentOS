@@ -91,7 +91,7 @@ fi
 # --- gVisor shim + containerd configuration ---------------------------------
 mkdir -p /etc/containerd
 RUNSC_CONFIG_PATH="${RUNSC_CONFIG_PATH:-/etc/containerd/runsc.toml}"
-RUNSC_PLATFORM="${RUNSC_PLATFORM:-ptrace}"
+RUNSC_PLATFORM="${RUNSC_PLATFORM:-systrap}"
 RUNSC_NETWORK="${RUNSC_NETWORK:-none}"
 RUNSC_SYSTEMD_CGROUP="${RUNSC_SYSTEMD_CGROUP:-false}"
 RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
@@ -116,7 +116,9 @@ log_level = "debug"
   systemd-cgroup = "${RUNSC_SYSTEMD_CGROUP}"
   ignore-cgroups = "${RUNSC_IGNORE_CGROUPS}"
   debug = "true"
-  debug-log = "/tmp/agentos-runsc/gvisor.log"
+  # A directory makes runsc create distinct logs for create/gofer/boot. This
+  # avoids interleaved multiprocess output and preserves the exact boot stage.
+  debug-log = "/tmp/agentos-runsc/"
   alsologtostderr = "true"
 EOF
 
