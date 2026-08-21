@@ -307,7 +307,7 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		t.Skipf("agentos-runtime-oci binary not found in PATH (build cmd/agentos-runtime-oci first): %v", err)
 	}
 	commandArgs := []string{
-		"--dev-mode", "true",
+		"--dev-mode=true",
 		"--tenant", env.tenant,
 		"--runtime-instance-id", "worker-oci-1",
 		"--control-address", env.grpcAddr,
