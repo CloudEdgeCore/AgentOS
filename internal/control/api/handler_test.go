@@ -223,6 +223,87 @@ func TestPublishAgentVersionIsStrictAndIdempotent(t *testing.T) {
 	assertReason(t, response, "INVALID_IDEMPOTENCY_KEY")
 }
 
+func TestPublishAgentManifestNormalizesIntoAgentVersion(t *testing.T) {
+	backend := newMemoryStore()
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend, backend),
+	)
+	manifest := validAgentManifest()
+	response := performManifestPublish(handler, manifest, nil, "manifest-publish-1")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var published struct {
+		Name      string            `json:"name"`
+		Version   string            `json:"version"`
+		Namespace string            `json:"namespace"`
+		Ref       string            `json:"ref"`
+		Spec      agentversion.Spec `json:"spec"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &published); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if published.Name != manifest.Metadata.Name || published.Version != manifest.Metadata.Version ||
+		published.Namespace != manifest.Metadata.Namespace || published.Ref != manifest.Ref() {
+		t.Fatalf("manifest identity was not normalized: %+v", published)
+	}
+	if len(published.Spec.Runtimes) != 1 || published.Spec.Runtimes[0].Interface != agentversion.RuntimeInterfaceV1Alpha1 {
+		t.Fatalf("portable runtime contract was not preserved: %+v", published.Spec)
+	}
+
+	mixed, err := json.Marshal(map[string]any{"manifest": manifest, "name": "legacy-name"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(mixedResponse, publishRequest(mixed, "manifest-publish-2"))
+	if mixedResponse.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("mixed status = %d: %s", mixedResponse.Code, mixedResponse.Body.String())
+	}
+	assertReason(t, mixedResponse, "INVALID_AGENT_VERSION")
+
+	manifest.Spec.Capabilities.Models = nil
+	invalid := performManifestPublish(handler, manifest, nil, "manifest-publish-3")
+	if invalid.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid status = %d: %s", invalid.Code, invalid.Body.String())
+	}
+	assertReason(t, invalid, "INVALID_AGENT_VERSION")
+}
+
+func TestPublishAgentManifestBindsSignedPackageToNormalizedSpec(t *testing.T) {
+	signingKey, key, err := agentpkg.GenerateSigningKey("manifest-builder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := agentpkg.NewRegistry()
+	if err := registry.Add(*key); err != nil {
+		t.Fatal(err)
+	}
+	backend := newMemoryStore()
+	handler := auth.StaticMiddleware(
+		auth.Principal{Subject: "user-1", TenantID: "tenant-a"},
+		controlapi.NewHandler(backend, backend, backend, backend, controlapi.WithPackageAdmission(registry)),
+	)
+	manifest := validAgentManifest()
+	spec, err := json.Marshal(manifest.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg := signedPackage(t, signingKey, manifest.Metadata.Name, manifest.Metadata.Version, spec)
+	response := performManifestPublish(handler, manifest, pkg, "manifest-package-1")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var published map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &published); err != nil {
+		t.Fatal(err)
+	}
+	if published["packageKeyId"] != "manifest-builder" {
+		t.Fatalf("packageKeyId = %v", published["packageKeyId"])
+	}
+}
+
 func TestPublishAgentVersionAdmissionFailClosed(t *testing.T) {
 	signingKey, key, err := agentpkg.GenerateSigningKey("ci-builder-1")
 	if err != nil {
@@ -406,6 +487,44 @@ func TestGetAgentVersionDoesNotCrossTenantBoundary(t *testing.T) {
 
 func performPublish(handler http.Handler, spec []byte, key string) *httptest.ResponseRecorder {
 	return performPublishVersion(handler, "research-agent", "1.3.0", spec, key)
+}
+
+func validAgentManifest() agentversion.Manifest {
+	return agentversion.Manifest{
+		APIVersion: agentversion.ManifestAPIVersion,
+		Kind:       agentversion.ManifestKind,
+		Metadata: agentversion.Metadata{
+			Name: "portable-agent", Version: "0.9.0", Namespace: "default",
+		},
+		Spec: agentversion.Spec{
+			RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"wasmtime"}, Preferred: "wasmtime"},
+			Runtimes: []agentversion.RuntimeTarget{{
+				Class: "wasmtime", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+				RuntimeABI: "wasi-preview1", Entrypoint: []string{"agent.wasm"},
+			}},
+			Capabilities: &agentversion.Capabilities{
+				Tools: []string{"search.read"}, Models: []string{"model.default"},
+				Memory: []string{"memory.session"}, Secrets: []string{},
+			},
+			Resources:  &agentversion.ResourceLimits{CPUMillis: 500, MemoryMiB: 256, WorkspaceBytes: 0},
+			Budget:     &agentversion.Budget{Tokens: 1000, CostUSD: 1, ToolCalls: 10, WallSeconds: 60},
+			Checkpoint: &agentversion.CheckpointPolicy{Mode: agentversion.CheckpointLogical, SchemaVersion: "checkpoint/v1"},
+		},
+	}
+}
+
+func performManifestPublish(handler http.Handler, manifest agentversion.Manifest, pkg *agentpkg.Package, key string) *httptest.ResponseRecorder {
+	body := map[string]any{"manifest": manifest}
+	if pkg != nil {
+		body["package"] = pkg
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, publishRequest(encoded, key))
+	return response
 }
 
 func performPublishVersion(handler http.Handler, name, version string, spec []byte, key string) *httptest.ResponseRecorder {

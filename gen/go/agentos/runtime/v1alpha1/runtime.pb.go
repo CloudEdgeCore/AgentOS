@@ -540,9 +540,13 @@ type Assignment struct {
 	Phase string `protobuf:"bytes,14,opt,name=phase,proto3" json:"phase,omitempty"`
 	// approval_id is set when the attempt is WAITING_APPROVAL: the pending
 	// human approval the worker must re-present to the Tool Gateway.
-	ApprovalId    string `protobuf:"bytes,15,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ApprovalId string `protobuf:"bytes,15,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	// agent_version_spec_json is the immutable publication resolved during
+	// admission. Providers use its runtime target and admitted capability
+	// declarations; mutable Task input cannot grant new capabilities.
+	AgentVersionSpecJson []byte `protobuf:"bytes,16,opt,name=agent_version_spec_json,json=agentVersionSpecJson,proto3" json:"agent_version_spec_json,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Assignment) Reset() {
@@ -678,6 +682,13 @@ func (x *Assignment) GetApprovalId() string {
 		return x.ApprovalId
 	}
 	return ""
+}
+
+func (x *Assignment) GetAgentVersionSpecJson() []byte {
+	if x != nil {
+		return x.AgentVersionSpecJson
+	}
+	return nil
 }
 
 type TransitionAttemptRequest struct {
@@ -1419,7 +1430,7 @@ const file_agentos_runtime_v1alpha1_runtime_proto_rawDesc = "" +
 	"\x15GetAssignmentResponse\x12D\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2$.agentos.runtime.v1alpha1.AssignmentR\n" +
-	"assignment\"\x95\x05\n" +
+	"assignment\"\xcc\x05\n" +
 	"\n" +
 	"Assignment\x12E\n" +
 	"\bidentity\x18\x01 \x01(\v2).agentos.runtime.v1alpha1.AttemptIdentityR\bidentity\x12\x15\n" +
@@ -1438,7 +1449,8 @@ const file_agentos_runtime_v1alpha1_runtime_proto_rawDesc = "" +
 	"\x11resume_checkpoint\x18\r \x01(\v2-.agentos.runtime.v1alpha1.CheckpointReferenceR\x10resumeCheckpoint\x12\x14\n" +
 	"\x05phase\x18\x0e \x01(\tR\x05phase\x12\x1f\n" +
 	"\vapproval_id\x18\x0f \x01(\tR\n" +
-	"approvalId\"\xdb\x02\n" +
+	"approvalId\x125\n" +
+	"\x17agent_version_spec_json\x18\x10 \x01(\fR\x14agentVersionSpecJson\"\xdb\x02\n" +
 	"\x18TransitionAttemptRequest\x12E\n" +
 	"\bidentity\x18\x01 \x01(\v2).agentos.runtime.v1alpha1.AttemptIdentityR\bidentity\x128\n" +
 	"\x18expected_attempt_version\x18\x02 \x01(\x03R\x16expectedAttemptVersion\x12'\n" +

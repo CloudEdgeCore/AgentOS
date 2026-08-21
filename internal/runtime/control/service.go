@@ -263,6 +263,9 @@ func assignmentProto(assignment store.RuntimeAssignment) *runtimev1alpha1.Assign
 	if assignment.PendingApprovalID != nil {
 		result.ApprovalId = assignment.PendingApprovalID.String()
 	}
+	if assignment.AgentVersion != nil {
+		result.AgentVersionSpecJson = append([]byte(nil), assignment.AgentVersion.Spec...)
+	}
 	if assignment.ResumeCheckpoint != nil {
 		result.ResumeCheckpoint = checkpointProto(*assignment.ResumeCheckpoint)
 	}

@@ -216,6 +216,10 @@ func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgres
 	if err != nil || assignment.Task.ID != created.Task.ID {
 		t.Fatalf("poll assignment=%+v err=%v", assignment, err)
 	}
+	if assignment.AgentVersion == nil || assignment.AgentVersion.Ref() != created.Task.AgentVersionRef ||
+		len(assignment.AgentVersion.Spec) == 0 {
+		t.Fatalf("assignment omitted immutable AgentVersion declaration: %+v", assignment.AgentVersion)
+	}
 	return assignment
 }
 

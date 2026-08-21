@@ -183,10 +183,13 @@ func (x *ToolDescriptor) GetCreatedAt() *timestamppb.Timestamp {
 }
 
 type ListToolsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TenantId      string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	TenantId string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	// Required for Agent-originated discovery. The Gateway filters descriptors
+	// through the immutable AgentVersion capability declaration.
+	AgentVersionRef string `protobuf:"bytes,2,opt,name=agent_version_ref,json=agentVersionRef,proto3" json:"agent_version_ref,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ListToolsRequest) Reset() {
@@ -222,6 +225,13 @@ func (*ListToolsRequest) Descriptor() ([]byte, []int) {
 func (x *ListToolsRequest) GetTenantId() string {
 	if x != nil {
 		return x.TenantId
+	}
+	return ""
+}
+
+func (x *ListToolsRequest) GetAgentVersionRef() string {
+	if x != nil {
+		return x.AgentVersionRef
 	}
 	return ""
 }
@@ -285,7 +295,11 @@ type InvokeToolRequest struct {
 	IdempotencyKey string `protobuf:"bytes,10,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	// Required when the previous decision was REQUIRES_APPROVAL and a human
 	// decided it.
-	ApprovalId    string `protobuf:"bytes,11,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	ApprovalId string `protobuf:"bytes,11,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	// Optional symbolic secret grant. When empty, no credential is issued to
+	// the executing adapter. When set, both the manifest secret capability and
+	// the broker scope must authorize it.
+	SecretRef     string `protobuf:"bytes,12,opt,name=secret_ref,json=secretRef,proto3" json:"secret_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -397,6 +411,13 @@ func (x *InvokeToolRequest) GetApprovalId() string {
 	return ""
 }
 
+func (x *InvokeToolRequest) GetSecretRef() string {
+	if x != nil {
+		return x.SecretRef
+	}
+	return ""
+}
+
 type InvokeToolResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// EXECUTED | DENIED | REQUIRES_APPROVAL | REPLAYED
@@ -491,6 +512,394 @@ func (x *InvokeToolResponse) GetToolCallId() string {
 	return ""
 }
 
+type SearchMemoryRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Identity        *AttemptIdentity       `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	AgentVersionRef string                 `protobuf:"bytes,2,opt,name=agent_version_ref,json=agentVersionRef,proto3" json:"agent_version_ref,omitempty"`
+	Namespace       string                 `protobuf:"bytes,3,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Query           string                 `protobuf:"bytes,4,opt,name=query,proto3" json:"query,omitempty"`
+	Sensitivity     string                 `protobuf:"bytes,5,opt,name=sensitivity,proto3" json:"sensitivity,omitempty"`
+	Limit           int32                  `protobuf:"varint,6,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SearchMemoryRequest) Reset() {
+	*x = SearchMemoryRequest{}
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchMemoryRequest) ProtoMessage() {}
+
+func (x *SearchMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchMemoryRequest.ProtoReflect.Descriptor instead.
+func (*SearchMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_agentos_gateway_v1alpha1_gateway_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *SearchMemoryRequest) GetIdentity() *AttemptIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *SearchMemoryRequest) GetAgentVersionRef() string {
+	if x != nil {
+		return x.AgentVersionRef
+	}
+	return ""
+}
+
+func (x *SearchMemoryRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *SearchMemoryRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *SearchMemoryRequest) GetSensitivity() string {
+	if x != nil {
+		return x.Sensitivity
+	}
+	return ""
+}
+
+func (x *SearchMemoryRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type MemoryRecord struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Namespace       string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Key             string                 `protobuf:"bytes,3,opt,name=key,proto3" json:"key,omitempty"`
+	ContentType     string                 `protobuf:"bytes,4,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	Content         string                 `protobuf:"bytes,5,opt,name=content,proto3" json:"content,omitempty"`
+	Sensitivity     string                 `protobuf:"bytes,6,opt,name=sensitivity,proto3" json:"sensitivity,omitempty"`
+	ResourceVersion int64                  `protobuf:"varint,7,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
+	CreatedAt       *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt       *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *MemoryRecord) Reset() {
+	*x = MemoryRecord{}
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryRecord) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryRecord) ProtoMessage() {}
+
+func (x *MemoryRecord) ProtoReflect() protoreflect.Message {
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryRecord.ProtoReflect.Descriptor instead.
+func (*MemoryRecord) Descriptor() ([]byte, []int) {
+	return file_agentos_gateway_v1alpha1_gateway_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *MemoryRecord) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *MemoryRecord) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *MemoryRecord) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *MemoryRecord) GetContentType() string {
+	if x != nil {
+		return x.ContentType
+	}
+	return ""
+}
+
+func (x *MemoryRecord) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *MemoryRecord) GetSensitivity() string {
+	if x != nil {
+		return x.Sensitivity
+	}
+	return ""
+}
+
+func (x *MemoryRecord) GetResourceVersion() int64 {
+	if x != nil {
+		return x.ResourceVersion
+	}
+	return 0
+}
+
+func (x *MemoryRecord) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *MemoryRecord) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
+type SearchMemoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Records       []*MemoryRecord        `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchMemoryResponse) Reset() {
+	*x = SearchMemoryResponse{}
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchMemoryResponse) ProtoMessage() {}
+
+func (x *SearchMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchMemoryResponse.ProtoReflect.Descriptor instead.
+func (*SearchMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_agentos_gateway_v1alpha1_gateway_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SearchMemoryResponse) GetRecords() []*MemoryRecord {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+type PutMemoryRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Identity        *AttemptIdentity       `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	AgentVersionRef string                 `protobuf:"bytes,2,opt,name=agent_version_ref,json=agentVersionRef,proto3" json:"agent_version_ref,omitempty"`
+	Namespace       string                 `protobuf:"bytes,3,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Key             string                 `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
+	ContentType     string                 `protobuf:"bytes,5,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	Content         string                 `protobuf:"bytes,6,opt,name=content,proto3" json:"content,omitempty"`
+	Sensitivity     string                 `protobuf:"bytes,7,opt,name=sensitivity,proto3" json:"sensitivity,omitempty"`
+	ProvenanceJson  []byte                 `protobuf:"bytes,8,opt,name=provenance_json,json=provenanceJson,proto3" json:"provenance_json,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *PutMemoryRequest) Reset() {
+	*x = PutMemoryRequest{}
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutMemoryRequest) ProtoMessage() {}
+
+func (x *PutMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutMemoryRequest.ProtoReflect.Descriptor instead.
+func (*PutMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_agentos_gateway_v1alpha1_gateway_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *PutMemoryRequest) GetIdentity() *AttemptIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *PutMemoryRequest) GetAgentVersionRef() string {
+	if x != nil {
+		return x.AgentVersionRef
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetContentType() string {
+	if x != nil {
+		return x.ContentType
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetSensitivity() string {
+	if x != nil {
+		return x.Sensitivity
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetProvenanceJson() []byte {
+	if x != nil {
+		return x.ProvenanceJson
+	}
+	return nil
+}
+
+type PutMemoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Record        *MemoryRecord          `protobuf:"bytes,1,opt,name=record,proto3" json:"record,omitempty"`
+	Replayed      bool                   `protobuf:"varint,2,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutMemoryResponse) Reset() {
+	*x = PutMemoryResponse{}
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutMemoryResponse) ProtoMessage() {}
+
+func (x *PutMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_agentos_gateway_v1alpha1_gateway_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutMemoryResponse.ProtoReflect.Descriptor instead.
+func (*PutMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_agentos_gateway_v1alpha1_gateway_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PutMemoryResponse) GetRecord() *MemoryRecord {
+	if x != nil {
+		return x.Record
+	}
+	return nil
+}
+
+func (x *PutMemoryResponse) GetReplayed() bool {
+	if x != nil {
+		return x.Replayed
+	}
+	return false
+}
+
 var File_agentos_gateway_v1alpha1_gateway_proto protoreflect.FileDescriptor
 
 const file_agentos_gateway_v1alpha1_gateway_proto_rawDesc = "" +
@@ -511,11 +920,12 @@ const file_agentos_gateway_v1alpha1_gateway_proto_rawDesc = "" +
 	"\vspec_digest\x18\a \x01(\tR\n" +
 	"specDigest\x129\n" +
 	"\n" +
-	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"/\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"[\n" +
 	"\x10ListToolsRequest\x12\x1b\n" +
-	"\ttenant_id\x18\x01 \x01(\tR\btenantId\"S\n" +
+	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12*\n" +
+	"\x11agent_version_ref\x18\x02 \x01(\tR\x0fagentVersionRef\"S\n" +
 	"\x11ListToolsResponse\x12>\n" +
-	"\x05tools\x18\x01 \x03(\v2(.agentos.gateway.v1alpha1.ToolDescriptorR\x05tools\"\x91\x03\n" +
+	"\x05tools\x18\x01 \x03(\v2(.agentos.gateway.v1alpha1.ToolDescriptorR\x05tools\"\xb0\x03\n" +
 	"\x11InvokeToolRequest\x12E\n" +
 	"\bidentity\x18\x01 \x01(\v2).agentos.gateway.v1alpha1.AttemptIdentityR\bidentity\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x15\n" +
@@ -529,7 +939,9 @@ const file_agentos_gateway_v1alpha1_gateway_proto_rawDesc = "" +
 	"\x0fidempotency_key\x18\n" +
 	" \x01(\tR\x0eidempotencyKey\x12\x1f\n" +
 	"\vapproval_id\x18\v \x01(\tR\n" +
-	"approvalId\"\x8b\x02\n" +
+	"approvalId\x12\x1d\n" +
+	"\n" +
+	"secret_ref\x18\f \x01(\tR\tsecretRef\"\x8b\x02\n" +
 	"\x12InvokeToolResponse\x12\x18\n" +
 	"\aoutcome\x18\x01 \x01(\tR\aoutcome\x12\x1f\n" +
 	"\vresult_json\x18\x02 \x01(\fR\n" +
@@ -540,11 +952,47 @@ const file_agentos_gateway_v1alpha1_gateway_proto_rawDesc = "" +
 	"\x0fpolicy_revision\x18\x05 \x01(\tR\x0epolicyRevision\x12+\n" +
 	"\x11receipt_operation\x18\x06 \x01(\tR\x10receiptOperation\x12 \n" +
 	"\ftool_call_id\x18\a \x01(\tR\n" +
-	"toolCallId2\xe3\x01\n" +
+	"toolCallId\"\xf4\x01\n" +
+	"\x13SearchMemoryRequest\x12E\n" +
+	"\bidentity\x18\x01 \x01(\v2).agentos.gateway.v1alpha1.AttemptIdentityR\bidentity\x12*\n" +
+	"\x11agent_version_ref\x18\x02 \x01(\tR\x0fagentVersionRef\x12\x1c\n" +
+	"\tnamespace\x18\x03 \x01(\tR\tnamespace\x12\x14\n" +
+	"\x05query\x18\x04 \x01(\tR\x05query\x12 \n" +
+	"\vsensitivity\x18\x05 \x01(\tR\vsensitivity\x12\x14\n" +
+	"\x05limit\x18\x06 \x01(\x05R\x05limit\"\xce\x02\n" +
+	"\fMemoryRecord\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
+	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x10\n" +
+	"\x03key\x18\x03 \x01(\tR\x03key\x12!\n" +
+	"\fcontent_type\x18\x04 \x01(\tR\vcontentType\x12\x18\n" +
+	"\acontent\x18\x05 \x01(\tR\acontent\x12 \n" +
+	"\vsensitivity\x18\x06 \x01(\tR\vsensitivity\x12)\n" +
+	"\x10resource_version\x18\a \x01(\x03R\x0fresourceVersion\x129\n" +
+	"\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"X\n" +
+	"\x14SearchMemoryResponse\x12@\n" +
+	"\arecords\x18\x01 \x03(\v2&.agentos.gateway.v1alpha1.MemoryRecordR\arecords\"\xbd\x02\n" +
+	"\x10PutMemoryRequest\x12E\n" +
+	"\bidentity\x18\x01 \x01(\v2).agentos.gateway.v1alpha1.AttemptIdentityR\bidentity\x12*\n" +
+	"\x11agent_version_ref\x18\x02 \x01(\tR\x0fagentVersionRef\x12\x1c\n" +
+	"\tnamespace\x18\x03 \x01(\tR\tnamespace\x12\x10\n" +
+	"\x03key\x18\x04 \x01(\tR\x03key\x12!\n" +
+	"\fcontent_type\x18\x05 \x01(\tR\vcontentType\x12\x18\n" +
+	"\acontent\x18\x06 \x01(\tR\acontent\x12 \n" +
+	"\vsensitivity\x18\a \x01(\tR\vsensitivity\x12'\n" +
+	"\x0fprovenance_json\x18\b \x01(\fR\x0eprovenanceJson\"o\n" +
+	"\x11PutMemoryResponse\x12>\n" +
+	"\x06record\x18\x01 \x01(\v2&.agentos.gateway.v1alpha1.MemoryRecordR\x06record\x12\x1a\n" +
+	"\breplayed\x18\x02 \x01(\bR\breplayed2\xe3\x01\n" +
 	"\x12ToolGatewayService\x12d\n" +
 	"\tListTools\x12*.agentos.gateway.v1alpha1.ListToolsRequest\x1a+.agentos.gateway.v1alpha1.ListToolsResponse\x12g\n" +
 	"\n" +
-	"InvokeTool\x12+.agentos.gateway.v1alpha1.InvokeToolRequest\x1a,.agentos.gateway.v1alpha1.InvokeToolResponseBUZSgithub.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1b\x06proto3"
+	"InvokeTool\x12+.agentos.gateway.v1alpha1.InvokeToolRequest\x1a,.agentos.gateway.v1alpha1.InvokeToolResponse2\xeb\x01\n" +
+	"\x14MemoryGatewayService\x12m\n" +
+	"\fSearchMemory\x12-.agentos.gateway.v1alpha1.SearchMemoryRequest\x1a..agentos.gateway.v1alpha1.SearchMemoryResponse\x12d\n" +
+	"\tPutMemory\x12*.agentos.gateway.v1alpha1.PutMemoryRequest\x1a+.agentos.gateway.v1alpha1.PutMemoryResponseBUZSgithub.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1b\x06proto3"
 
 var (
 	file_agentos_gateway_v1alpha1_gateway_proto_rawDescOnce sync.Once
@@ -558,7 +1006,7 @@ func file_agentos_gateway_v1alpha1_gateway_proto_rawDescGZIP() []byte {
 	return file_agentos_gateway_v1alpha1_gateway_proto_rawDescData
 }
 
-var file_agentos_gateway_v1alpha1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_agentos_gateway_v1alpha1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_agentos_gateway_v1alpha1_gateway_proto_goTypes = []any{
 	(*AttemptIdentity)(nil),       // 0: agentos.gateway.v1alpha1.AttemptIdentity
 	(*ToolDescriptor)(nil),        // 1: agentos.gateway.v1alpha1.ToolDescriptor
@@ -566,21 +1014,36 @@ var file_agentos_gateway_v1alpha1_gateway_proto_goTypes = []any{
 	(*ListToolsResponse)(nil),     // 3: agentos.gateway.v1alpha1.ListToolsResponse
 	(*InvokeToolRequest)(nil),     // 4: agentos.gateway.v1alpha1.InvokeToolRequest
 	(*InvokeToolResponse)(nil),    // 5: agentos.gateway.v1alpha1.InvokeToolResponse
-	(*timestamppb.Timestamp)(nil), // 6: google.protobuf.Timestamp
+	(*SearchMemoryRequest)(nil),   // 6: agentos.gateway.v1alpha1.SearchMemoryRequest
+	(*MemoryRecord)(nil),          // 7: agentos.gateway.v1alpha1.MemoryRecord
+	(*SearchMemoryResponse)(nil),  // 8: agentos.gateway.v1alpha1.SearchMemoryResponse
+	(*PutMemoryRequest)(nil),      // 9: agentos.gateway.v1alpha1.PutMemoryRequest
+	(*PutMemoryResponse)(nil),     // 10: agentos.gateway.v1alpha1.PutMemoryResponse
+	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
 }
 var file_agentos_gateway_v1alpha1_gateway_proto_depIdxs = []int32{
-	6, // 0: agentos.gateway.v1alpha1.ToolDescriptor.created_at:type_name -> google.protobuf.Timestamp
-	1, // 1: agentos.gateway.v1alpha1.ListToolsResponse.tools:type_name -> agentos.gateway.v1alpha1.ToolDescriptor
-	0, // 2: agentos.gateway.v1alpha1.InvokeToolRequest.identity:type_name -> agentos.gateway.v1alpha1.AttemptIdentity
-	2, // 3: agentos.gateway.v1alpha1.ToolGatewayService.ListTools:input_type -> agentos.gateway.v1alpha1.ListToolsRequest
-	4, // 4: agentos.gateway.v1alpha1.ToolGatewayService.InvokeTool:input_type -> agentos.gateway.v1alpha1.InvokeToolRequest
-	3, // 5: agentos.gateway.v1alpha1.ToolGatewayService.ListTools:output_type -> agentos.gateway.v1alpha1.ListToolsResponse
-	5, // 6: agentos.gateway.v1alpha1.ToolGatewayService.InvokeTool:output_type -> agentos.gateway.v1alpha1.InvokeToolResponse
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	11, // 0: agentos.gateway.v1alpha1.ToolDescriptor.created_at:type_name -> google.protobuf.Timestamp
+	1,  // 1: agentos.gateway.v1alpha1.ListToolsResponse.tools:type_name -> agentos.gateway.v1alpha1.ToolDescriptor
+	0,  // 2: agentos.gateway.v1alpha1.InvokeToolRequest.identity:type_name -> agentos.gateway.v1alpha1.AttemptIdentity
+	0,  // 3: agentos.gateway.v1alpha1.SearchMemoryRequest.identity:type_name -> agentos.gateway.v1alpha1.AttemptIdentity
+	11, // 4: agentos.gateway.v1alpha1.MemoryRecord.created_at:type_name -> google.protobuf.Timestamp
+	11, // 5: agentos.gateway.v1alpha1.MemoryRecord.updated_at:type_name -> google.protobuf.Timestamp
+	7,  // 6: agentos.gateway.v1alpha1.SearchMemoryResponse.records:type_name -> agentos.gateway.v1alpha1.MemoryRecord
+	0,  // 7: agentos.gateway.v1alpha1.PutMemoryRequest.identity:type_name -> agentos.gateway.v1alpha1.AttemptIdentity
+	7,  // 8: agentos.gateway.v1alpha1.PutMemoryResponse.record:type_name -> agentos.gateway.v1alpha1.MemoryRecord
+	2,  // 9: agentos.gateway.v1alpha1.ToolGatewayService.ListTools:input_type -> agentos.gateway.v1alpha1.ListToolsRequest
+	4,  // 10: agentos.gateway.v1alpha1.ToolGatewayService.InvokeTool:input_type -> agentos.gateway.v1alpha1.InvokeToolRequest
+	6,  // 11: agentos.gateway.v1alpha1.MemoryGatewayService.SearchMemory:input_type -> agentos.gateway.v1alpha1.SearchMemoryRequest
+	9,  // 12: agentos.gateway.v1alpha1.MemoryGatewayService.PutMemory:input_type -> agentos.gateway.v1alpha1.PutMemoryRequest
+	3,  // 13: agentos.gateway.v1alpha1.ToolGatewayService.ListTools:output_type -> agentos.gateway.v1alpha1.ListToolsResponse
+	5,  // 14: agentos.gateway.v1alpha1.ToolGatewayService.InvokeTool:output_type -> agentos.gateway.v1alpha1.InvokeToolResponse
+	8,  // 15: agentos.gateway.v1alpha1.MemoryGatewayService.SearchMemory:output_type -> agentos.gateway.v1alpha1.SearchMemoryResponse
+	10, // 16: agentos.gateway.v1alpha1.MemoryGatewayService.PutMemory:output_type -> agentos.gateway.v1alpha1.PutMemoryResponse
+	13, // [13:17] is the sub-list for method output_type
+	9,  // [9:13] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_agentos_gateway_v1alpha1_gateway_proto_init() }
@@ -594,9 +1057,9 @@ func file_agentos_gateway_v1alpha1_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentos_gateway_v1alpha1_gateway_proto_rawDesc), len(file_agentos_gateway_v1alpha1_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   11,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_agentos_gateway_v1alpha1_gateway_proto_goTypes,
 		DependencyIndexes: file_agentos_gateway_v1alpha1_gateway_proto_depIdxs,

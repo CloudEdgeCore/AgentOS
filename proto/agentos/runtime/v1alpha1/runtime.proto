@@ -81,6 +81,10 @@ message Assignment {
   // approval_id is set when the attempt is WAITING_APPROVAL: the pending
   // human approval the worker must re-present to the Tool Gateway.
   string approval_id = 15;
+  // agent_version_spec_json is the immutable publication resolved during
+  // admission. Providers use its runtime target and admitted capability
+  // declarations; mutable Task input cannot grant new capabilities.
+  bytes agent_version_spec_json = 16;
 }
 
 enum AttemptPhase {

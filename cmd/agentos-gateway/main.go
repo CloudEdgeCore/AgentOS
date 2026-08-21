@@ -20,6 +20,8 @@ import (
 	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
 	"github.com/bian-cloud-skill/agentos/internal/gateway"
 	"github.com/bian-cloud-skill/agentos/internal/gateway/bao"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/memory"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/model"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
@@ -176,9 +178,17 @@ func main() {
 	}
 	decisionGateway := tool.NewGateway(policyEngine, repository, repository, repository, executor, secrets)
 	modelGateway := model.NewGateway(policyEngine, repository, repository, repository)
+	capabilityAuthorizer, err := capability.NewAuthorizer(repository)
+	if err != nil {
+		slog.Error("configure AgentVersion capability authorizer", "error", err)
+		os.Exit(1)
+	}
 	server := grpc.NewServer(grpcx.ServerOptions()...)
-	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, gateway.NewService(decisionGateway, *tenantID))
-	modelv1alpha1.RegisterModelGatewayServiceServer(server, gateway.NewModelService(modelGateway, *tenantID))
+	gatewayv1alpha1.RegisterToolGatewayServiceServer(server, gateway.NewService(decisionGateway, *tenantID, capabilityAuthorizer))
+	gatewayv1alpha1.RegisterMemoryGatewayServiceServer(server, gateway.NewMemoryService(
+		memory.NewGateway(memory.DevEmbedder{}, repository), repository, *tenantID, capabilityAuthorizer,
+	))
+	modelv1alpha1.RegisterModelGatewayServiceServer(server, gateway.NewModelService(modelGateway, *tenantID, capabilityAuthorizer))
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
 		slog.Error("listen for Tool Gateway", "error", err)

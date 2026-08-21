@@ -226,12 +226,28 @@ func TestInvokeRedactsSecretHandleFromResult(t *testing.T) {
 	fakes.executor.output = json.RawMessage(`{"content":"token sk-secret-abc"}`)
 	fakes.secrets.handle = SecretHandle("sk-secret-abc")
 
-	result, err := gateway.InvokeTool(context.Background(), invokeInput("read", `{"path":"a.txt"}`))
+	input := invokeInput("read", `{"path":"a.txt"}`)
+	input.SecretRef = "filesystem/read"
+	result, err := gateway.InvokeTool(context.Background(), input)
 	if err != nil {
 		t.Fatalf("InvokeTool: %v", err)
 	}
 	if bytes.Contains(result.Result, []byte("sk-secret-abc")) {
 		t.Fatalf("secret handle leaked through result: %s", result.Result)
+	}
+	if fakes.secrets.calls != 1 || fakes.secrets.scope.SecretRef != "filesystem/read" {
+		t.Fatalf("explicit secret scope was not brokered: %+v", fakes.secrets.scope)
+	}
+}
+
+func TestInvokeDoesNotIssueImplicitSecret(t *testing.T) {
+	gateway, fakes := newTestGateway()
+	fakes.policy.decisions["read"] = policy.Decision{Allow: true}
+	if _, err := gateway.InvokeTool(context.Background(), invokeInput("read", `{"path":"a.txt"}`)); err != nil {
+		t.Fatalf("InvokeTool: %v", err)
+	}
+	if fakes.secrets.calls != 0 {
+		t.Fatal("tool without an explicit secret grant reached the Secret Broker")
 	}
 }
 
@@ -495,8 +511,12 @@ func (f *fakeExecutor) Execute(_ context.Context, in ExecutionRequest) (Executio
 
 type fakeSecretBroker struct {
 	handle SecretHandle
+	calls  int
+	scope  SecretScope
 }
 
-func (f *fakeSecretBroker) Issue(context.Context, SecretScope) (SecretHandle, error) {
+func (f *fakeSecretBroker) Issue(_ context.Context, scope SecretScope) (SecretHandle, error) {
+	f.calls++
+	f.scope = scope
 	return f.handle, nil
 }

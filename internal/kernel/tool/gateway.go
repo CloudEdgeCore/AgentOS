@@ -75,6 +75,7 @@ type SecretScope struct {
 	AttemptID string
 	ToolName  string
 	Resource  string
+	SecretRef string
 }
 
 // SecretHandle is an opaque, scope-limited capability handle. The actual
@@ -128,7 +129,10 @@ type InvokeInput struct {
 	// preserve it.
 	FencingToken    int64
 	AgentVersionRef string
-	ToolName        string
+	// SecretRef is an optional symbolic capability from the immutable
+	// AgentVersion manifest. Empty means this invocation receives no secret.
+	SecretRef string
+	ToolName  string
 	// ToolVersion selects a descriptor; empty resolves the latest version.
 	ToolVersion    string
 	Action         string
@@ -345,15 +349,19 @@ func (g *Gateway) InvokeTool(ctx context.Context, in InvokeInput) (InvokeResult,
 		return result, err
 	}
 
-	handle, err := g.secrets.Issue(ctx, SecretScope{
-		TenantID: in.TenantID, AttemptID: in.AttemptID.String(), ToolName: descriptor.Name, Resource: in.Resource,
-	})
-	if err != nil {
-		_, _ = g.tools.UpdateToolCall(ctx, store.UpdateToolCallInput{
-			TenantID: in.TenantID, ToolCallID: call.ID, ExpectedVersion: call.ResourceVersion,
-			Status: store.ToolCallFailed, DecisionReasons: []string{"SECRET_BROKER_FAILED"}, PolicyRevision: revision,
+	var handle SecretHandle
+	if strings.TrimSpace(in.SecretRef) != "" {
+		handle, err = g.secrets.Issue(ctx, SecretScope{
+			TenantID: in.TenantID, AttemptID: in.AttemptID.String(), ToolName: descriptor.Name,
+			Resource: in.Resource, SecretRef: in.SecretRef,
 		})
-		return result, fmt.Errorf("issue scoped credential: %w", err)
+		if err != nil {
+			_, _ = g.tools.UpdateToolCall(ctx, store.UpdateToolCallInput{
+				TenantID: in.TenantID, ToolCallID: call.ID, ExpectedVersion: call.ResourceVersion,
+				Status: store.ToolCallFailed, DecisionReasons: []string{"SECRET_BROKER_FAILED"}, PolicyRevision: revision,
+			})
+			return result, fmt.Errorf("issue scoped credential: %w", err)
+		}
 	}
 
 	executed, execErr := g.executor.Execute(ctx, ExecutionRequest{

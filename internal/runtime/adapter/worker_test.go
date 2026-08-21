@@ -1,0 +1,210 @@
+package adapter
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"io"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	runtimev1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/runtime/v1alpha1"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
+	"github.com/bian-cloud-skill/agentos/sdk/agent"
+	"github.com/google/uuid"
+	"google.golang.org/grpc"
+)
+
+type runtimeFixture struct {
+	mu    sync.Mutex
+	state map[string]json.RawMessage
+}
+
+func (r *runtimeFixture) Run(_ context.Context, request agent.StartRequest, emit agent.Emitter) (json.RawMessage, error) {
+	if err := emit("fixture.started", json.RawMessage("{\"ok\":true}")); err != nil {
+		return nil, err
+	}
+	output := json.RawMessage("{\"adapter\":\"complete\"}")
+	r.mu.Lock()
+	r.state[request.ExecutionID] = output
+	r.mu.Unlock()
+	return output, nil
+}
+func (r *runtimeFixture) Checkpoint(_ context.Context, executionID string) (agent.Checkpoint, error) {
+	r.mu.Lock()
+	state := r.state[executionID]
+	r.mu.Unlock()
+	return agent.Checkpoint{SchemaVersion: "fixture/v1", State: state, CreatedAt: time.Now().UTC()}, nil
+}
+func (r *runtimeFixture) Restore(_ context.Context, request agent.RestoreRequest) error {
+	r.mu.Lock()
+	r.state[request.ExecutionID] = request.Checkpoint.State
+	r.mu.Unlock()
+	return nil
+}
+
+type fakeControl struct {
+	assignment  *runtimev1alpha1.Assignment
+	version     int64
+	completed   *runtimev1alpha1.CompleteAttemptRequest
+	failure     string
+	checkpoints int
+}
+
+func (f *fakeControl) PollAssignment(context.Context, *runtimev1alpha1.PollAssignmentRequest, ...grpc.CallOption) (*runtimev1alpha1.PollAssignmentResponse, error) {
+	return &runtimev1alpha1.PollAssignmentResponse{Assignment: f.assignment}, nil
+}
+func (f *fakeControl) GetAssignment(context.Context, *runtimev1alpha1.GetAssignmentRequest, ...grpc.CallOption) (*runtimev1alpha1.GetAssignmentResponse, error) {
+	return &runtimev1alpha1.GetAssignmentResponse{Assignment: f.assignment}, nil
+}
+func (f *fakeControl) TransitionAttempt(_ context.Context, request *runtimev1alpha1.TransitionAttemptRequest, _ ...grpc.CallOption) (*runtimev1alpha1.TransitionAttemptResponse, error) {
+	f.version++
+	if request.FailureCode != "" {
+		f.failure = request.FailureCode + ": " + request.FailureMessage
+	}
+	return &runtimev1alpha1.TransitionAttemptResponse{AttemptVersion: f.version, Phase: request.TargetPhase}, nil
+}
+func (f *fakeControl) Heartbeat(context.Context, *runtimev1alpha1.HeartbeatRequest, ...grpc.CallOption) (*runtimev1alpha1.HeartbeatResponse, error) {
+	return &runtimev1alpha1.HeartbeatResponse{LeaseVersion: 2, AttemptVersion: f.version}, nil
+}
+func (f *fakeControl) CommitCheckpoint(_ context.Context, _ *runtimev1alpha1.CommitCheckpointRequest, _ ...grpc.CallOption) (*runtimev1alpha1.CommitCheckpointResponse, error) {
+	f.checkpoints++
+	f.version++
+	return &runtimev1alpha1.CommitCheckpointResponse{AttemptVersion: f.version}, nil
+}
+func (f *fakeControl) CompleteAttempt(_ context.Context, request *runtimev1alpha1.CompleteAttemptRequest, _ ...grpc.CallOption) (*runtimev1alpha1.CompleteAttemptResponse, error) {
+	f.completed = request
+	return &runtimev1alpha1.CompleteAttemptResponse{AttemptVersion: f.version + 1}, nil
+}
+func (f *fakeControl) AcknowledgeCancellation(context.Context, *runtimev1alpha1.AcknowledgeCancellationRequest, ...grpc.CallOption) (*runtimev1alpha1.AcknowledgeCancellationResponse, error) {
+	return &runtimev1alpha1.AcknowledgeCancellationResponse{}, nil
+}
+
+type memoryArtifacts struct {
+	mu      sync.Mutex
+	content map[string][]byte
+}
+
+func (m *memoryArtifacts) Put(_ context.Context, _ string, mediaType string, reader io.Reader) (store.ArtifactReference, error) {
+	encoded, err := io.ReadAll(reader)
+	if err != nil {
+		return store.ArtifactReference{}, err
+	}
+	digest := sha256.Sum256(encoded)
+	uri := "memory://" + uuid.NewString()
+	m.mu.Lock()
+	m.content[uri] = encoded
+	m.mu.Unlock()
+	return store.ArtifactReference{URI: uri, SHA256: digest, SizeBytes: int64(len(encoded)), MediaType: mediaType}, nil
+}
+func (m *memoryArtifacts) Open(_ context.Context, _ string, reference store.ArtifactReference) (io.ReadCloser, error) {
+	m.mu.Lock()
+	content := bytes.Clone(m.content[reference.URI])
+	m.mu.Unlock()
+	return io.NopCloser(bytes.NewReader(content)), nil
+}
+
+func TestWorkerExecutesManifestThroughRuntimeInterface(t *testing.T) {
+	host, err := agent.NewHost(&runtimeFixture{state: map[string]json.RawMessage{}}, agent.HostOptions{Adapter: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	spec := agentversion.Spec{
+		RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
+		Runtimes: []agentversion.RuntimeTarget{{
+			Class: "remote", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+			RuntimeABI: "agentos.remote/v1", Entrypoint: []string{server.URL},
+		}},
+		Capabilities: &agentversion.Capabilities{
+			Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{},
+		},
+		Resources:  &agentversion.ResourceLimits{CPUMillis: 100, MemoryMiB: 128},
+		Budget:     &agentversion.Budget{WallSeconds: 60},
+		Checkpoint: &agentversion.CheckpointPolicy{Mode: agentversion.CheckpointLogical, SchemaVersion: "fixture/v1"},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := uuid.NewString()
+	control := &fakeControl{version: 1, assignment: &runtimev1alpha1.Assignment{
+		Identity: &runtimev1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: attemptID, FencingToken: 1},
+		RunId:    uuid.NewString(), TaskId: uuid.NewString(), AgentVersionRef: "fixture@0.9.0",
+		Goal: "execute", WorkloadSpecJson: []byte("{}"), AgentVersionSpecJson: specJSON,
+		RuntimeClass: "remote", RuntimePoolId: "remote-pool", RuntimeInstanceId: "adapter-1",
+		AttemptVersion: 1, LeaseVersion: 1,
+	}}
+	artifacts := &memoryArtifacts{content: map[string][]byte{}}
+	worker, err := NewWorker(control, artifacts, server.URL, "tenant-a", "adapter-1", 30*time.Second, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if control.completed == nil || control.completed.GetResult() == nil {
+		t.Fatalf("adapter worker did not complete with a durable result; failure=%s", control.failure)
+	}
+	if control.checkpoints != 1 {
+		t.Fatalf("logical checkpoint commits=%d, want 1", control.checkpoints)
+	}
+	artifacts.mu.Lock()
+	result := artifacts.content[control.completed.GetResult().GetUri()]
+	artifacts.mu.Unlock()
+	if !bytes.Contains(result, []byte("\"provider\":\"adapter-http\"")) ||
+		!bytes.Contains(result, []byte("\"adapter\":\"complete\"")) {
+		t.Fatalf("unexpected adapter result: %s", result)
+	}
+}
+
+func TestWorkerHonorsCheckpointNone(t *testing.T) {
+	host, err := agent.NewHost(&runtimeFixture{state: map[string]json.RawMessage{}}, agent.HostOptions{Adapter: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	spec := agentversion.Spec{
+		RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
+		Runtimes: []agentversion.RuntimeTarget{{
+			Class: "remote", Interface: agentversion.RuntimeInterfaceV1Alpha1,
+			RuntimeABI: "agentos.remote/v1", Entrypoint: []string{server.URL},
+		}},
+		Capabilities: &agentversion.Capabilities{
+			Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{},
+		},
+		Resources:  &agentversion.ResourceLimits{CPUMillis: 100, MemoryMiB: 128},
+		Budget:     &agentversion.Budget{WallSeconds: 60},
+		Checkpoint: &agentversion.CheckpointPolicy{Mode: agentversion.CheckpointNone},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := &fakeControl{version: 1, assignment: &runtimev1alpha1.Assignment{
+		Identity: &runtimev1alpha1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1},
+		RunId:    uuid.NewString(), TaskId: uuid.NewString(), AgentVersionRef: "fixture@0.9.0",
+		Goal: "execute", WorkloadSpecJson: []byte("{}"), AgentVersionSpecJson: specJSON,
+		RuntimeClass: "remote", RuntimePoolId: "remote-pool", RuntimeInstanceId: "adapter-1",
+		AttemptVersion: 1, LeaseVersion: 1,
+	}}
+	artifacts := &memoryArtifacts{content: map[string][]byte{}}
+	worker, err := NewWorker(control, artifacts, server.URL, "tenant-a", "adapter-1", 30*time.Second, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || !processed || control.completed == nil {
+		t.Fatalf("processed=%v completed=%v error=%v failure=%s", processed, control.completed != nil, err, control.failure)
+	}
+	if control.checkpoints != 0 {
+		t.Fatalf("checkpoint-none publication committed %d checkpoints", control.checkpoints)
+	}
+}

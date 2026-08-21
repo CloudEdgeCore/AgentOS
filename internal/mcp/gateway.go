@@ -46,6 +46,10 @@ type ToolInvoker interface {
 	ListTools(context.Context, string) ([]store.ToolDescriptor, error)
 }
 
+type versionedToolLister interface {
+	ListToolsForAgent(context.Context, string, string) ([]store.ToolDescriptor, error)
+}
+
 // ToolAdapter exposes a Tool Gateway as an MCP tools server. Mapping rules
 // (documented, v0.1):
 //   - MCP tool name is the descriptor name; version and risk ride in the
@@ -74,7 +78,7 @@ func (a *ToolAdapter) ListTools(ctx context.Context, params json.RawMessage) (an
 	if err != nil {
 		return nil, unauthorizedError(err)
 	}
-	descriptors, err := a.invoker.ListTools(ctx, identity.TenantID)
+	descriptors, err := a.listTools(ctx, identity)
 	if err != nil {
 		return nil, &Error{Code: codeInternalError, Message: "list tools"}
 	}
@@ -115,7 +119,7 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 		// refused as a tool outcome, not a protocol failure.
 		return toolErrorResult("no fenced attempt identity"), nil
 	}
-	descriptors, err := a.invoker.ListTools(ctx, identity.TenantID)
+	descriptors, err := a.listTools(ctx, identity)
 	if err != nil {
 		return nil, &Error{Code: codeInternalError, Message: "resolve tool descriptor"}
 	}
@@ -155,6 +159,13 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 	default:
 		return toolErrorResult("unexpected outcome: " + string(result.Outcome)), nil
 	}
+}
+
+func (a *ToolAdapter) listTools(ctx context.Context, identity AttemptContext) ([]store.ToolDescriptor, error) {
+	if versioned, ok := a.invoker.(versionedToolLister); ok {
+		return versioned.ListToolsForAgent(ctx, identity.TenantID, identity.AgentVersionRef)
+	}
+	return a.invoker.ListTools(ctx, identity.TenantID)
 }
 
 // textResult wraps an output document as an MCP text content item.
