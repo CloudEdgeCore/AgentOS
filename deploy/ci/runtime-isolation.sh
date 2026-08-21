@@ -40,6 +40,7 @@ cap_eff="$(awk "/^CapEff:/{print \$2}" /proc/self/status)"
 no_new_privs="$(awk "/^NoNewPrivs:/{print \$2}" /proc/self/status)"
 seccomp="$(awk "/^Seccomp:/{print \$2}" /proc/self/status)"
 interfaces="$(ls -1 /sys/class/net | sort | tr "\n" " ")"
+unexpected_interfaces="$(printf "%s\n" "$interfaces" | tr " " "\n" | grep -Ev "^(|lo)$" || true)"
 printf "observed isolation: CapEff=%s NoNewPrivs=%s Seccomp=%s interfaces=%s\n" \
   "$cap_eff" "$no_new_privs" "$seccomp" "$interfaces" >&2
 test "$cap_eff" = "0000000000000000" || exit 11
@@ -56,8 +57,13 @@ if dd if=/dev/zero of=/agentos/workspace/over-limit bs=1048576 count=9 2>/dev/nu
   echo "workspace tmpfs exceeded its 8 MiB limit" >&2
   exit 16
 fi
-test "$interfaces" = "lo " || exit 17
+test -z "$unexpected_interfaces" || exit 17
 echo "read-only rootfs, bounded workspace, zero capabilities, seccomp, and network isolation: PASS"'
+
+if ! grep -Eq '^[[:space:]]*network = "none"$' "$RUNTIME_CONFIG"; then
+  echo "runsc runtime config does not fail closed to network=none" >&2
+  exit 1
+fi
 
 echo ">> asserting OCI/gVisor sandbox isolation (bounded 120s)"
 if ! timeout --signal=KILL 120 ctr -n "$NAMESPACE" run \
