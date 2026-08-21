@@ -43,7 +43,9 @@ interfaces="$(ls -1 /sys/class/net | sort | tr "\n" " ")"
 printf "observed isolation: CapEff=%s NoNewPrivs=%s Seccomp=%s interfaces=%s\n" \
   "$cap_eff" "$no_new_privs" "$seccomp" "$interfaces" >&2
 test "$cap_eff" = "0000000000000000" || exit 11
-test "$no_new_privs" = "1" || exit 12
+# gVisor enforces this boundary from the OCI contract but does not reliably
+# expose the host PR_SET_NO_NEW_PRIVS bit through its virtual /proc. Assert the
+# exact OCI field against containerd's stored spec in the host-side probe below.
 test "$seccomp" = "2" || exit 13
 if touch /agentos-rootfs-must-remain-read-only 2>/dev/null; then
   echo "root filesystem is writable" >&2
@@ -55,7 +57,7 @@ if dd if=/dev/zero of=/agentos/workspace/over-limit bs=1048576 count=9 2>/dev/nu
   exit 16
 fi
 test "$interfaces" = "lo " || exit 17
-echo "read-only rootfs, bounded workspace, zero capabilities, no-new-privileges, seccomp, and network isolation: PASS"'
+echo "read-only rootfs, bounded workspace, zero capabilities, seccomp, and network isolation: PASS"'
 
 echo ">> asserting OCI/gVisor sandbox isolation (bounded 120s)"
 if ! timeout --signal=KILL 120 ctr -n "$NAMESPACE" run \
@@ -82,9 +84,10 @@ fi
 echo ">> OCI/gVisor isolation assertion: PASS"
 
 # Keep a sandbox alive long enough to validate the host-side OCI contract: the
-# limits must be present in the stored spec, and the sandbox process must run
-# in both a non-host user namespace and a dedicated cgroup.
-echo ">> asserting host-side namespace, cgroup, and resource isolation"
+# security controls and limits must be present in the stored spec, and the
+# sandbox process must run in both a non-host user namespace and a dedicated
+# cgroup.
+echo ">> asserting host-side OCI contract, namespace, cgroup, and resource isolation"
 timeout 120 ctr -n "$NAMESPACE" run \
   --detach \
   --runtime "$RUNTIME" \
@@ -99,7 +102,20 @@ timeout 120 ctr -n "$NAMESPACE" run \
   /bin/sleep 120 </dev/null
 
 timeout 15 ctr -n "$NAMESPACE" containers info --spec "$HOST_PROBE_ID" |
-  jq -e '.linux.resources.cpu.quota == 100000 and .linux.resources.memory.limit == 67108864' >/dev/null
+  jq -e '
+    .linux.resources.cpu.quota == 100000 and
+    .linux.resources.memory.limit == 67108864 and
+    .process.noNewPrivileges == true and
+    .root.readonly == true and
+    .linux.seccomp != null and
+    ([
+      .process.capabilities.bounding[]?,
+      .process.capabilities.effective[]?,
+      .process.capabilities.inheritable[]?,
+      .process.capabilities.permitted[]?,
+      .process.capabilities.ambient[]?
+    ] | length == 0)
+  ' >/dev/null
 timeout 15 ctr -n "$NAMESPACE" containers info "$HOST_PROBE_ID" |
   jq -e --arg runtime "$RUNTIME" '(.Runtime.Name // .runtime.name) == $runtime' >/dev/null
 TASK_PID="$(ctr -n "$NAMESPACE" tasks list | awk -v id="$HOST_PROBE_ID" '$1 == id { print $2 }')"
@@ -115,7 +131,7 @@ if cmp -s "/proc/${TASK_PID}/cgroup" /proc/1/cgroup; then
   echo "gVisor sandbox shares the host root cgroup" >&2
   exit 1
 fi
-echo ">> host-side namespace, cgroup, and resource isolation: PASS"
+echo ">> host-side OCI contract, namespace, cgroup, and resource isolation: PASS"
 timeout 30 ctr -n "$NAMESPACE" tasks delete --force "$HOST_PROBE_ID" >/dev/null
 timeout 30 ctr -n "$NAMESPACE" containers delete "$HOST_PROBE_ID" >/dev/null
 
