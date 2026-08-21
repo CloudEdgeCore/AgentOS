@@ -160,7 +160,9 @@ jobs:
       RUNSC_TAG: "20260810.0"
       RUNSC_PLATFORM: ptrace
       RUNSC_NETWORK: none
-      RUNSC_SYSTEMD_CGROUP: "true"
+      # ctr emits a cgroupfs-style OCI path. The runsc systemd driver expects
+      # systemd slice:prefix:name syntax, so use runsc's cgroupfs driver here.
+      RUNSC_SYSTEMD_CGROUP: "false"
 
     steps:
       - name: Check out source

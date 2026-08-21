@@ -93,11 +93,20 @@ mkdir -p /etc/containerd
 RUNSC_CONFIG_PATH="${RUNSC_CONFIG_PATH:-/etc/containerd/runsc.toml}"
 RUNSC_PLATFORM="${RUNSC_PLATFORM:-ptrace}"
 RUNSC_NETWORK="${RUNSC_NETWORK:-none}"
-RUNSC_SYSTEMD_CGROUP="${RUNSC_SYSTEMD_CGROUP:-true}"
+RUNSC_SYSTEMD_CGROUP="${RUNSC_SYSTEMD_CGROUP:-false}"
 RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
 CONTAINERD_SOCKET_GID="${CONTAINERD_SOCKET_GID:-${SUDO_GID:-0}}"
 mkdir -p /tmp/agentos-runsc
+# Keep runsc beside its release-bundled gvisor-bin sidecars, but interpose a
+# tiny launcher so a pre-log initialization failure is never invisible in CI.
+touch /tmp/agentos-runsc/runsc.stderr.log
+cat > /usr/local/bin/agentos-runsc <<'EOF'
+#!/bin/sh
+exec /usr/local/bin/runsc "$@" 2>>/tmp/agentos-runsc/runsc.stderr.log
+EOF
+chmod 0755 /usr/local/bin/agentos-runsc
 cat > "$RUNSC_CONFIG_PATH" <<EOF
+binary_name = "/usr/local/bin/agentos-runsc"
 log_path = "/tmp/agentos-runsc/shim.log"
 log_level = "debug"
 
