@@ -161,13 +161,13 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 	go func() {
 		runErr := command.Run()
 		_ = spoolWriter.Close()
-		result, _ := outcomeFor(runErr, startedAt)
+		result, outcomeErr := outcomeFor(runErr, startedAt)
 		result.Stdout = <-stdoutRef
 		result.StdoutTruncated = <-stdoutTruncated
 		if spoolErr := <-spoolErr; spoolErr != nil && spoolErr != io.ErrClosedPipe && runErr == nil {
 			result.FailureCode = "output_spool_failed"
 		}
-		done <- executionOutcome{result: result, err: runErr}
+		done <- executionOutcome{result: result, err: outcomeErr}
 		_ = os.RemoveAll(inputDir)
 	}()
 	return &ctrExecution{executor: e, containerID: containerID, done: done}, nil

@@ -93,6 +93,49 @@ exit 0
 	}
 }
 
+func TestRunscExecutorClassifiesWorkloadExitStatus(t *testing.T) {
+	dir := t.TempDir()
+	ctrPath := filepath.Join(dir, "ctr")
+	const fakeCtr = `#!/bin/sh
+case " $* " in
+  *" run "*) exit 7 ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(ctrPath, []byte(fakeCtr), 0o700); err != nil {
+		t.Fatalf("write fake ctr: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	executor, err := NewRunscExecutor(WithSkipPull())
+	if err != nil {
+		t.Fatalf("new runsc executor: %v", err)
+	}
+	execution, err := executor.Prepare(context.Background(), ExecutionSpec{
+		TenantID:         "tenant-a",
+		AttemptID:        "attempt-exit-7",
+		AgentVersionRef:  "exit@1.0.0",
+		WorkloadSpecJSON: []byte(`{"kind":"Task"}`),
+		ImageRef:         "example.invalid/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		WorkspaceBytes:   64 << 20,
+		CPUQuotaMillis:   250,
+		MemoryLimitMiB:   128,
+	})
+	if err != nil {
+		t.Fatalf("prepare sandbox: %v", err)
+	}
+	result, err := execution.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("workload exit must not be classified as ctr failure: %v", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("exit code = %d, want 7", result.ExitCode)
+	}
+	if err := executor.Destroy(context.Background(), execution); err != nil {
+		t.Fatalf("destroy sandbox: %v", err)
+	}
+}
+
 func containsSequence(values, sequence []string) bool {
 	if len(sequence) == 0 || len(sequence) > len(values) {
 		return false
