@@ -90,16 +90,7 @@ RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
 CONTAINERD_SOCKET_GID="${CONTAINERD_SOCKET_GID:-${SUDO_GID:-0}}"
 RUNSC_LOG_DIR="/var/log/agentos-runsc"
 mkdir -p "$RUNSC_LOG_DIR"
-# Keep runsc beside its release-bundled gvisor-bin sidecars, but interpose a
-# tiny launcher so a pre-log initialization failure is never invisible in CI.
-touch "$RUNSC_LOG_DIR/runsc.stderr.log"
-cat > /usr/local/bin/agentos-runsc <<'EOF'
-#!/bin/sh
-exec /usr/local/bin/runsc "$@" 2>>/var/log/agentos-runsc/runsc.stderr.log
-EOF
-chmod 0755 /usr/local/bin/agentos-runsc
 cat > "$RUNSC_CONFIG_PATH" <<EOF
-binary_name = "/usr/local/bin/agentos-runsc"
 log_path = "${RUNSC_LOG_DIR}/shim.log"
 log_level = "debug"
 
@@ -112,7 +103,6 @@ log_level = "debug"
   # runsc expands %COMMAND%, giving create/gofer/boot dedicated logs without
   # relying on shim-specific path interpolation.
   debug-log = "${RUNSC_LOG_DIR}/gvisor.%COMMAND%.log"
-  alsologtostderr = "true"
 EOF
 
 # Validate the pinned runtime itself before involving containerd. This keeps a
