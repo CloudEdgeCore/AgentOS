@@ -151,13 +151,14 @@ type RunscOption func(*ctrExecutor)
 // here (platform-neutral fields) so the non-Linux stub can name the type; its
 // constructor and methods are Linux-only and live in runsc_linux.go.
 type ctrExecutor struct {
-	ctrPath     string
-	namespace   string
-	runtime     string
-	snapshotter string
-	skipPull    bool
-	pullTimeout time.Duration
-	outputLimit int64
+	ctrPath           string
+	namespace         string
+	runtime           string
+	runtimeConfigPath string
+	snapshotter       string
+	skipPull          bool
+	pullTimeout       time.Duration
+	outputLimit       int64
 	// active tracks sandbox container IDs owned by live executions so the
 	// preflight reaper never deletes a running workload.
 	mu     sync.Mutex
@@ -172,6 +173,13 @@ func WithNamespace(namespace string) RunscOption {
 // WithRuntime sets the containerd runtime name (default "io.containerd.runsc.v1").
 func WithRuntime(runtime string) RunscOption {
 	return func(e *ctrExecutor) { e.runtime = runtime }
+}
+
+// WithRuntimeConfigPath sets the gVisor shim configuration passed to ctr.
+// The runsc shim does not read containerd's CRI runtime configuration when
+// invoked directly by ctr, so every sandbox run must carry this path.
+func WithRuntimeConfigPath(path string) RunscOption {
+	return func(e *ctrExecutor) { e.runtimeConfigPath = path }
 }
 
 // WithSnapshotter sets the containerd snapshotter for sandbox rootfs mounts

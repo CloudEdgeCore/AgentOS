@@ -46,3 +46,6 @@ fi
 
 echo "oci.namespace=${AGENTOS_OCI_CONTAINERD_NAMESPACE:-unset}"
 echo "oci.image=${AGENTOS_OCI_IMAGE:-unset}"
+echo "oci.containerd_address=${CONTAINERD_ADDRESS:-unset}"
+echo "oci.runtime_config=${AGENTOS_OCI_RUNTIME_CONFIG:-unset}"
+echo "oci.snapshotter=${AGENTOS_OCI_SNAPSHOTTER:-unset}"

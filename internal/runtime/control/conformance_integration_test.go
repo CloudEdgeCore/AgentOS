@@ -84,7 +84,7 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 	t.Run("reference-go", func(t *testing.T) {
 		scenario := scenario{
 			key: "conformance-reference", runtimeClass: "oci", instanceID: "worker-reference-1",
-			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}}`,
+			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":8388608,"llmConcurrency":1}}`,
 			provider: referenceProvider, runtimeABI: referenceABI, checkpoint: referenceSchema,
 		}
 		env.prepareScenario(t, scenario)
@@ -104,10 +104,10 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 	})
 
 	// The OCI/gVisor leg runs only on a host with containerd + runsc: point
-	// AGENTOS_OCI_CONTAINERD_NAMESPACE (and optionally AGENTOS_OCI_IMAGE /
-	// AGENTOS_OCI_RUNTIME) at the sandbox host. CI hosts without the sandbox
-	// skip the leg; the provider binary itself is built and unit-tested in CI
-	// regardless.
+	// AGENTOS_OCI_CONTAINERD_NAMESPACE (and optionally AGENTOS_OCI_IMAGE,
+	// AGENTOS_OCI_RUNTIME, and AGENTOS_OCI_RUNTIME_CONFIG) at the sandbox host.
+	// CI hosts without the sandbox skip the leg; the provider binary itself is
+	// built and unit-tested in CI regardless.
 	t.Run("oci", func(t *testing.T) {
 		namespace := os.Getenv("AGENTOS_OCI_CONTAINERD_NAMESPACE")
 		if namespace == "" {
@@ -115,7 +115,7 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 		}
 		scenario := scenario{
 			key: "conformance-oci", runtimeClass: "oci", instanceID: "worker-oci-1",
-			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}}`,
+			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":8388608,"llmConcurrency":1}}`,
 			provider: ociProvider, runtimeABI: ociABI, checkpoint: ociSchema,
 		}
 		env.prepareScenario(t, scenario)
@@ -285,19 +285,19 @@ func (env *conformanceEnv) driveWasmtimeWorker(t *testing.T) {
 }
 
 // driveOCIWorker spawns the OCI/gVisor provider process against a
-// containerd + runsc host. The image reference defaults to
-// docker.io/library/alpine:latest (a shellable image the workload spec can
-// use); CI sandbox hosts override it with a digest-pinned image.
+// containerd + runsc host. The image reference defaults to the same immutable,
+// shellable Alpine image used by CI.
 func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 	t.Helper()
 	imageRef := os.Getenv("AGENTOS_OCI_IMAGE")
 	if imageRef == "" {
-		imageRef = "docker.io/library/alpine:latest"
+		imageRef = "docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 	}
 	runtimeName := os.Getenv("AGENTOS_OCI_RUNTIME")
 	if runtimeName == "" {
 		runtimeName = "io.containerd.runsc.v1"
 	}
+	runtimeConfig := os.Getenv("AGENTOS_OCI_RUNTIME_CONFIG")
 	// Snapshotter for sandbox rootfs (v0.7): nested environments (containerd
 	// inside a container) cannot mount overlay-on-overlay and must set
 	// AGENTOS_OCI_SNAPSHOTTER=native.
@@ -317,6 +317,9 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		"--containerd-runtime", runtimeName,
 		"--skip-image-pull",
 		"--heartbeat-ttl", "30s",
+	}
+	if runtimeConfig != "" {
+		commandArgs = append(commandArgs, "--runtime-config-path", runtimeConfig)
 	}
 	if snapshotter != "" {
 		commandArgs = append(commandArgs, "--containerd-snapshotter", snapshotter)
