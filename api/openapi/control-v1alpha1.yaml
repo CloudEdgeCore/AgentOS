@@ -1,0 +1,158 @@
+openapi: 3.1.0
+info:
+  title: Agent OS Control API
+  version: v1alpha1
+  description: Public task submission and observation contract. Task status is kernel-owned.
+servers:
+  - url: https://control.agentos.dev
+paths:
+  /v1/tasks:
+    post:
+      operationId: createTask
+      summary: Submit a durable task
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+      responses:
+        '202':
+          description: A new task was accepted.
+          headers:
+            Location:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '200':
+          description: The idempotent request already exists.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, const: 'true' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/tasks/{taskId}:
+    get:
+      operationId: getTask
+      summary: Read a task in the authenticated tenant
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: Current durable task state.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+  responses:
+    Problem:
+      description: Structured request failure.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    CreateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [agentVersionRef, goal, namespace, spec]
+      properties:
+        agentVersionRef: { type: string, minLength: 1, maxLength: 512 }
+        goal: { type: string, minLength: 1, maxLength: 16384 }
+        namespace: { type: string, minLength: 1, maxLength: 255 }
+        spec: { type: object, additionalProperties: true }
+    Task:
+      type: object
+      additionalProperties: false
+      required:
+        - apiVersion
+        - kind
+        - id
+        - tenantId
+        - namespace
+        - agentVersionRef
+        - goal
+        - spec
+        - phase
+        - resourceVersion
+        - createdAt
+        - updatedAt
+        - traceId
+      properties:
+        apiVersion: { type: string, const: agentos.dev/v1alpha1 }
+        kind: { type: string, const: Task }
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        namespace: { type: string }
+        agentVersionRef: { type: string }
+        goal: { type: string }
+        spec: { type: object, additionalProperties: true }
+        phase:
+          type: string
+          enum: [QUEUED, ADMITTED, RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, REJECTED]
+        activeRunId: { type: [string, 'null'], format: uuid }
+        resultRef: { type: [string, 'null'] }
+        reasonCode: { type: [string, 'null'] }
+        resourceVersion: { type: integer, format: int64, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, instance, reasonCode, traceId]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string }
+        reasonCode: { type: string }
+        traceId: { type: string, format: uuid }
+security:
+  - bearerAuth: []

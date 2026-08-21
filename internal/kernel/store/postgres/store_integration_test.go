@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
 	"github.com/bian-cloud-skill/agentos/internal/platform/migrate"
@@ -246,6 +248,170 @@ func TestExpiredLeaseIssuesNewFenceAndRejectsOldOwner(t *testing.T) {
 	}
 }
 
+func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
+	clock := newFakeClock()
+	pool, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1",
+		Goal: "controller chain", IdempotencyKey: "controller-chain",
+		Spec: []byte(`{
+			"priority":70,
+			"deadline":"2099-08-14T12:00:00Z",
+			"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
+			"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","dataResidency":"cn","artifactRegion":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	engine := admission.New(admission.Limits{
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10,
+		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
+	})
+	admissionController := admission.NewController(repository, engine, "admission-1", 10, time.Minute)
+	processed, err := admissionController.Reconcile(ctx)
+	if err != nil || processed != 1 {
+		t.Fatalf("admission reconcile processed=%d err=%v", processed, err)
+	}
+	admitted, err := repository.GetTask(ctx, "tenant-a", created.Task.ID)
+	if err != nil {
+		t.Fatalf("get admitted task: %v", err)
+	}
+	if admitted.Phase != domain.TaskAdmitted || admitted.AdmissionReasonCode != "ADMISSION_PASSED" {
+		t.Fatalf("unexpected admission state: %+v", admitted)
+	}
+
+	schedulerController := scheduler.NewController(repository, staticPools{{
+		ID: "pool-cn-1", RuntimeClass: "oci", RuntimeInstanceID: "worker-cn-1",
+		Region: "cn-east", DataResidency: "cn", Ready: true, AvailableCPU: 2000,
+		AvailableMemory: 4096, AvailableLLMSlots: 4, ArtifactRegions: []string{"cn-east"},
+	}}, "scheduler-1", 10, time.Minute, 30*time.Second)
+	processed, err = schedulerController.Reconcile(ctx)
+	if err != nil || processed != 1 {
+		t.Fatalf("scheduler reconcile processed=%d err=%v", processed, err)
+	}
+	running, err := repository.GetTask(ctx, "tenant-a", created.Task.ID)
+	if err != nil {
+		t.Fatalf("get running task: %v", err)
+	}
+	if running.Phase != domain.TaskRunning || running.ActiveRunID == nil {
+		t.Fatalf("task was not scheduled: %+v", running)
+	}
+	var attempts, leases int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM attempts WHERE tenant_id = $1 AND runtime_pool_id = 'pool-cn-1'),
+		(SELECT count(*) FROM runtime_leases WHERE tenant_id = $1 AND released_at IS NULL)`, "tenant-a").Scan(&attempts, &leases); err != nil {
+		t.Fatalf("read scheduled objects: %v", err)
+	}
+	if attempts != 1 || leases != 1 {
+		t.Fatalf("attempts=%d leases=%d, want 1/1", attempts, leases)
+	}
+}
+
+func TestControllerClaimFencingAndOutboxOwnership(t *testing.T) {
+	clock := newFakeClock()
+	_, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1",
+		Goal: "claim fencing", Spec: []byte(`{}`), IdempotencyKey: "claim-fencing",
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	oldClaims, err := repository.ClaimTasks(ctx, kernelstore.ClaimTasksInput{
+		Kind: kernelstore.ControllerAdmission, Phase: domain.TaskQueued, OwnerID: "old", Limit: 1, TTL: time.Second,
+	})
+	if err != nil || len(oldClaims) != 1 {
+		t.Fatalf("claim old controller: claims=%d err=%v", len(oldClaims), err)
+	}
+	clock.Advance(2 * time.Second)
+	newClaims, err := repository.ClaimTasks(ctx, kernelstore.ClaimTasksInput{
+		Kind: kernelstore.ControllerAdmission, Phase: domain.TaskQueued, OwnerID: "new", Limit: 1, TTL: time.Minute,
+	})
+	if err != nil || len(newClaims) != 1 {
+		t.Fatalf("claim new controller: claims=%d err=%v", len(newClaims), err)
+	}
+	if newClaims[0].FencingToken <= oldClaims[0].FencingToken {
+		t.Fatalf("claim token did not increase: old=%d new=%d", oldClaims[0].FencingToken, newClaims[0].FencingToken)
+	}
+	_, err = repository.DecideAdmission(ctx, kernelstore.DecideAdmissionInput{
+		TaskID: created.Task.ID, TenantID: "tenant-a", OwnerID: "old",
+		ClaimFencingToken: oldClaims[0].FencingToken, ExpectedTaskVersion: 1,
+		Admit: true, ReasonCode: "ADMISSION_PASSED", EvaluatorVersion: "test/v1",
+	})
+	if !errors.Is(err, kernelstore.ErrFenced) {
+		t.Fatalf("expected stale controller fencing, got %v", err)
+	}
+
+	events, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-a", Limit: 10, LockTTL: time.Minute})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("claim outbox: events=%d err=%v", len(events), err)
+	}
+	other, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-b", Limit: 10, LockTTL: time.Minute})
+	if err != nil || len(other) != 0 {
+		t.Fatalf("second dispatcher stole event: events=%d err=%v", len(other), err)
+	}
+	if err := repository.MarkOutboxPublished(ctx, events[0].ID, "dispatcher-b", events[0].LockFencingToken, clock.Now()); !errors.Is(err, kernelstore.ErrFenced) {
+		t.Fatalf("expected outbox owner fencing, got %v", err)
+	}
+	clock.Advance(2 * time.Minute)
+	if err := repository.MarkOutboxPublished(ctx, events[0].ID, "dispatcher-a", events[0].LockFencingToken, clock.Now()); !errors.Is(err, kernelstore.ErrFenced) {
+		t.Fatalf("expected expired outbox claim fencing, got %v", err)
+	}
+	reclaimed, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-a", Limit: 10, LockTTL: time.Minute})
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("reclaim outbox: events=%d err=%v", len(reclaimed), err)
+	}
+	if reclaimed[0].LockFencingToken <= events[0].LockFencingToken {
+		t.Fatalf("outbox token did not increase: old=%d new=%d", events[0].LockFencingToken, reclaimed[0].LockFencingToken)
+	}
+	if err := repository.MarkOutboxPublished(ctx, events[0].ID, "dispatcher-a", events[0].LockFencingToken, clock.Now()); !errors.Is(err, kernelstore.ErrFenced) {
+		t.Fatalf("expected reused dispatcher ID to require the new token, got %v", err)
+	}
+	if err := repository.MarkOutboxPublished(ctx, reclaimed[0].ID, "dispatcher-a", reclaimed[0].LockFencingToken, clock.Now()); err != nil {
+		t.Fatalf("publish owned event: %v", err)
+	}
+}
+
+func TestOutboxClaimsOnlyTheNextAggregateVersion(t *testing.T) {
+	clock := newFakeClock()
+	_, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1",
+		Goal: "ordered outbox", Spec: []byte(`{}`), IdempotencyKey: "ordered-outbox",
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	claims, err := repository.ClaimTasks(ctx, kernelstore.ClaimTasksInput{
+		Kind: kernelstore.ControllerAdmission, Phase: domain.TaskQueued, OwnerID: "admission", Limit: 1, TTL: time.Minute,
+	})
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claim task: claims=%d err=%v", len(claims), err)
+	}
+	if _, err := repository.DecideAdmission(ctx, kernelstore.DecideAdmissionInput{
+		TaskID: created.Task.ID, TenantID: "tenant-a", OwnerID: "admission",
+		ClaimFencingToken: claims[0].FencingToken, ExpectedTaskVersion: 1,
+		Admit: true, ReasonCode: "ADMISSION_PASSED", EvaluatorVersion: "test/v1",
+	}); err != nil {
+		t.Fatalf("admit task: %v", err)
+	}
+	first, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "first", Limit: 10, LockTTL: time.Minute})
+	if err != nil || len(first) != 1 || first[0].AggregateVersion != 1 {
+		t.Fatalf("first aggregate claim=%+v err=%v", first, err)
+	}
+	if err := repository.MarkOutboxPublished(ctx, first[0].ID, "first", first[0].LockFencingToken, clock.Now()); err != nil {
+		t.Fatalf("publish first version: %v", err)
+	}
+	second, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "second", Limit: 10, LockTTL: time.Minute})
+	if err != nil || len(second) != 1 || second[0].AggregateVersion != 2 {
+		t.Fatalf("second aggregate claim=%+v err=%v", second, err)
+	}
+}
+
 func createAdmittedRun(t *testing.T, ctx context.Context, store *postgresstore.Store, key string) (kernelstore.Task, kernelstore.Run) {
 	t.Helper()
 	created, err := store.CreateTask(ctx, kernelstore.CreateTaskInput{
@@ -297,6 +463,12 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 type fakeClock struct {
 	mu  sync.Mutex
 	now time.Time
+}
+
+type staticPools []scheduler.RuntimePool
+
+func (s staticPools) ListRuntimePools(context.Context, string) ([]scheduler.RuntimePool, error) {
+	return s, nil
 }
 
 func newFakeClock() *fakeClock {

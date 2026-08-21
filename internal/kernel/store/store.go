@@ -29,21 +29,23 @@ var (
 )
 
 type Task struct {
-	ID                uuid.UUID
-	TenantID          string
-	Namespace         string
-	AgentVersionRef   string
-	Goal              string
-	Spec              json.RawMessage
-	RequestHash       [32]byte
-	IdempotencyKey    string
-	Phase             domain.TaskPhase
-	CancelRequestedAt *time.Time
-	ActiveRunID       *uuid.UUID
-	ResultRef         string
-	ResourceVersion   int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                  uuid.UUID
+	TenantID            string
+	Namespace           string
+	AgentVersionRef     string
+	Goal                string
+	Spec                json.RawMessage
+	RequestHash         [32]byte
+	IdempotencyKey      string
+	Phase               domain.TaskPhase
+	AdmissionReasonCode string
+	AdmittedAt          *time.Time
+	CancelRequestedAt   *time.Time
+	ActiveRunID         *uuid.UUID
+	ResultRef           string
+	ResourceVersion     int64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 type Run struct {
@@ -68,6 +70,7 @@ type Attempt struct {
 	Ordinal           int
 	Phase             domain.AttemptPhase
 	RuntimeClass      string
+	RuntimePoolID     string
 	RuntimeInstanceID string
 	FencingToken      int64
 	FailureCode       string

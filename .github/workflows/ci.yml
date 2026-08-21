@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:18-alpine
+        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_DB: agentos_test
           POSTGRES_USER: agentos
@@ -33,6 +33,7 @@ jobs:
 
     env:
       AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
+      AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
 
     steps:
       - name: Check out source
@@ -44,6 +45,9 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: go.sum
 
+      - name: Start NATS JetStream
+        run: docker run --detach --name agentos-nats --publish 4222:4222 nats:2.14.1-alpine@sha256:ea17b9b7f74279b9239cf65e5786c0133e9a7c353bf218d29004abf2e7a33181 --jetstream
+
       - name: Verify module graph
         run: go mod verify
 
@@ -53,11 +57,14 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Scan reachable Go vulnerabilities
+        run: go tool govulncheck ./...
+
       - name: Unit tests with race detector
         run: go test -race -count=1 ./...
 
       - name: PostgreSQL integration tests with race detector
         run: go test -race -tags=integration -count=1 ./...
 
-      - name: Build migration command
-        run: go build ./cmd/agentos-migrate
+      - name: Build control-plane commands
+        run: go build ./cmd/...
