@@ -35,12 +35,23 @@ var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,127})$`)
 // imageDigestPattern bounds version-level image pins to sha256 digests.
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
-// Spec is the bounded subset of the published AgentVersion spec that v0.1
-// kernel stages consume. Unknown fields are preserved verbatim in the stored
-// document for later stages; they are not part of this vocabulary yet.
+// Spec is the bounded AgentVersion vocabulary consumed by the kernel. Legacy
+// fields remain valid while v0.9 portable runtime and capability declarations
+// are validated when present. Unknown fields are preserved in stored specs so
+// additive compatibility can be maintained across later stages.
 type Spec struct {
 	RuntimeClassPolicy RuntimeClassPolicy `json:"runtimeClassPolicy,omitempty"`
 	Lifecycle          Lifecycle          `json:"lifecycle,omitempty"`
+	// Runtimes declares the portable launch targets shipped by this version.
+	// Each target binds a runtime class to the stable Runtime Interface, a
+	// provider ABI and an argv entrypoint.
+	Runtimes []RuntimeTarget `json:"runtimes,omitempty"`
+	// Capabilities are policy identifiers, not network endpoints or secret
+	// values. Adapters map them to the corresponding Kernel gateways.
+	Capabilities *Capabilities     `json:"capabilities,omitempty"`
+	Resources    *ResourceLimits   `json:"resources,omitempty"`
+	Budget       *Budget           `json:"budget,omitempty"`
+	Checkpoint   *CheckpointPolicy `json:"checkpoint,omitempty"`
 	// Image pins the container image the published version is allowed to run
 	// (ADR-010). When set, admission rejects tasks whose spec pins a
 	// different image.
@@ -123,7 +134,7 @@ func CanonicalizeSpec(raw json.RawMessage) (json.RawMessage, [sha256.Size]byte, 
 	return canonical, sha256.Sum256(canonical), nil
 }
 
-// ValidateSpec checks the bounded fields that v0.1 kernel stages consume.
+// ValidateSpec checks the bounded fields that kernel stages consume.
 // Unknown fields are ignored so that later spec stages can evolve without a
 // breaking change. Failures mean the publication must be rejected.
 func ValidateSpec(raw json.RawMessage) error {
@@ -167,6 +178,9 @@ func ValidateSpec(raw json.RawMessage) error {
 		if spec.Image.Digest != "" && !imageDigestPattern.MatchString(spec.Image.Digest) {
 			return fmt.Errorf("image.digest must be sha256:<64 lowercase hex>")
 		}
+	}
+	if err := validatePlatformSpec(spec); err != nil {
+		return err
 	}
 	return nil
 }

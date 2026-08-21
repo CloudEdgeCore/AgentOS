@@ -11,6 +11,11 @@
 //	    -key-id ci-builder-1 -private-key <b64> -out package.json
 //	agentos-pkg verify -package package.json \
 //	    -trust-key ci-builder-1=<b64pub> [-trust-key ...]
+//	agentos-pkg validate-manifest -manifest agent-manifest.json \
+//	    -out canonical-agent-manifest.json
+//	agentos-pkg package-manifest -agent-manifest agent-manifest.json \
+//	    -builder ci -workflow build.yml -git-commit abc -built-at <RFC3339> \
+//	    -out package-manifest.json
 package main
 
 import (
@@ -21,13 +26,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/agentpkg"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/agentversion"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fail(nil, "usage: agentos-pkg <genkey|sign|verify> [flags]")
+		fail(nil, "usage: agentos-pkg <genkey|sign|verify|validate-manifest|package-manifest|sbom|verify-sbom> [flags]")
 	}
 	var err error
 	switch os.Args[1] {
@@ -37,16 +44,105 @@ func main() {
 		err = runSign(os.Args[2:])
 	case "verify":
 		err = runVerify(os.Args[2:])
+	case "validate-manifest":
+		err = runValidateManifest(os.Args[2:])
+	case "package-manifest":
+		err = runPackageManifest(os.Args[2:])
 	case "sbom":
 		err = runSBOM(os.Args[2:])
 	case "verify-sbom":
 		err = runVerifySBOM(os.Args[2:])
 	default:
-		fail(nil, "unknown command %q; want genkey, sign, verify, sbom or verify-sbom", os.Args[1])
+		fail(nil, "unknown command %q; want genkey, sign, verify, validate-manifest, package-manifest, sbom or verify-sbom", os.Args[1])
 	}
 	if err != nil {
 		fail(err, "")
 	}
+}
+
+// runPackageManifest bridges the v0.9 portable Agent Manifest to the existing
+// signed Agent Package pipeline. Provenance time is an explicit input so the
+// same source declaration produces byte-identical unsigned package manifests.
+func runPackageManifest(args []string) error {
+	flags := flag.NewFlagSet("package-manifest", flag.ExitOnError)
+	manifestPath := flags.String("agent-manifest", "", "strict AgentManifest JSON file")
+	builder := flags.String("builder", "", "build system identity")
+	workflow := flags.String("workflow", "", "build workflow identity")
+	gitCommit := flags.String("git-commit", "", "source git commit")
+	builtAtText := flags.String("built-at", "", "reproducible build timestamp in RFC3339 format")
+	outPath := flags.String("out", "", "output unsigned package manifest JSON file (default stdout)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" || *builder == "" || *workflow == "" || *gitCommit == "" || *builtAtText == "" {
+		return errors.New("-agent-manifest, -builder, -workflow, -git-commit and -built-at are required")
+	}
+	builtAt, err := time.Parse(time.RFC3339, *builtAtText)
+	if err != nil {
+		return fmt.Errorf("parse -built-at: %w", err)
+	}
+	raw, err := os.ReadFile(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("read agent manifest: %w", err)
+	}
+	manifest, _, _, err := agentversion.DecodeManifest(raw)
+	if err != nil {
+		return err
+	}
+	spec, err := json.Marshal(manifest.Spec)
+	if err != nil {
+		return fmt.Errorf("canonicalize agent manifest spec: %w", err)
+	}
+	packageManifest := agentpkg.Manifest{
+		Schema: agentpkg.ManifestSchema, AgentVersionRef: manifest.Ref(),
+		SpecDigest: agentpkg.SpecSHA256(spec), Spec: spec,
+		Provenance: agentpkg.Provenance{
+			Builder: *builder, BuildWorkflow: *workflow, GitCommit: *gitCommit, BuiltAt: builtAt.UTC(),
+		},
+	}
+	if err := packageManifest.Validate(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(packageManifest)
+	if err != nil {
+		return fmt.Errorf("encode package manifest: %w", err)
+	}
+	if *outPath == "" {
+		fmt.Println(string(encoded))
+		return nil
+	}
+	if err := os.WriteFile(*outPath, encoded, 0o600); err != nil {
+		return fmt.Errorf("write package manifest: %w", err)
+	}
+	return nil
+}
+
+func runValidateManifest(args []string) error {
+	flags := flag.NewFlagSet("validate-manifest", flag.ExitOnError)
+	manifestPath := flags.String("manifest", "", "strict AgentManifest JSON file")
+	outPath := flags.String("out", "", "write canonical AgentManifest JSON to this file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *manifestPath == "" {
+		return errors.New("-manifest is required")
+	}
+	raw, err := os.ReadFile(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("read agent manifest: %w", err)
+	}
+	manifest, canonical, digest, err := agentversion.DecodeManifest(raw)
+	if err != nil {
+		return err
+	}
+	if *outPath != "" {
+		if err := os.WriteFile(*outPath, canonical, 0o600); err != nil {
+			return fmt.Errorf("write canonical agent manifest: %w", err)
+		}
+	}
+	fmt.Printf("manifest OK: ref=%s apiVersion=%s runtimeTargets=%d manifestDigest=%x\n",
+		manifest.Ref(), manifest.APIVersion, len(manifest.Spec.Runtimes), digest)
+	return nil
 }
 
 func runGenKey(args []string) error {

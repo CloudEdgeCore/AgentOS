@@ -535,6 +535,10 @@ type createAgentVersionRequest struct {
 	Version   string          `json:"version"`
 	Namespace string          `json:"namespace"`
 	Spec      json.RawMessage `json:"spec"`
+	// Manifest is the v0.9 portable publication contract. It is mutually
+	// exclusive with the legacy name/version/namespace/spec fields and is
+	// normalized into those fields before package admission and persistence.
+	Manifest *agentversion.Manifest `json:"manifest,omitempty"`
 	// Package is the signed Agent Package (ADR-010). With publish admission
 	// installed it is required; without it, a presented package is still
 	// verified fail-closed.
@@ -596,6 +600,11 @@ func (h *Handler) createAgentVersion(writer http.ResponseWriter, request *http.R
 	}
 	if err := requireJSONEOF(decoder); err != nil {
 		h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_JSON", err.Error(), traceID)
+		return
+	}
+	body, err = normalizeCreateAgentVersion(body)
+	if err != nil {
+		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_AGENT_VERSION", err.Error(), traceID)
 		return
 	}
 	if err := validateCreateAgentVersion(body); err != nil {
@@ -1711,6 +1720,27 @@ func validateCreateAgentVersion(body createAgentVersionRequest) error {
 		return err
 	}
 	return nil
+}
+
+func normalizeCreateAgentVersion(body createAgentVersionRequest) (createAgentVersionRequest, error) {
+	if body.Manifest == nil {
+		return body, nil
+	}
+	if body.Name != "" || body.Version != "" || body.Namespace != "" || len(body.Spec) != 0 {
+		return body, fmt.Errorf("manifest cannot be combined with name, version, namespace, or spec")
+	}
+	if err := body.Manifest.Validate(); err != nil {
+		return body, err
+	}
+	spec, err := json.Marshal(body.Manifest.Spec)
+	if err != nil {
+		return body, fmt.Errorf("canonicalize agent manifest spec: %w", err)
+	}
+	body.Name = body.Manifest.Metadata.Name
+	body.Version = body.Manifest.Metadata.Version
+	body.Namespace = body.Manifest.Metadata.Namespace
+	body.Spec = spec
+	return body, nil
 }
 
 func parseEntityVersion(value string) (int64, error) {

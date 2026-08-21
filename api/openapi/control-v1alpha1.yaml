@@ -505,18 +505,140 @@ components:
     CreateAgentVersionRequest:
       type: object
       additionalProperties: false
-      required: [name, version, namespace, spec]
+      oneOf:
+        - title: Legacy AgentVersion publication
+          required: [name, version, namespace, spec]
+          not: { required: [manifest] }
+        - title: Portable v0.9 Agent Manifest publication
+          required: [manifest]
+          allOf:
+            - not: { required: [name] }
+            - not: { required: [version] }
+            - not: { required: [namespace] }
+            - not: { required: [spec] }
       properties:
         name: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
         version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
         namespace: { type: string, minLength: 1, maxLength: 255 }
         spec: { type: object, additionalProperties: true }
+        manifest:
+          $ref: '#/components/schemas/AgentManifest'
+          description: >-
+            Strict v0.9 portable Agent declaration. The control plane derives
+            name, version, namespace and the immutable spec from this document.
         package:
           $ref: '#/components/schemas/AgentPackage'
           description: >-
             Signed Agent Package (ADR-010). Required when publish admission is
             configured; when present it is always verified fail-closed and its
             manifest must bind to this exact name@version reference and spec.
+    AgentManifest:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, metadata, spec]
+      properties:
+        apiVersion: { type: string, const: agentos.dev/v1alpha1 }
+        kind: { type: string, const: AgentManifest }
+        metadata:
+          type: object
+          additionalProperties: false
+          required: [name, version, namespace]
+          properties:
+            name: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+            version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+            namespace: { type: string, minLength: 1, maxLength: 255 }
+        spec:
+          $ref: '#/components/schemas/AgentManifestSpec'
+    AgentManifestSpec:
+      type: object
+      additionalProperties: false
+      required: [runtimeClassPolicy, runtimes, capabilities, resources, budget, checkpoint]
+      properties:
+        runtimeClassPolicy:
+          type: object
+          additionalProperties: false
+          required: [allowed, preferred]
+          properties:
+            allowed:
+              type: array
+              minItems: 1
+              maxItems: 16
+              uniqueItems: true
+              items: { type: string, minLength: 1, maxLength: 128 }
+            preferred: { type: string, minLength: 1, maxLength: 128 }
+        lifecycle:
+          type: object
+          additionalProperties: false
+          properties:
+            maxAttempts: { type: integer, minimum: 0, maximum: 10 }
+        runtimes:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [class, interface, runtimeABI, entrypoint]
+            properties:
+              class: { type: string, minLength: 1, maxLength: 128 }
+              interface: { type: string, const: agentos.runtime/v1alpha1 }
+              runtimeABI: { type: string, minLength: 1, maxLength: 256 }
+              entrypoint:
+                type: array
+                minItems: 1
+                maxItems: 128
+                items: { type: string, maxLength: 4096 }
+        capabilities:
+          type: object
+          additionalProperties: false
+          required: [tools, models, memory, secrets]
+          description: Symbolic gateway permissions; empty arrays explicitly deny that capability class.
+          properties:
+            tools: { $ref: '#/components/schemas/CapabilitySet' }
+            models: { $ref: '#/components/schemas/CapabilitySet' }
+            memory: { $ref: '#/components/schemas/CapabilitySet' }
+            secrets: { $ref: '#/components/schemas/CapabilitySet' }
+        resources:
+          type: object
+          additionalProperties: false
+          required: [cpuMillis, memoryMiB, workspaceBytes]
+          properties:
+            cpuMillis: { type: integer, format: int64, minimum: 1 }
+            memoryMiB: { type: integer, format: int64, minimum: 1 }
+            workspaceBytes: { type: integer, format: int64, minimum: 0 }
+        budget:
+          type: object
+          additionalProperties: false
+          required: [tokens, costUsd, toolCalls, wallSeconds]
+          properties:
+            tokens: { type: integer, format: int64, minimum: 0 }
+            costUsd: { type: number, minimum: 0 }
+            toolCalls: { type: integer, format: int64, minimum: 0 }
+            wallSeconds: { type: integer, format: int64, minimum: 1 }
+        checkpoint:
+          type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: { type: string, enum: [none, logical] }
+            schemaVersion: { type: string, minLength: 1, maxLength: 256 }
+            intervalSeconds: { type: integer, format: int64, minimum: 0 }
+        image:
+          type: object
+          additionalProperties: false
+          required: [ref]
+          properties:
+            ref: { type: string, minLength: 1 }
+            digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+    CapabilitySet:
+      type: array
+      maxItems: 256
+      uniqueItems: true
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@*-]{0,255}$'
     AgentPackage:
       type: object
       additionalProperties: false
