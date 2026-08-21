@@ -157,3 +157,13 @@ func TestContainerLimitsDoNotApplyToOtherClasses(t *testing.T) {
 		t.Fatalf("wasm task without workspace was rejected: %+v", decision.Reasons)
 	}
 }
+
+func TestRuntimeCommandValidation(t *testing.T) {
+	engine := containerEngine()
+	decision := engine.Evaluate(containerTask(`{"budget":{"tokens":100,"costUsd":1,"toolCalls":10,"wallSeconds":60},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":1048576,"llmConcurrency":1},
+		"runtime":{"command":[""]}}`))
+	if decision.Admit || !hasReason(decision.Reasons, "RUNTIME_COMMAND_INVALID") {
+		t.Fatalf("invalid runtime command decision = %+v", decision)
+	}
+}

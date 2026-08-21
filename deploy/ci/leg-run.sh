@@ -7,10 +7,11 @@ set -euo pipefail
 
 : "${AGENTOS_TEST_DATABASE_URL:?AGENTOS_TEST_DATABASE_URL is required}"
 : "${AGENTOS_OCI_CONTAINERD_NAMESPACE:=agentos-ci}"
-# Pinned runtime toolchain (deploy/ci/runtime-matrix.md); CI overrides these.
-: "${CONTAINERD_VERSION:=2.0.2}"
+# Pinned runtime toolchain; CI overrides these with the approved matrix.
+: "${CONTAINERD_VERSION:=2.2.7}"
+: "${CONTAINERD_SHA256:=91cd216ea26a1b8b512219d3f205375c967e7b7de4dae571bc3dd16bfacd34b5}"
 : "${RUNSC_TAG:=20260810.0}"
-export CONTAINERD_VERSION RUNSC_TAG
+export CONTAINERD_VERSION CONTAINERD_SHA256 RUNSC_TAG
 # Overlayfs on production hosts; nested containers (Docker Desktop/WSL2)
 # cannot mount overlay-on-overlay and must use the native snapshotter.
 : "${SNAPSHOTTER:=overlayfs}"
@@ -31,14 +32,17 @@ bash deploy/ci/env-fingerprint.sh | tee /tmp/runtime-fingerprint.txt
 go build -o /usr/local/bin/agentos-runtime-oci ./cmd/agentos-runtime-oci
 
 # The conformance worker runs with --skip-image-pull, so the workload image
-# must already live in the namespace. Default to alpine:latest for the first
-# bring-up; CI pins the digest after resolving it (see ci.yml).
+# must already live in the namespace. The default is immutable so a local run
+# validates the same workload bytes as CI.
 if [ -z "${AGENTOS_OCI_IMAGE:-}" ]; then
   ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" images pull \
-    --snapshotter "$SNAPSHOTTER" docker.io/library/alpine:latest
-  export AGENTOS_OCI_IMAGE="docker.io/library/alpine:latest"
+    --snapshotter "$SNAPSHOTTER" docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+  export AGENTOS_OCI_IMAGE="docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 fi
 export AGENTOS_OCI_SNAPSHOTTER="$SNAPSHOTTER"
+export AGENTOS_OCI_RUNTIME_CONFIG="${RUNSC_CONFIG_PATH:-/etc/containerd/runsc.toml}"
+
+bash deploy/ci/runtime-isolation.sh
 
 # Run the OCI/gVisor conformance leg on the real containerd + runsc host.
 go test -tags=integration -count=1 \

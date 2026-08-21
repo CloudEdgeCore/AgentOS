@@ -128,10 +128,8 @@ jobs:
   # KVM-absent there by design; a self-hosted runner with KVM (label
   # agentos-kvm) runs the same leg without --allow-no-kvm.
   #
-  # Version pinning follows deploy/ci/runtime-matrix.md: the exact
-  # containerd/runsc patch versions and sha256 sums are backfilled on the
-  # first runner bring-up (setup-containerd-runsc.sh prints them). Until then
-  # this job fails loudly instead of silently running unpinned runtimes.
+  # Runtime archives and workload images are immutable and integrity checked;
+  # the job fails closed if the approved matrix no longer installs or boots.
   runtime-linux-leg:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -153,16 +151,22 @@ jobs:
     env:
       AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
       AGENTOS_OCI_CONTAINERD_NAMESPACE: agentos-ci
-      # Pinned runtime toolchain (verified URLs 2026-08-16; backfill sha256
-      # in deploy/ci/runtime-matrix.md).
-      CONTAINERD_VERSION: "2.0.2"
+      AGENTOS_OCI_IMAGE: docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+      AGENTOS_OCI_RUNTIME_CONFIG: /etc/containerd/runsc.toml
+      AGENTOS_OCI_SNAPSHOTTER: overlayfs
+      CONTAINERD_ADDRESS: /run/agentos-containerd/containerd.sock
+      CONTAINERD_VERSION: "2.2.7"
+      CONTAINERD_SHA256: "91cd216ea26a1b8b512219d3f205375c967e7b7de4dae571bc3dd16bfacd34b5"
       RUNSC_TAG: "20260810.0"
-      # Bring-up finding 2026-08-17: runsc 20260810.0 sandbox startup hangs
-      # on GitHub-hosted runners with both systrap and ptrace platforms.
-      # ptrace + full debug logging pinpoints the hang; the debug log is
-      # dumped by the probe on failure. KVM-capable self-hosted runners may
-      # drop the flags.
-      RUNSC_EXTRA_FLAGS: "--platform ptrace --debug --debug-log=/tmp/runsc-debug.log --alsologtostderr"
+      RUNSC_PLATFORM: systrap
+      RUNSC_NETWORK: none
+      # ctr emits a cgroupfs-style OCI path. The runsc systemd driver expects
+      # systemd slice:prefix:name syntax, so use runsc's cgroupfs driver here.
+      RUNSC_SYSTEMD_CGROUP: "false"
+      # Apply the OCI seccomp profile inside gVisor's application kernel.
+      RUNSC_OCI_SECCOMP: "true"
+      FIRECRACKER_VERSION: "v1.9.0"
+      FIRECRACKER_SHA256: "95c13740c7ca1a6dfb40e0f51cd0a9eefee1f223cd2c3538755d03c3a9ba5237"
 
     steps:
       - name: Check out source
@@ -177,11 +181,14 @@ jobs:
       - name: Install pinned containerd and runsc
         run: sudo -E bash deploy/ci/setup-containerd-runsc.sh
 
+      - name: Install pinned Firecracker
+        run: sudo -E bash deploy/ci/install-firecracker.sh
+
       - name: Environment fingerprint
         run: bash deploy/ci/env-fingerprint.sh | tee runtime-fingerprint.txt
 
       - name: Upload runtime fingerprint
-        uses: actions/upload-artifact@v4 # TODO(v0.7): pin digest like the other actions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runtime-fingerprint
           path: runtime-fingerprint.txt
@@ -193,17 +200,22 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Pin and pull the conformance workload image
-        run: |
-          docker pull alpine:latest
-          digest="$(docker image inspect --format '{{index .RepoDigests 0}}' alpine:latest)"
-          # RepoDigests[0] is of the form alpine@sha256:...; the conformance
-          # worker runs with --skip-image-pull, so the digest-pinned image
-          # must already live in the containerd namespace.
-          ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" images pull "docker.io/library/${digest}"
-          echo "AGENTOS_OCI_IMAGE=docker.io/library/${digest}" >> "$GITHUB_ENV"
+        run: ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" images pull --snapshotter "$AGENTOS_OCI_SNAPSHOTTER" "$AGENTOS_OCI_IMAGE"
+
+      - name: Assert OCI/gVisor isolation boundary
+        run: sudo -E bash deploy/ci/runtime-isolation.sh
 
       - name: OCI/gVisor conformance leg
-        run: go test -race -tags=integration -count=1 -run 'TestSameAgentVersionRunsOnBothProviders/oci' ./internal/runtime/control/...
+        run: sudo -E env "PATH=$PATH" go test -race -tags=integration -count=1 -run 'TestSameAgentVersionRunsOnBothProviders/oci' ./internal/runtime/control/...
+
+      - name: Verify OCI orphan recovery and cleanup
+        run: |
+          leftovers="$(ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" containers list -q | grep '^agentos-' || true)"
+          if [ -n "$leftovers" ]; then
+            echo "provider-owned containers remain after conformance:" >&2
+            echo "$leftovers" >&2
+            exit 1
+          fi
 
       - name: Firecracker KVM probe
         run: bash deploy/ci/firecracker-smoke.sh --allow-no-kvm

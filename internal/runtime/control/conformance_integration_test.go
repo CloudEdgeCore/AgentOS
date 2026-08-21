@@ -84,7 +84,7 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 	t.Run("reference-go", func(t *testing.T) {
 		scenario := scenario{
 			key: "conformance-reference", runtimeClass: "oci", instanceID: "worker-reference-1",
-			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}}`,
+			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":8388608,"llmConcurrency":1}}`,
 			provider: referenceProvider, runtimeABI: referenceABI, checkpoint: referenceSchema,
 		}
 		env.prepareScenario(t, scenario)
@@ -104,10 +104,10 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 	})
 
 	// The OCI/gVisor leg runs only on a host with containerd + runsc: point
-	// AGENTOS_OCI_CONTAINERD_NAMESPACE (and optionally AGENTOS_OCI_IMAGE /
-	// AGENTOS_OCI_RUNTIME) at the sandbox host. CI hosts without the sandbox
-	// skip the leg; the provider binary itself is built and unit-tested in CI
-	// regardless.
+	// AGENTOS_OCI_CONTAINERD_NAMESPACE (and optionally AGENTOS_OCI_IMAGE,
+	// AGENTOS_OCI_RUNTIME, and AGENTOS_OCI_RUNTIME_CONFIG) at the sandbox host.
+	// CI hosts without the sandbox skip the leg; the provider binary itself is
+	// built and unit-tested in CI regardless.
 	t.Run("oci", func(t *testing.T) {
 		namespace := os.Getenv("AGENTOS_OCI_CONTAINERD_NAMESPACE")
 		if namespace == "" {
@@ -115,7 +115,7 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 		}
 		scenario := scenario{
 			key: "conformance-oci", runtimeClass: "oci", instanceID: "worker-oci-1",
-			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}}`,
+			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":8388608,"llmConcurrency":1},"runtime":{"command":["/bin/sleep","1"]}}`,
 			provider: ociProvider, runtimeABI: ociABI, checkpoint: ociSchema,
 		}
 		env.prepareScenario(t, scenario)
@@ -285,19 +285,19 @@ func (env *conformanceEnv) driveWasmtimeWorker(t *testing.T) {
 }
 
 // driveOCIWorker spawns the OCI/gVisor provider process against a
-// containerd + runsc host. The image reference defaults to
-// docker.io/library/alpine:latest (a shellable image the workload spec can
-// use); CI sandbox hosts override it with a digest-pinned image.
+// containerd + runsc host. The image reference defaults to the same immutable,
+// shellable Alpine image used by CI.
 func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 	t.Helper()
 	imageRef := os.Getenv("AGENTOS_OCI_IMAGE")
 	if imageRef == "" {
-		imageRef = "docker.io/library/alpine:latest"
+		imageRef = "docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 	}
 	runtimeName := os.Getenv("AGENTOS_OCI_RUNTIME")
 	if runtimeName == "" {
 		runtimeName = "io.containerd.runsc.v1"
 	}
+	runtimeConfig := os.Getenv("AGENTOS_OCI_RUNTIME_CONFIG")
 	// Snapshotter for sandbox rootfs (v0.7): nested environments (containerd
 	// inside a container) cannot mount overlay-on-overlay and must set
 	// AGENTOS_OCI_SNAPSHOTTER=native.
@@ -307,7 +307,7 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		t.Skipf("agentos-runtime-oci binary not found in PATH (build cmd/agentos-runtime-oci first): %v", err)
 	}
 	commandArgs := []string{
-		"--dev-mode", "true",
+		"--dev-mode=true",
 		"--tenant", env.tenant,
 		"--runtime-instance-id", "worker-oci-1",
 		"--control-address", env.grpcAddr,
@@ -317,6 +317,9 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 		"--containerd-runtime", runtimeName,
 		"--skip-image-pull",
 		"--heartbeat-ttl", "30s",
+	}
+	if runtimeConfig != "" {
+		commandArgs = append(commandArgs, "--runtime-config-path", runtimeConfig)
 	}
 	if snapshotter != "" {
 		commandArgs = append(commandArgs, "--containerd-snapshotter", snapshotter)
@@ -353,7 +356,13 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("OCI provider did not finish: phase=%s\nstderr:\n%s", task.Phase, stderr.String())
+			var attemptPhase, failureCode, failureMessage string
+			diagnosticErr := env.pool.QueryRow(ctx, `SELECT a.phase, COALESCE(a.failure_code, ''), COALESCE(a.failure_message, '')
+				FROM attempts a JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
+				WHERE a.tenant_id = $1 AND r.task_id = $2 ORDER BY a.ordinal DESC LIMIT 1`,
+				env.tenant, env.taskID).Scan(&attemptPhase, &failureCode, &failureMessage)
+			t.Fatalf("OCI provider did not finish: phase=%s attempt=%s failureCode=%s failureMessage=%s diagnosticErr=%v\nstderr:\n%s",
+				task.Phase, attemptPhase, failureCode, failureMessage, diagnosticErr, stderr.String())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

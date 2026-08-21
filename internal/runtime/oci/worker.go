@@ -159,10 +159,17 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		return w.fail(ctx, identity, version, "resource_limits_required",
 			fmt.Errorf("container runtime class %q requires explicit cpuMillis, memoryMiB and workspaceBytes in the workload spec", assignment.GetRuntimeClass()))
 	}
+	var command []string
+	if workloadSpec.Runtime != nil {
+		if err := workloadSpec.Runtime.ValidateCommand(); err != nil {
+			return w.fail(ctx, identity, version, "runtime_command_invalid", err)
+		}
+		command = append([]string(nil), workloadSpec.Runtime.Command...)
+	}
 
 	execSpec := ExecutionSpec{
 		TenantID: w.tenantID, AttemptID: identity.GetAttemptId(), AgentVersionRef: assignment.GetAgentVersionRef(),
-		WorkloadSpecJSON: assignment.GetWorkloadSpecJson(), ImageRef: imageRef,
+		WorkloadSpecJSON: assignment.GetWorkloadSpecJson(), ImageRef: imageRef, Command: command,
 		WorkspaceBytes: workspaceBytes, CPUQuotaMillis: cpuQuota, MemoryLimitMiB: memoryMiB,
 		RuntimeClass: assignment.GetRuntimeClass(), RuntimePoolID: assignment.GetRuntimePoolId(),
 		RuntimeInstanceID: w.runtimeInstanceID,

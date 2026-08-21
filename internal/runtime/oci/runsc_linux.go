@@ -17,13 +17,28 @@ import (
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 )
 
-// ctrExecutor is the v0.1 engineering baseline for the OCI + gVisor provider.
-// It drives the containerd CLI (ctr) with the runsc runtime; the full hardening
-// surface (user namespaces, read-only rootfs, capability drop, seccomp,
-// cgroups, NetworkPolicy, egress proxy) is enforced by Admission and by the
-// runsc runtime itself — see docs/runtime-provider-oci-gvisor.md. The exact
-// ctr subcommand surface must be re-validated against the pinned containerd
-// version on the Linux integration CI before this provider is trusted.
+var defaultCapabilitiesToDrop = []string{
+	"CAP_AUDIT_WRITE",
+	"CAP_CHOWN",
+	"CAP_DAC_OVERRIDE",
+	"CAP_FOWNER",
+	"CAP_FSETID",
+	"CAP_KILL",
+	"CAP_MKNOD",
+	"CAP_NET_BIND_SERVICE",
+	"CAP_NET_RAW",
+	"CAP_SETFCAP",
+	"CAP_SETGID",
+	"CAP_SETPCAP",
+	"CAP_SETUID",
+	"CAP_SYS_CHROOT",
+}
+
+// ctrExecutor drives the pinned containerd CLI with the gVisor runtime. The
+// command surface is deliberately fail-closed: a read-only root filesystem,
+// no Linux capabilities, the containerd default seccomp profile, explicit
+// cgroup limits, and the pinned runsc shim configuration are applied to every
+// untrusted workload.
 
 // NewRunscExecutor constructs the containerd/runsc executor after verifying
 // that the ctr CLI is available. It must run on Linux with containerd and
@@ -35,7 +50,8 @@ func NewRunscExecutor(options ...RunscOption) (Executor, error) {
 	}
 	executor := &ctrExecutor{
 		ctrPath: path, namespace: "agentos", runtime: "io.containerd.runsc.v1",
-		snapshotter: "overlayfs", pullTimeout: 10 * time.Minute, outputLimit: 1 << 20,
+		runtimeConfigPath: "/etc/containerd/runsc.toml", snapshotter: "overlayfs",
+		pullTimeout: 10 * time.Minute, outputLimit: 1 << 20,
 	}
 	for _, option := range options {
 		option(executor)
@@ -88,7 +104,18 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 		return nil, fmt.Errorf("persist workload spec: %w", err)
 	}
 
-	args := []string{"run", "--runtime", e.runtime, "--snapshotter", e.snapshotter}
+	args := []string{"run", "--runtime", e.runtime}
+	if strings.TrimSpace(e.runtimeConfigPath) != "" {
+		args = append(args, "--runtime-config-path", e.runtimeConfigPath)
+	}
+	args = append(args,
+		"--snapshotter", e.snapshotter,
+		"--read-only",
+		"--seccomp",
+	)
+	for _, capability := range defaultCapabilitiesToDrop {
+		args = append(args, "--cap-drop", capability)
+	}
 	for _, mount := range e.mounts(inputPath, spec.WorkspaceBytes) {
 		args = append(args, "--mount", mount)
 	}
@@ -104,9 +131,10 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 		args = append(args, "--cpu-quota", fmt.Sprintf("%d", spec.CPUQuotaMillis*1000))
 	}
 	if spec.MemoryLimitMiB > 0 {
-		args = append(args, "--memory", fmt.Sprintf("%d", spec.MemoryLimitMiB<<20))
+		args = append(args, "--memory-limit", fmt.Sprintf("%d", spec.MemoryLimitMiB<<20))
 	}
 	args = append(args, spec.ImageRef, containerID)
+	args = append(args, spec.Command...)
 
 	// CommandContext ties the ctr process to the execution context: when the
 	// lease keeper cancels the execution (cancellation or fence break), the
@@ -134,13 +162,13 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 	go func() {
 		runErr := command.Run()
 		_ = spoolWriter.Close()
-		result, _ := outcomeFor(runErr, startedAt)
+		result, outcomeErr := outcomeFor(runErr, startedAt)
 		result.Stdout = <-stdoutRef
 		result.StdoutTruncated = <-stdoutTruncated
 		if spoolErr := <-spoolErr; spoolErr != nil && spoolErr != io.ErrClosedPipe && runErr == nil {
 			result.FailureCode = "output_spool_failed"
 		}
-		done <- executionOutcome{result: result, err: runErr}
+		done <- executionOutcome{result: result, err: outcomeErr}
 		_ = os.RemoveAll(inputDir)
 	}()
 	return &ctrExecution{executor: e, containerID: containerID, done: done}, nil

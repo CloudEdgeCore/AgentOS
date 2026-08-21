@@ -29,6 +29,7 @@ func main() {
 	imageRef := flag.String("image-ref", "", "digest-pinned OCI image that runs the published AgentVersion")
 	namespace := flag.String("containerd-namespace", "agentos", "containerd namespace for sandboxed containers")
 	runtimeName := flag.String("containerd-runtime", "io.containerd.runsc.v1", "containerd runtime (runsc by default)")
+	runtimeConfigPath := flag.String("runtime-config-path", "/etc/containerd/runsc.toml", "gVisor shim configuration passed to ctr (empty disables)")
 	// snapshotter selects the containerd snapshotter for sandbox rootfs
 	// mounts (v0.7): "overlayfs" on production hosts, "native" in nested
 	// environments (containerd inside a container cannot mount
@@ -63,7 +64,12 @@ func main() {
 		_ = shutdownTelemetry(shutdownCtx)
 	}()
 
-	options := []oci.RunscOption{oci.WithNamespace(*namespace), oci.WithRuntime(*runtimeName), oci.WithSnapshotter(*snapshotter)}
+	options := []oci.RunscOption{
+		oci.WithNamespace(*namespace),
+		oci.WithRuntime(*runtimeName),
+		oci.WithRuntimeConfigPath(*runtimeConfigPath),
+		oci.WithSnapshotter(*snapshotter),
+	}
 	if *skipImagePull {
 		options = append(options, oci.WithSkipPull())
 	}
