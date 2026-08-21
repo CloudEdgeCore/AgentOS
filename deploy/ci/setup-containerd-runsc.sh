@@ -100,7 +100,7 @@ EOF
 chmod 0755 /usr/local/bin/agentos-runsc
 cat > "$RUNSC_CONFIG_PATH" <<EOF
 binary_name = "/usr/local/bin/agentos-runsc"
-log_path = "${RUNSC_LOG_DIR}/%ID%/shim.log"
+log_path = "${RUNSC_LOG_DIR}/shim.log"
 log_level = "debug"
 
 [runsc_config]
@@ -109,9 +109,9 @@ log_level = "debug"
   systemd-cgroup = "${RUNSC_SYSTEMD_CGROUP}"
   ignore-cgroups = "${RUNSC_IGNORE_CGROUPS}"
   debug = "true"
-  # The shim expands %ID%; runsc expands %COMMAND%. Each process receives a
-  # dedicated log, matching the upstream containerd configuration contract.
-  debug-log = "${RUNSC_LOG_DIR}/%ID%/gvisor.%COMMAND%.log"
+  # runsc expands %COMMAND%, giving create/gofer/boot dedicated logs without
+  # relying on shim-specific path interpolation.
+  debug-log = "${RUNSC_LOG_DIR}/gvisor.%COMMAND%.log"
   alsologtostderr = "true"
 EOF
 
@@ -209,10 +209,27 @@ if ! timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agent
   echo ">> runsc runtime probe: FAIL (the pinned matrix must be re-validated)" >&2
   echo ">> probe output:" >&2
   cat /tmp/probe-out.log 2>/dev/null >&2 || true
+  echo ">> requesting shim goroutine dump:" >&2
+  while read -r shim_pid; do
+    [ -n "$shim_pid" ] || continue
+    kill -12 "$shim_pid" 2>/dev/null || true
+  done < <(pgrep -f 'containerd-shim-runsc-v1.*agentos-runtime-probe' || true)
+  sleep 2
   echo ">> runsc/shim processes:" >&2
   # Keep ps here because state and wait-channel are part of the diagnostics.
   # shellcheck disable=SC2009
   ps -eo pid,ppid,user,stat,wchan,cmd | grep -E 'runsc|shim|ctr' | grep -v grep >&2 || true
+  echo ">> runsc/shim file descriptors:" >&2
+  while read -r runtime_pid; do
+    [ -n "$runtime_pid" ] || continue
+    echo "process ${runtime_pid}:" >&2
+    ls -l "/proc/${runtime_pid}/fd" 2>/dev/null >&2 || true
+    for fd_path in "/proc/${runtime_pid}/fd/3" "/proc/${runtime_pid}/fd/4"; do
+      [ -L "$fd_path" ] || continue
+      echo "tail ${fd_path} -> $(readlink "$fd_path" 2>/dev/null || true):" >&2
+      timeout 2 tail -n 120 "$fd_path" 2>/dev/null >&2 || true
+    done
+  done < <(pgrep -f 'containerd-shim-runsc-v1|runsc-(gofer|sandbox)' || true)
   echo ">> containerd log tail:" >&2
   tail -n 200 /tmp/agentos-containerd.log >&2 || true
   echo ">> runsc/shim logs:" >&2
