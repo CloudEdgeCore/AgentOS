@@ -134,6 +134,7 @@ func (e *ctrExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Executio
 		args = append(args, "--memory-limit", fmt.Sprintf("%d", spec.MemoryLimitMiB<<20))
 	}
 	args = append(args, spec.ImageRef, containerID)
+	args = append(args, spec.Command...)
 
 	// CommandContext ties the ctr process to the execution context: when the
 	// lease keeper cancels the execution (cancellation or fence break), the

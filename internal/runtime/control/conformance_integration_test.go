@@ -115,7 +115,7 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 		}
 		scenario := scenario{
 			key: "conformance-oci", runtimeClass: "oci", instanceID: "worker-oci-1",
-			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":8388608,"llmConcurrency":1}}`,
+			spec:     `{"priority":70,"deadline":"2099-08-14T12:00:00Z","budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":8388608,"llmConcurrency":1},"runtime":{"command":["/bin/sleep","1"]}}`,
 			provider: ociProvider, runtimeABI: ociABI, checkpoint: ociSchema,
 		}
 		env.prepareScenario(t, scenario)

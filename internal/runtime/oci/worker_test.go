@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -127,7 +128,7 @@ func TestWorkerRunsPinnedImageWhenItMatches(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			repository := newFakeRuntimeStore()
 			repository.task.Spec = []byte(`{"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"workspaceBytes":1048576,"llmConcurrency":1},
-				"image":{"ref":"example.com/agent","digest":"` + digest + `"}}`)
+				"image":{"ref":"example.com/agent","digest":"` + digest + `"},"runtime":{"command":["/bin/agent","serve"]}}`)
 			executor := &fakeExecutor{result: RunResult{ExitCode: 0, UsageMillis: 7}}
 			worker := newTestWorkerWithImage(t, repository, executor, "worker-1", test.imageRef)
 
@@ -140,6 +141,9 @@ func TestWorkerRunsPinnedImageWhenItMatches(t *testing.T) {
 			}
 			if executor.prepared[0].ImageRef != "example.com/agent" {
 				t.Fatalf("execution spec image = %q, want the spec pin ref", executor.prepared[0].ImageRef)
+			}
+			if !slices.Equal(executor.prepared[0].Command, []string{"/bin/agent", "serve"}) {
+				t.Fatalf("execution command = %q, want preserved argv", executor.prepared[0].Command)
 			}
 		})
 	}

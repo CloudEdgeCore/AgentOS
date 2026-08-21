@@ -34,6 +34,7 @@ exit 0
 		AgentVersionRef:  "echo@1.0.0",
 		WorkloadSpecJSON: []byte(`{"kind":"Task"}`),
 		ImageRef:         "example.invalid/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Command:          []string{"/bin/agent", "--mode", "conformance"},
 		WorkspaceBytes:   64 << 20,
 		CPUQuotaMillis:   250,
 		MemoryLimitMiB:   128,
@@ -90,6 +91,12 @@ exit 0
 	}
 	if containsSequence(runArgs, []string{"--allow-new-privs"}) {
 		t.Errorf("sandbox must retain no-new-privileges: %q", runArgs)
+	}
+	if !containsSequence(runArgs, []string{
+		"example.invalid/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"agentos-attempt-a", "/bin/agent", "--mode", "conformance",
+	}) {
+		t.Errorf("ctr run arguments do not preserve the command argv: %q", runArgs)
 	}
 }
 

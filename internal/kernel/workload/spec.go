@@ -23,6 +23,10 @@ type Spec struct {
 	// providers for container classes (oci/microvm) must run exactly this
 	// reference; digest-only references are the production contract.
 	Image *Image `json:"image,omitempty"`
+	// Runtime carries provider-specific launch metadata. Command is an argv
+	// array, never a shell fragment, so OCI providers can override an image's
+	// default command without introducing shell interpolation.
+	Runtime *Runtime `json:"runtime,omitempty"`
 	// ToolCalls is the deterministic tool script the reference provider
 	// executes through the Tool Gateway before completing. Other providers
 	// ignore it; the gateway enforces policy and budget regardless of caller.
@@ -30,6 +34,42 @@ type Spec struct {
 	// ModelCalls is the deterministic model script the reference provider
 	// executes through the Model Gateway (Begin/Settle/Finish) after tools.
 	ModelCalls []ModelCallScript `json:"modelCalls,omitempty"`
+}
+
+// Runtime describes the provider-specific entry point selected by the task.
+// ComponentPath is consumed by the Wasmtime provider; Command is consumed by
+// OCI-compatible providers.
+type Runtime struct {
+	ComponentPath string   `json:"componentPath,omitempty"`
+	Command       []string `json:"command,omitempty"`
+}
+
+// ValidateCommand bounds the argv passed to a container runtime. Empty means
+// use the image's configured Entrypoint/Cmd.
+func (r Runtime) ValidateCommand() error {
+	if len(r.Command) == 0 {
+		return nil
+	}
+	if len(r.Command) > 128 {
+		return fmt.Errorf("runtime command must contain at most 128 arguments")
+	}
+	total := 0
+	for index, argument := range r.Command {
+		if strings.IndexByte(argument, 0) >= 0 {
+			return fmt.Errorf("runtime command argument %d contains NUL", index)
+		}
+		if index == 0 && strings.TrimSpace(argument) == "" {
+			return fmt.Errorf("runtime command executable is required")
+		}
+		if len(argument) > 4096 {
+			return fmt.Errorf("runtime command argument %d exceeds 4096 bytes", index)
+		}
+		total += len(argument)
+	}
+	if total > 32<<10 {
+		return fmt.Errorf("runtime command exceeds 32768 bytes")
+	}
+	return nil
 }
 
 // Image is the digest-pinned container reference of a workload.

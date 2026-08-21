@@ -39,11 +39,14 @@ type ArtifactStore interface {
 // validated workload metadata; the Executor must never trust container-supplied
 // values for its own resource or identity decisions.
 type ExecutionSpec struct {
-	TenantID          string
-	AttemptID         string
-	AgentVersionRef   string
-	WorkloadSpecJSON  []byte
-	ImageRef          string
+	TenantID         string
+	AttemptID        string
+	AgentVersionRef  string
+	WorkloadSpecJSON []byte
+	ImageRef         string
+	// Command overrides the image Entrypoint/Cmd as an argv array. Empty uses
+	// the immutable image configuration.
+	Command           []string
 	WorkspaceBytes    int64
 	CPUQuotaMillis    int64
 	MemoryLimitMiB    int64

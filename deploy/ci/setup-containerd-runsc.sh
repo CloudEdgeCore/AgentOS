@@ -90,103 +90,23 @@ RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
 RUNSC_OCI_SECCOMP="${RUNSC_OCI_SECCOMP:-true}"
 CONTAINERD_SOCKET_GID="${CONTAINERD_SOCKET_GID:-${SUDO_GID:-0}}"
 RUNSC_LOG_DIR="/var/log/agentos-runsc"
-RUNSC_WAIT_DIR="/run/agentos-runsc-wait"
 mkdir -p "$RUNSC_LOG_DIR"
-mkdir -p "$RUNSC_WAIT_DIR"
-chmod 0700 "$RUNSC_WAIT_DIR"
 
 # The gVisor shim captures `runsc create` output with an os/exec pipe. The
 # long-lived gofer and sandbox inherit that pipe, so Cmd.Wait cannot observe
-# EOF after the short-lived create process exits. It also starts `runsc wait`
-# only after `runsc start` returns, which loses the exit status when a very
-# short root process takes the sandbox down first. This protocol-preserving
-# adapter redirects create output and establishes the wait RPC before start.
+# EOF after the short-lived create process exits. This adapter redirects only
+# create output; every other command remains an exact runsc exec.
 cat > /usr/local/bin/agentos-runsc <<'EOF'
-#!/usr/bin/env bash
-set -u
+#!/bin/sh
 
 printf 'pid=%s argv=' "$$" >>/var/log/agentos-runsc/launcher.log
 printf ' <%s>' "$@" >>/var/log/agentos-runsc/launcher.log
 printf '\n' >>/var/log/agentos-runsc/launcher.log
 
-args=("$@")
-subcommand=""
-subcommand_index=-1
-for ((index = 0; index < ${#args[@]}; index++)); do
-  case "${args[$index]}" in
-    create | start | wait)
-      subcommand="${args[$index]}"
-      subcommand_index=$index
-      break
-      ;;
-  esac
-done
-
-if [ "$subcommand" = "create" ]; then
-  exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1
-fi
-
-container_id="${args[$((subcommand_index + 1))]:-}"
-case "$container_id" in
-  "" | *[!A-Za-z0-9_.-]*) exec /usr/local/bin/runsc "$@" ;;
+case " $* " in
+  *" create "*) exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1 ;;
+  *) exec /usr/local/bin/runsc "$@" ;;
 esac
-
-wait_base="/run/agentos-runsc-wait/${container_id}"
-wait_pending="${wait_base}.pending"
-wait_result="${wait_base}.json"
-wait_error="${wait_base}.error"
-
-if [ "$subcommand" = "start" ]; then
-  rm -f -- "$wait_pending" "$wait_result" "$wait_error" "${wait_result}.tmp" "${wait_error}.tmp"
-  : >"$wait_pending"
-  global_args=("${args[@]:0:$subcommand_index}")
-  (
-    while true; do
-      if /usr/local/bin/runsc "${global_args[@]}" wait "$container_id" >"${wait_result}.tmp" 2>"${wait_error}.tmp"; then
-        mv -f -- "${wait_result}.tmp" "$wait_result"
-        rm -f -- "${wait_error}.tmp"
-        break
-      fi
-      # The adapter starts before the shim calls runsc start. Retry only the
-      # expected created-state response; every other failure remains fatal.
-      if grep -q 'not started' "${wait_error}.tmp"; then
-        sleep 0.01
-        continue
-      fi
-      mv -f -- "${wait_error}.tmp" "$wait_error"
-      rm -f -- "${wait_result}.tmp"
-      break
-    done
-    rm -f -- "$wait_pending"
-  ) </dev/null >/dev/null 2>&1 &
-  prewait_pid=$!
-  # The container is already created, so wait can connect before init starts.
-  sleep 0.2
-  /usr/local/bin/runsc "$@"
-  status=$?
-  if [ "$status" -eq 0 ]; then
-    exit 0
-  fi
-  kill "$prewait_pid" >/dev/null 2>&1 || true
-  rm -f -- "$wait_pending" "$wait_result" "$wait_error" "${wait_result}.tmp" "${wait_error}.tmp"
-  exit "$status"
-fi
-
-if [ "$subcommand" = "wait" ] && { [ -e "$wait_pending" ] || [ -e "$wait_result" ] || [ -e "$wait_error" ]; }; then
-  while [ -e "$wait_pending" ]; do
-    sleep 0.05
-  done
-  if [ -s "$wait_result" ]; then
-    cat -- "$wait_result"
-    rm -f -- "$wait_result" "$wait_error"
-    exit 0
-  fi
-  cat -- "$wait_error" >&2 || true
-  rm -f -- "$wait_result" "$wait_error"
-  exit 128
-fi
-
-exec /usr/local/bin/runsc "$@"
 EOF
 chmod 0755 /usr/local/bin/agentos-runsc
 

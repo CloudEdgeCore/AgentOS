@@ -75,6 +75,11 @@ func (e *Engine) Evaluate(task store.Task) Decision {
 	if strings.TrimSpace(spec.Placement.Region) == "" {
 		reasons = append(reasons, reason("REGION_REQUIRED", "placement.region", "placement region is required"))
 	}
+	if spec.Runtime != nil {
+		if err := spec.Runtime.ValidateCommand(); err != nil {
+			reasons = append(reasons, reason("RUNTIME_COMMAND_INVALID", "runtime.command", err.Error()))
+		}
+	}
 	checkPositiveLimit(&reasons, "BUDGET_TOKENS_INVALID", "budget.tokens", spec.Budget.Tokens, e.limits.MaxTokens)
 	checkPositiveLimit(&reasons, "BUDGET_TOOL_CALLS_INVALID", "budget.toolCalls", spec.Budget.ToolCalls, e.limits.MaxToolCalls)
 	checkPositiveLimit(&reasons, "BUDGET_WALL_TIME_INVALID", "budget.wallSeconds", spec.Budget.WallSeconds, e.limits.MaxWallSeconds)
