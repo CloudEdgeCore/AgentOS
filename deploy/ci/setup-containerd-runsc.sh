@@ -207,6 +207,9 @@ echo ">> pulling digest-pinned probe image (bounded 300s)"
 timeout 300 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" images pull \
   --snapshotter "$SNAPSHOTTER" "$PROBE_IMAGE" >/dev/null
 echo ">> running fail-closed runsc probe (bounded 120s)"
+# Keep the sandbox alive past shim watcher attachment. An immediate /bin/true
+# can exit successfully before runsc wait connects, losing the zero exit status
+# and producing a false status=128 result on the pinned gVisor shim.
 set +e
 timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci}" run \
   --rm \
@@ -214,7 +217,7 @@ timeout --signal=KILL 120 ctr -n "${AGENTOS_OCI_CONTAINERD_NAMESPACE:-agentos-ci
   --runtime-config-path "$RUNSC_CONFIG_PATH" \
   --snapshotter "$SNAPSHOTTER" \
   "$PROBE_IMAGE" agentos-runtime-probe \
-  /bin/true \
+  /bin/sleep 1 \
   </dev/null \
   >/tmp/probe-out.log 2>&1
 PROBE_STATUS=$?
