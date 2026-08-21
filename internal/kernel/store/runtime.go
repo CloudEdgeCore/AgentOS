@@ -60,7 +60,11 @@ type Checkpoint struct {
 }
 
 type RuntimeAssignment struct {
-	Task             Task
+	Task Task
+	// AgentVersion is the immutable publication resolved during admission.
+	// Runtime providers receive this declaration so adapter selection and
+	// capability grants never come from mutable Task input.
+	AgentVersion     *AgentVersion
 	Run              Run
 	Attempt          Attempt
 	Lease            Lease

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	modelv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/model/v1alpha1"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/model"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/google/uuid"
@@ -29,10 +30,15 @@ type ModelService struct {
 	modelv1alpha1.UnimplementedModelGatewayServiceServer
 	invoker       ModelInvoker
 	allowedTenant string
+	capabilities  *capability.Authorizer
 }
 
-func NewModelService(invoker ModelInvoker, allowedTenant string) *ModelService {
-	return &ModelService{invoker: invoker, allowedTenant: allowedTenant}
+func NewModelService(invoker ModelInvoker, allowedTenant string, capabilities ...*capability.Authorizer) *ModelService {
+	service := &ModelService{invoker: invoker, allowedTenant: allowedTenant}
+	if len(capabilities) > 0 {
+		service.capabilities = capabilities[0]
+	}
+	return service
 }
 
 func (s *ModelService) Begin(ctx context.Context, request *modelv1alpha1.BeginRequest) (*modelv1alpha1.BeginResponse, error) {
@@ -41,6 +47,12 @@ func (s *ModelService) Begin(ctx context.Context, request *modelv1alpha1.BeginRe
 	}
 	if err := s.authorizeTenant(request.GetIdentity().GetTenantId()); err != nil {
 		return nil, err
+	}
+	if s.capabilities != nil {
+		if err := s.capabilities.Authorize(ctx, request.GetIdentity().GetTenantId(), request.GetAgentVersionRef(),
+			capability.Model, request.GetModelRef()); err != nil {
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
 	}
 	taskID, err := parseUUID(request.GetTaskId(), "task ID")
 	if err != nil {

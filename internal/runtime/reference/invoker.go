@@ -26,7 +26,13 @@ func NewGrpcToolInvoker(client gatewayv1alpha1.ToolGatewayServiceClient) *GrpcTo
 var _ mcp.ToolInvoker = (*GrpcToolInvoker)(nil)
 
 func (g *GrpcToolInvoker) ListTools(ctx context.Context, tenantID string) ([]store.ToolDescriptor, error) {
-	response, err := g.client.ListTools(ctx, &gatewayv1alpha1.ListToolsRequest{TenantId: tenantID})
+	return g.ListToolsForAgent(ctx, tenantID, "")
+}
+
+func (g *GrpcToolInvoker) ListToolsForAgent(ctx context.Context, tenantID, agentVersionRef string) ([]store.ToolDescriptor, error) {
+	response, err := g.client.ListTools(ctx, &gatewayv1alpha1.ListToolsRequest{
+		TenantId: tenantID, AgentVersionRef: agentVersionRef,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list tools over Runtime Protocol: %w", err)
 	}
@@ -49,7 +55,8 @@ func (g *GrpcToolInvoker) InvokeTool(ctx context.Context, in tool.InvokeInput) (
 		},
 		TaskId: in.TaskID.String(), RunId: in.RunID.String(),
 		AgentVersionRef: in.AgentVersionRef, ToolName: in.ToolName, ToolVersion: in.ToolVersion,
-		Action: in.Action, Resource: in.Resource, ArgsJson: in.Args, IdempotencyKey: in.IdempotencyKey,
+		SecretRef: in.SecretRef,
+		Action:    in.Action, Resource: in.Resource, ArgsJson: in.Args, IdempotencyKey: in.IdempotencyKey,
 	}
 	if in.ApprovalID != nil {
 		request.ApprovalId = in.ApprovalID.String()

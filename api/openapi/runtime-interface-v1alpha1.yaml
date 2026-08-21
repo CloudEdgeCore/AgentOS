@@ -1,0 +1,232 @@
+openapi: 3.1.0
+info:
+  title: Agent OS Runtime Interface
+  version: v1alpha1
+  description: Provider-neutral lifecycle boundary implemented by Agent adapters.
+paths:
+  /v1alpha1/health:
+    get:
+      operationId: runtimeHealth
+      responses:
+        '200':
+          description: Adapter is serving a supported protocol.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /v1alpha1/executions:start:
+    post:
+      operationId: startExecution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartRequest' }
+      responses:
+        '202':
+          description: Execution accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartResponse' }
+        '200':
+          description: Idempotent replay of an existing execution.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartResponse' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /v1alpha1/executions/{executionId}:stop:
+    post:
+      operationId: stopExecution
+      parameters: [{ $ref: '#/components/parameters/ExecutionID' }]
+      responses:
+        '202':
+          description: Cancellation requested.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StopResponse' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1alpha1/executions/{executionId}:checkpoint:
+    post:
+      operationId: checkpointExecution
+      parameters: [{ $ref: '#/components/parameters/ExecutionID' }]
+      responses:
+        '200':
+          description: Logical checkpoint captured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckpointResponse' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1alpha1/executions/{executionId}:restore:
+    post:
+      operationId: restoreExecution
+      parameters: [{ $ref: '#/components/parameters/ExecutionID' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestoreRequest' }
+      responses:
+        '200':
+          description: Logical checkpoint restored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RestoreResponse' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1alpha1/executions/{executionId}/events:
+    get:
+      operationId: listExecutionEvents
+      parameters:
+        - { $ref: '#/components/parameters/ExecutionID' }
+        - name: after
+          in: query
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Ordered events after the requested sequence.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventList' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1alpha1/executions/{executionId}/result:
+    get:
+      operationId: getExecutionResult
+      parameters: [{ $ref: '#/components/parameters/ExecutionID' }]
+      responses:
+        '200':
+          description: Terminal execution result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Result' }
+        '202':
+          description: Execution remains active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Result' }
+        '404': { $ref: '#/components/responses/Problem' }
+components:
+  parameters:
+    ExecutionID:
+      name: executionId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+  responses:
+    Problem:
+      description: Machine-readable Runtime Interface failure.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    CapabilityGrant:
+      type: object
+      additionalProperties: false
+      required: [tools, models, memory, secrets]
+      properties:
+        tools: { type: array, items: { type: string }, maxItems: 256, uniqueItems: true }
+        models: { type: array, items: { type: string }, maxItems: 256, uniqueItems: true }
+        memory: { type: array, items: { type: string }, maxItems: 256, uniqueItems: true }
+        secrets: { type: array, items: { type: string }, maxItems: 256, uniqueItems: true }
+    StartRequest:
+      type: object
+      additionalProperties: false
+      required: [executionId, agentVersionRef, goal, input, capabilities]
+      properties:
+        executionId: { type: string, minLength: 1, maxLength: 128 }
+        agentVersionRef: { type: string, minLength: 1, maxLength: 256 }
+        goal: { type: string, minLength: 1, maxLength: 16384 }
+        input: {}
+        capabilities: { $ref: '#/components/schemas/CapabilityGrant' }
+    StartResponse:
+      type: object
+      additionalProperties: false
+      required: [executionId, status, replayed]
+      properties:
+        executionId: { type: string }
+        status: { type: string, enum: [ACCEPTED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        replayed: { type: boolean }
+    StopResponse:
+      type: object
+      additionalProperties: false
+      required: [executionId, status]
+      properties:
+        executionId: { type: string }
+        status: { type: string, enum: [ACCEPTED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, protocolVersions, adapter, maxConcurrent, activeExecutions]
+      properties:
+        status: { type: string, const: SERVING }
+        protocolVersions:
+          type: array
+          contains: { const: agentos.runtime.interface/v1alpha1 }
+        adapter: { type: string, minLength: 1 }
+        maxConcurrent: { type: integer, minimum: 1 }
+        activeExecutions: { type: integer, minimum: 0 }
+    Event:
+      type: object
+      additionalProperties: false
+      required: [sequence, type, payload, occurredAt]
+      properties:
+        sequence: { type: integer, format: int64, minimum: 1 }
+        type: { type: string, minLength: 1, maxLength: 128 }
+        payload: {}
+        occurredAt: { type: string, format: date-time }
+    EventList:
+      type: object
+      additionalProperties: false
+      required: [executionId, events, nextAfter]
+      properties:
+        executionId: { type: string }
+        events: { type: array, items: { $ref: '#/components/schemas/Event' } }
+        nextAfter: { type: integer, format: int64, minimum: 0 }
+    Result:
+      type: object
+      additionalProperties: false
+      required: [executionId, status]
+      properties:
+        executionId: { type: string }
+        status: { type: string, enum: [ACCEPTED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        output: {}
+        errorCode: { type: string }
+        error: { type: string }
+        completedAt: { type: string, format: date-time }
+    Checkpoint:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, state, createdAt]
+      properties:
+        schemaVersion: { type: string, minLength: 1, maxLength: 256 }
+        state: {}
+        createdAt: { type: string, format: date-time }
+    CheckpointResponse:
+      type: object
+      additionalProperties: false
+      required: [executionId, checkpoint]
+      properties:
+        executionId: { type: string }
+        checkpoint: { $ref: '#/components/schemas/Checkpoint' }
+    RestoreRequest:
+      type: object
+      additionalProperties: false
+      required: [executionId, checkpoint]
+      properties:
+        executionId: { type: string }
+        checkpoint: { $ref: '#/components/schemas/Checkpoint' }
+    RestoreResponse:
+      type: object
+      additionalProperties: false
+      required: [executionId, restored]
+      properties:
+        executionId: { type: string }
+        restored: { type: boolean }
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [code, detail, status]
+      properties:
+        code: { type: string }
+        detail: { type: string }
+        status: { type: integer }

@@ -19,6 +19,14 @@ service ToolGatewayService {
   rpc InvokeTool(InvokeToolRequest) returns (InvokeToolResponse);
 }
 
+// MemoryGateway is the only Agent-originated path to canonical memory. Every
+// call is fenced to a live Attempt and authorized against the immutable
+// AgentVersion manifest before persistence or retrieval.
+service MemoryGatewayService {
+  rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
+  rpc PutMemory(PutMemoryRequest) returns (PutMemoryResponse);
+}
+
 message AttemptIdentity {
   string tenant_id = 1;
   string attempt_id = 2;
@@ -38,6 +46,9 @@ message ToolDescriptor {
 
 message ListToolsRequest {
   string tenant_id = 1;
+  // Required for Agent-originated discovery. The Gateway filters descriptors
+  // through the immutable AgentVersion capability declaration.
+  string agent_version_ref = 2;
 }
 
 message ListToolsResponse {
@@ -59,6 +70,10 @@ message InvokeToolRequest {
   // Required when the previous decision was REQUIRES_APPROVAL and a human
   // decided it.
   string approval_id = 11;
+  // Optional symbolic secret grant. When empty, no credential is issued to
+  // the executing adapter. When set, both the manifest secret capability and
+  // the broker scope must authorize it.
+  string secret_ref = 12;
 }
 
 message InvokeToolResponse {
@@ -71,4 +86,45 @@ message InvokeToolResponse {
   string policy_revision = 5;
   string receipt_operation = 6;
   string tool_call_id = 7;
+}
+
+message SearchMemoryRequest {
+  AttemptIdentity identity = 1;
+  string agent_version_ref = 2;
+  string namespace = 3;
+  string query = 4;
+  string sensitivity = 5;
+  int32 limit = 6;
+}
+
+message MemoryRecord {
+  string id = 1;
+  string namespace = 2;
+  string key = 3;
+  string content_type = 4;
+  string content = 5;
+  string sensitivity = 6;
+  int64 resource_version = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message SearchMemoryResponse {
+  repeated MemoryRecord records = 1;
+}
+
+message PutMemoryRequest {
+  AttemptIdentity identity = 1;
+  string agent_version_ref = 2;
+  string namespace = 3;
+  string key = 4;
+  string content_type = 5;
+  string content = 6;
+  string sensitivity = 7;
+  bytes provenance_json = 8;
+}
+
+message PutMemoryResponse {
+  MemoryRecord record = 1;
+  bool replayed = 2;
 }

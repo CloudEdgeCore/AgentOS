@@ -224,7 +224,11 @@ func (b *Broker) scopePath(scope tool.SecretScope) string {
 	if b.requestPath != nil {
 		return b.requestPath(scope)
 	}
-	segments := []string{"agentos", scope.TenantID, scope.ToolName, url.PathEscape(scope.Resource)}
+	resource := scope.Resource
+	if strings.TrimSpace(scope.SecretRef) != "" {
+		resource = scope.SecretRef
+	}
+	segments := []string{"agentos", scope.TenantID, scope.ToolName, url.PathEscape(resource)}
 	return strings.Join(segments, "/")
 }
 
@@ -236,7 +240,7 @@ func (b *Broker) authorize(request *http.Request) {
 }
 
 func scopeKey(scope tool.SecretScope) string {
-	return scope.TenantID + "\x00" + scope.ToolName + "\x00" + scope.Resource
+	return scope.TenantID + "\x00" + scope.ToolName + "\x00" + scope.Resource + "\x00" + scope.SecretRef
 }
 
 func firstLine(body []byte) string {

@@ -175,3 +175,151 @@ var ToolGatewayService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "agentos/gateway/v1alpha1/gateway.proto",
 }
+
+const (
+	MemoryGatewayService_SearchMemory_FullMethodName = "/agentos.gateway.v1alpha1.MemoryGatewayService/SearchMemory"
+	MemoryGatewayService_PutMemory_FullMethodName    = "/agentos.gateway.v1alpha1.MemoryGatewayService/PutMemory"
+)
+
+// MemoryGatewayServiceClient is the client API for MemoryGatewayService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MemoryGateway is the only Agent-originated path to canonical memory. Every
+// call is fenced to a live Attempt and authorized against the immutable
+// AgentVersion manifest before persistence or retrieval.
+type MemoryGatewayServiceClient interface {
+	SearchMemory(ctx context.Context, in *SearchMemoryRequest, opts ...grpc.CallOption) (*SearchMemoryResponse, error)
+	PutMemory(ctx context.Context, in *PutMemoryRequest, opts ...grpc.CallOption) (*PutMemoryResponse, error)
+}
+
+type memoryGatewayServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMemoryGatewayServiceClient(cc grpc.ClientConnInterface) MemoryGatewayServiceClient {
+	return &memoryGatewayServiceClient{cc}
+}
+
+func (c *memoryGatewayServiceClient) SearchMemory(ctx context.Context, in *SearchMemoryRequest, opts ...grpc.CallOption) (*SearchMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchMemoryResponse)
+	err := c.cc.Invoke(ctx, MemoryGatewayService_SearchMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *memoryGatewayServiceClient) PutMemory(ctx context.Context, in *PutMemoryRequest, opts ...grpc.CallOption) (*PutMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PutMemoryResponse)
+	err := c.cc.Invoke(ctx, MemoryGatewayService_PutMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MemoryGatewayServiceServer is the server API for MemoryGatewayService service.
+// All implementations must embed UnimplementedMemoryGatewayServiceServer
+// for forward compatibility.
+//
+// MemoryGateway is the only Agent-originated path to canonical memory. Every
+// call is fenced to a live Attempt and authorized against the immutable
+// AgentVersion manifest before persistence or retrieval.
+type MemoryGatewayServiceServer interface {
+	SearchMemory(context.Context, *SearchMemoryRequest) (*SearchMemoryResponse, error)
+	PutMemory(context.Context, *PutMemoryRequest) (*PutMemoryResponse, error)
+	mustEmbedUnimplementedMemoryGatewayServiceServer()
+}
+
+// UnimplementedMemoryGatewayServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMemoryGatewayServiceServer struct{}
+
+func (UnimplementedMemoryGatewayServiceServer) SearchMemory(context.Context, *SearchMemoryRequest) (*SearchMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SearchMemory not implemented")
+}
+func (UnimplementedMemoryGatewayServiceServer) PutMemory(context.Context, *PutMemoryRequest) (*PutMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PutMemory not implemented")
+}
+func (UnimplementedMemoryGatewayServiceServer) mustEmbedUnimplementedMemoryGatewayServiceServer() {}
+func (UnimplementedMemoryGatewayServiceServer) testEmbeddedByValue()                              {}
+
+// UnsafeMemoryGatewayServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MemoryGatewayServiceServer will
+// result in compilation errors.
+type UnsafeMemoryGatewayServiceServer interface {
+	mustEmbedUnimplementedMemoryGatewayServiceServer()
+}
+
+func RegisterMemoryGatewayServiceServer(s grpc.ServiceRegistrar, srv MemoryGatewayServiceServer) {
+	// If the following call panics, it indicates UnimplementedMemoryGatewayServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MemoryGatewayService_ServiceDesc, srv)
+}
+
+func _MemoryGatewayService_SearchMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryGatewayServiceServer).SearchMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryGatewayService_SearchMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryGatewayServiceServer).SearchMemory(ctx, req.(*SearchMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MemoryGatewayService_PutMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PutMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryGatewayServiceServer).PutMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryGatewayService_PutMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryGatewayServiceServer).PutMemory(ctx, req.(*PutMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MemoryGatewayService_ServiceDesc is the grpc.ServiceDesc for MemoryGatewayService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MemoryGatewayService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "agentos.gateway.v1alpha1.MemoryGatewayService",
+	HandlerType: (*MemoryGatewayServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SearchMemory",
+			Handler:    _MemoryGatewayService_SearchMemory_Handler,
+		},
+		{
+			MethodName: "PutMemory",
+			Handler:    _MemoryGatewayService_PutMemory_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "agentos/gateway/v1alpha1/gateway.proto",
+}

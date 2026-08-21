@@ -209,6 +209,15 @@ func (s *Store) GetRuntimeAssignment(ctx context.Context, tenantID string, attem
 	if err != nil {
 		return result, classify(err)
 	}
+	if result.Task.AgentVersionID != nil {
+		version, versionErr := scanAgentVersion(tx.QueryRow(ctx, `SELECT `+agentVersionColumns+`
+			FROM agent_versions WHERE tenant_id = $1 AND id = $2`,
+			tenantID, result.Task.AgentVersionID.String()))
+		if versionErr != nil {
+			return result, classify(versionErr)
+		}
+		result.AgentVersion = &version
+	}
 	result.Lease, err = scanLease(tx.QueryRow(ctx, `SELECT `+leaseColumns+` FROM runtime_leases
 		WHERE tenant_id = $1 AND attempt_id = $2 AND fencing_token = $3 AND released_at IS NULL`,
 		tenantID, attemptID.String(), fencingToken))

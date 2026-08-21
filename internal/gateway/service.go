@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	gatewayv1alpha1 "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/capability"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/tool"
 	"github.com/google/uuid"
@@ -36,10 +37,15 @@ type Service struct {
 	gatewayv1alpha1.UnimplementedToolGatewayServiceServer
 	invoker       ToolInvoker
 	allowedTenant string
+	capabilities  *capability.Authorizer
 }
 
-func NewService(invoker ToolInvoker, allowedTenant string) *Service {
-	return &Service{invoker: invoker, allowedTenant: allowedTenant}
+func NewService(invoker ToolInvoker, allowedTenant string, capabilities ...*capability.Authorizer) *Service {
+	service := &Service{invoker: invoker, allowedTenant: allowedTenant}
+	if len(capabilities) > 0 {
+		service.capabilities = capabilities[0]
+	}
+	return service
 }
 
 func (s *Service) ListTools(ctx context.Context, request *gatewayv1alpha1.ListToolsRequest) (*gatewayv1alpha1.ListToolsResponse, error) {
@@ -55,6 +61,15 @@ func (s *Service) ListTools(ctx context.Context, request *gatewayv1alpha1.ListTo
 	}
 	response := &gatewayv1alpha1.ListToolsResponse{Tools: make([]*gatewayv1alpha1.ToolDescriptor, 0, len(descriptors))}
 	for _, descriptor := range descriptors {
+		if s.capabilities != nil {
+			if err := s.capabilities.Authorize(ctx, request.GetTenantId(), request.GetAgentVersionRef(),
+				capability.Tool, descriptor.Name, descriptor.Name+"@"+descriptor.Version); err != nil {
+				if errors.Is(err, capability.ErrDenied) {
+					continue
+				}
+				return nil, status.Error(codes.Internal, "agent capability lookup failed")
+			}
+		}
 		response.Tools = append(response.Tools, &gatewayv1alpha1.ToolDescriptor{
 			Name: descriptor.Name, Version: descriptor.Version,
 			SideEffectRisk: string(descriptor.SideEffectRisk),
@@ -75,6 +90,22 @@ func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1alpha1.Invok
 	if len(request.GetArgsJson()) > maxArgsBytes {
 		return nil, status.Errorf(codes.InvalidArgument, "tool arguments exceed %d bytes", maxArgsBytes)
 	}
+	if s.capabilities != nil {
+		candidates := []string{request.GetToolName()}
+		if request.GetToolVersion() != "" {
+			candidates = append(candidates, request.GetToolName()+"@"+request.GetToolVersion())
+		}
+		if err := s.capabilities.Authorize(ctx, request.GetIdentity().GetTenantId(), request.GetAgentVersionRef(),
+			capability.Tool, candidates...); err != nil {
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
+		if request.GetSecretRef() != "" {
+			if err := s.capabilities.Authorize(ctx, request.GetIdentity().GetTenantId(), request.GetAgentVersionRef(),
+				capability.Secret, request.GetSecretRef()); err != nil {
+				return nil, status.Error(codes.PermissionDenied, err.Error())
+			}
+		}
+	}
 	taskID, err := parseUUID(request.GetTaskId(), "task ID")
 	if err != nil {
 		return nil, err
@@ -92,6 +123,7 @@ func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1alpha1.Invok
 		TaskID:   taskID, RunID: runID, AttemptID: attemptID,
 		FencingToken:    request.GetIdentity().GetFencingToken(),
 		AgentVersionRef: request.GetAgentVersionRef(),
+		SecretRef:       request.GetSecretRef(),
 		ToolName:        request.GetToolName(), ToolVersion: request.GetToolVersion(),
 		Action: request.GetAction(), Resource: request.GetResource(),
 		Args: json.RawMessage(request.GetArgsJson()), IdempotencyKey: request.GetIdempotencyKey(),

@@ -8,6 +8,8 @@
 /target/
 *.coverprofile
 *.test
+__pycache__/
+*.py[cod]
 
 # Local configuration and credentials
 .env
@@ -23,4 +25,3 @@ Thumbs.db
 # TLC scratch
 modelcheck/tla/states/
 modelcheck/tla/AgentOS_TTrace*
-

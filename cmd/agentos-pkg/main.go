@@ -89,18 +89,11 @@ func runPackageManifest(args []string) error {
 	if err != nil {
 		return err
 	}
-	spec, err := json.Marshal(manifest.Spec)
-	if err != nil {
-		return fmt.Errorf("canonicalize agent manifest spec: %w", err)
-	}
-	packageManifest := agentpkg.Manifest{
-		Schema: agentpkg.ManifestSchema, AgentVersionRef: manifest.Ref(),
-		SpecDigest: agentpkg.SpecSHA256(spec), Spec: spec,
-		Provenance: agentpkg.Provenance{
+	packageManifest, err := agentpkg.FromAgentManifest(manifest,
+		agentpkg.Provenance{
 			Builder: *builder, BuildWorkflow: *workflow, GitCommit: *gitCommit, BuiltAt: builtAt.UTC(),
-		},
-	}
-	if err := packageManifest.Validate(); err != nil {
+		})
+	if err != nil {
 		return err
 	}
 	encoded, err := json.Marshal(packageManifest)

@@ -18,7 +18,7 @@ const (
 	ManifestKind       = "AgentManifest"
 	// RuntimeInterfaceV1Alpha1 is the provider-neutral lifecycle boundary an
 	// adapter implements. Provider-specific state stays behind RuntimeABI.
-	RuntimeInterfaceV1Alpha1 = "agentos.runtime/v1alpha1"
+	RuntimeInterfaceV1Alpha1 = "agentos.runtime.interface/v1alpha1"
 
 	CheckpointNone    = "none"
 	CheckpointLogical = "logical"
@@ -226,8 +226,8 @@ func validatePlatformSpec(spec Spec) error {
 			if !contractRefPattern.MatchString(spec.Checkpoint.SchemaVersion) {
 				return fmt.Errorf("checkpoint logical mode requires a valid schemaVersion")
 			}
-			if spec.Checkpoint.IntervalSeconds < 0 {
-				return fmt.Errorf("checkpoint.intervalSeconds must be non-negative")
+			if spec.Checkpoint.IntervalSeconds < 0 || spec.Checkpoint.IntervalSeconds > 86_400 {
+				return fmt.Errorf("checkpoint.intervalSeconds must be between 0 and 86400")
 			}
 		default:
 			return fmt.Errorf("checkpoint.mode must be %q or %q", CheckpointNone, CheckpointLogical)

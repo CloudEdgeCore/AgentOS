@@ -1,0 +1,42 @@
+{
+  "kind": "CompatibilityPromotion",
+  "current": {
+    "controlApi": "v1alpha1",
+    "agentManifest": "agentos.dev/v1alpha1",
+    "runtimeProtocol": "agentos.runtime.v1alpha1",
+    "runtimeInterface": "agentos.runtime.interface/v1alpha1"
+  },
+  "candidate": {
+    "controlApi": "v1",
+    "agentManifest": "agentos.dev/v1",
+    "runtimeProtocol": "agentos.runtime.v1",
+    "runtimeInterface": "agentos.runtime.interface/v1"
+  },
+  "policy": {
+    "minimumDeprecationDays": 180,
+    "nMinusOneReadCompatibility": true,
+    "additiveChangesOnlyBeforePromotion": true,
+    "unknownFieldsFailClosed": true
+  },
+  "frozenRuntimeLifecycle": [
+    "health",
+    "start",
+    "stop",
+    "event",
+    "result",
+    "checkpoint",
+    "restore"
+  ],
+  "promotionGates": [
+    "openapi-valid",
+    "protobuf-generated-diff-clean",
+    "native-go-conformance",
+    "python-remote-conformance",
+    "langgraph-conformance",
+    "a2a-conformance",
+    "legacy-agentversion-publication",
+    "gateway-capability-default-deny",
+    "memory-gateway-fencing",
+    "secret-broker-no-implicit-issuance"
+  ]
+}
