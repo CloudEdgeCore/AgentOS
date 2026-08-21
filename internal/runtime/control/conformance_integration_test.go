@@ -356,7 +356,13 @@ func (env *conformanceEnv) driveOCIWorker(t *testing.T, namespace string) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("OCI provider did not finish: phase=%s\nstderr:\n%s", task.Phase, stderr.String())
+			var attemptPhase, failureCode, failureMessage string
+			diagnosticErr := env.pool.QueryRow(ctx, `SELECT a.phase, COALESCE(a.failure_code, ''), COALESCE(a.failure_message, '')
+				FROM attempts a JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
+				WHERE a.tenant_id = $1 AND r.task_id = $2 ORDER BY a.ordinal DESC LIMIT 1`,
+				env.tenant, env.taskID).Scan(&attemptPhase, &failureCode, &failureMessage)
+			t.Fatalf("OCI provider did not finish: phase=%s attempt=%s failureCode=%s failureMessage=%s diagnosticErr=%v\nstderr:\n%s",
+				task.Phase, attemptPhase, failureCode, failureMessage, diagnosticErr, stderr.String())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
