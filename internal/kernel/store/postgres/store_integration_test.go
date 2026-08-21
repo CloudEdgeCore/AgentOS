@@ -13,6 +13,7 @@ import (
 
 	"github.com/bian-cloud-skill/agentos/internal/kernel/admission"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/domain"
+	"github.com/bian-cloud-skill/agentos/internal/kernel/policy"
 	"github.com/bian-cloud-skill/agentos/internal/kernel/scheduler"
 	kernelstore "github.com/bian-cloud-skill/agentos/internal/kernel/store"
 	postgresstore "github.com/bian-cloud-skill/agentos/internal/kernel/store/postgres"
@@ -73,11 +74,11 @@ func TestTaskIdempotencyAndCAS(t *testing.T) {
 	}
 
 	var outboxCount int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events`).Scan(&outboxCount); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE aggregate_type = 'Task'`).Scan(&outboxCount); err != nil {
 		t.Fatalf("count outbox: %v", err)
 	}
 	if outboxCount != 2 {
-		t.Fatalf("outbox count = %d, want 2", outboxCount)
+		t.Fatalf("outbox count = %d, want 2 (Task aggregate only; audit events are separate)", outboxCount)
 	}
 }
 
@@ -252,8 +253,9 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)
 	ctx := context.Background()
+	published := publishVersion(t, ctx, repository, "tenant-a", "agent", "1", `{"runtimeClassPolicy":{"allowed":["oci"]}}`)
 	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
-		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent:v1",
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1",
 		Goal: "controller chain", IdempotencyKey: "controller-chain",
 		Spec: []byte(`{
 			"priority":70,
@@ -269,7 +271,7 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10,
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
-	admissionController := admission.NewController(repository, engine, "admission-1", 10, time.Minute)
+	admissionController := admission.NewController(repository, engine, testPolicyEngine(t), "admission-1", 10, time.Minute)
 	processed, err := admissionController.Reconcile(ctx)
 	if err != nil || processed != 1 {
 		t.Fatalf("admission reconcile processed=%d err=%v", processed, err)
@@ -280,6 +282,17 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 	}
 	if admitted.Phase != domain.TaskAdmitted || admitted.AdmissionReasonCode != "ADMISSION_PASSED" {
 		t.Fatalf("unexpected admission state: %+v", admitted)
+	}
+	if admitted.AgentVersionID == nil || *admitted.AgentVersionID != published.AgentVersion.ID {
+		t.Fatalf("task was not bound to the published agent version: %+v", admitted)
+	}
+	var policyRevision string
+	if err := pool.QueryRow(ctx, `SELECT policy_revision FROM admission_decisions
+		WHERE tenant_id = $1 AND task_id = $2`, "tenant-a", admitted.ID.String()).Scan(&policyRevision); err != nil {
+		t.Fatalf("read policy revision: %v", err)
+	}
+	if policyRevision != policy.Revision {
+		t.Fatalf("policy revision = %q, want %q", policyRevision, policy.Revision)
 	}
 
 	schedulerController := scheduler.NewController(repository, staticPools{{
@@ -346,9 +359,19 @@ func TestControllerClaimFencingAndOutboxOwnership(t *testing.T) {
 	}
 
 	events, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-a", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(events) != 1 {
-		t.Fatalf("claim outbox: events=%d err=%v", len(events), err)
+	if err != nil {
+		t.Fatalf("claim outbox: err=%v", err)
 	}
+	var taskEvents []kernelstore.OutboxEvent
+	for _, event := range events {
+		if event.AggregateType == "Task" {
+			taskEvents = append(taskEvents, event)
+		}
+	}
+	if len(taskEvents) != 1 {
+		t.Fatalf("claim outbox: Task events=%d (total %d) err=%v", len(taskEvents), len(events), err)
+	}
+	events = taskEvents
 	other, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-b", Limit: 10, LockTTL: time.Minute})
 	if err != nil || len(other) != 0 {
 		t.Fatalf("second dispatcher stole event: events=%d err=%v", len(other), err)
@@ -361,9 +384,19 @@ func TestControllerClaimFencingAndOutboxOwnership(t *testing.T) {
 		t.Fatalf("expected expired outbox claim fencing, got %v", err)
 	}
 	reclaimed, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "dispatcher-a", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(reclaimed) != 1 {
-		t.Fatalf("reclaim outbox: events=%d err=%v", len(reclaimed), err)
+	if err != nil {
+		t.Fatalf("reclaim outbox: err=%v", err)
 	}
+	var reclaimedTask []kernelstore.OutboxEvent
+	for _, event := range reclaimed {
+		if event.AggregateType == "Task" {
+			reclaimedTask = append(reclaimedTask, event)
+		}
+	}
+	if len(reclaimedTask) != 1 {
+		t.Fatalf("reclaim outbox: Task events=%d (total %d) err=%v", len(reclaimedTask), len(reclaimed), err)
+	}
+	reclaimed = reclaimedTask
 	if reclaimed[0].LockFencingToken <= events[0].LockFencingToken {
 		t.Fatalf("outbox token did not increase: old=%d new=%d", events[0].LockFencingToken, reclaimed[0].LockFencingToken)
 	}
@@ -400,15 +433,35 @@ func TestOutboxClaimsOnlyTheNextAggregateVersion(t *testing.T) {
 		t.Fatalf("admit task: %v", err)
 	}
 	first, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "first", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(first) != 1 || first[0].AggregateVersion != 1 {
-		t.Fatalf("first aggregate claim=%+v err=%v", first, err)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
 	}
-	if err := repository.MarkOutboxPublished(ctx, first[0].ID, "first", first[0].LockFencingToken, clock.Now()); err != nil {
+	// Audit projection events share the outbox; the ordering rule applies per
+	// aggregate, so filter to the Task aggregate for the version assertions.
+	var taskClaims []kernelstore.OutboxEvent
+	for _, event := range first {
+		if event.AggregateType == "Task" {
+			taskClaims = append(taskClaims, event)
+		}
+	}
+	if len(taskClaims) != 1 || taskClaims[0].AggregateVersion != 1 {
+		t.Fatalf("first Task aggregate claim=%+v err=%v", taskClaims, err)
+	}
+	if err := repository.MarkOutboxPublished(ctx, taskClaims[0].ID, "first", taskClaims[0].LockFencingToken, clock.Now()); err != nil {
 		t.Fatalf("publish first version: %v", err)
 	}
 	second, err := repository.ClaimOutbox(ctx, kernelstore.ClaimOutboxInput{DispatcherID: "second", Limit: 10, LockTTL: time.Minute})
-	if err != nil || len(second) != 1 || second[0].AggregateVersion != 2 {
-		t.Fatalf("second aggregate claim=%+v err=%v", second, err)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	var secondTask []kernelstore.OutboxEvent
+	for _, event := range second {
+		if event.AggregateType == "Task" {
+			secondTask = append(secondTask, event)
+		}
+	}
+	if len(secondTask) != 1 || secondTask[0].AggregateVersion != 2 {
+		t.Fatalf("second Task aggregate claim=%+v err=%v", secondTask, err)
 	}
 }
 
@@ -434,6 +487,27 @@ func createAdmittedRun(t *testing.T, ctx context.Context, store *postgresstore.S
 	return admitted, run
 }
 
+func publishVersion(t *testing.T, ctx context.Context, repository *postgresstore.Store, tenantID, name, version, spec string) kernelstore.CreateAgentVersionResult {
+	t.Helper()
+	published, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: tenantID, Namespace: "default", Name: name, Version: version,
+		Spec: []byte(spec),
+	})
+	if err != nil {
+		t.Fatalf("publish agent version: %v", err)
+	}
+	return published
+}
+
+func testPolicyEngine(t *testing.T) *policy.Engine {
+	t.Helper()
+	engine, err := policy.New(policy.TenantPolicies{"tenant-a": {MaxPriority: 100}})
+	if err != nil {
+		t.Fatalf("prepare test policy engine: %v", err)
+	}
+	return engine
+}
+
 func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstore.Store) {
 	t.Helper()
 	url := os.Getenv(testDatabaseEnvironment)
@@ -454,7 +528,12 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE inbox_receipts, outbox_events, runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
+		runtime_operation_receipts, checkpoints, artifacts,
+		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
+		audit_events,
+		tenant_consumption_windows, tenant_quotas,
+		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	return pool, postgresstore.NewWithClock(pool, clock)

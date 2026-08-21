@@ -26,13 +26,24 @@ var (
 	ErrFenced              = errors.New("attempt fencing token is stale")
 	ErrCompletionPending   = errors.New("completed attempt is awaiting result commit")
 	ErrResultRequired      = errors.New("durable result reference is required")
+	// ErrRetryableTransaction marks a transient serialization failure that
+	// callers must retry with bounded backoff (ADR-002: SERIALIZABLE with
+	// bounded retries).
+	ErrRetryableTransaction = errors.New("retryable transaction conflict")
 )
+
+// IsRetryableTransaction reports whether err is a transient transaction
+// failure that may be retried with backoff.
+func IsRetryableTransaction(err error) bool {
+	return errors.Is(err, ErrRetryableTransaction)
+}
 
 type Task struct {
 	ID                  uuid.UUID
 	TenantID            string
 	Namespace           string
 	AgentVersionRef     string
+	AgentVersionID      *uuid.UUID
 	Goal                string
 	Spec                json.RawMessage
 	RequestHash         [32]byte
@@ -43,9 +54,17 @@ type Task struct {
 	CancelRequestedAt   *time.Time
 	ActiveRunID         *uuid.UUID
 	ResultRef           string
-	ResourceVersion     int64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// NextScheduleAttemptAt gates scheduling-claim eligibility (O6): a task
+	// deferred after a no-placement is not claimable by the scheduler until
+	// this deadline. Nil means eligible immediately.
+	NextScheduleAttemptAt *time.Time
+	// ScheduleRetryCount is the number of consecutive no-placement
+	// deferrals; it drives the exponential scheduling backoff and resets on
+	// successful placement.
+	ScheduleRetryCount int64
+	ResourceVersion    int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type Run struct {

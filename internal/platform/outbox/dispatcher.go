@@ -40,27 +40,43 @@ func NewDispatcher(repository Repository, publisher Publisher, id string, batch 
 	}
 }
 
+// operationTimeout bounds each claim/publish/acknowledge step so one slow
+// broker or store round trip marks that event failed (retried by backoff)
+// instead of stalling the whole dispatch pipeline.
+const operationTimeout = 10 * time.Second
+
 func (d *Dispatcher) RunOnce(ctx context.Context) (int, error) {
-	events, err := d.repository.ClaimOutbox(ctx, store.ClaimOutboxInput{
+	claimCtx, cancelClaim := context.WithTimeout(ctx, operationTimeout)
+	events, err := d.repository.ClaimOutbox(claimCtx, store.ClaimOutboxInput{
 		DispatcherID: d.id, Limit: d.batch, LockTTL: d.lockTTL,
 	})
+	cancelClaim()
 	if err != nil {
 		return 0, err
 	}
 	published := 0
 	var failures []error
 	for _, event := range events {
-		if err := d.publisher.Publish(ctx, event); err != nil {
+		publishCtx, cancelPublish := context.WithTimeout(ctx, operationTimeout)
+		publishErr := d.publisher.Publish(publishCtx, event)
+		cancelPublish()
+		if publishErr != nil {
 			retryAt := d.now().Add(retryBackoff(event.PublishAttempts))
-			if markErr := d.repository.MarkOutboxFailed(ctx, event.ID, d.id, event.LockFencingToken, err.Error(), retryAt); markErr != nil {
-				failures = append(failures, fmt.Errorf("publish event %s: %w; mark failed: %v", event.ID, err, markErr))
+			markCtx, cancelMark := context.WithTimeout(ctx, operationTimeout)
+			markErr := d.repository.MarkOutboxFailed(markCtx, event.ID, d.id, event.LockFencingToken, publishErr.Error(), retryAt)
+			cancelMark()
+			if markErr != nil {
+				failures = append(failures, fmt.Errorf("publish event %s: %w; mark failed: %v", event.ID, publishErr, markErr))
 			} else {
-				failures = append(failures, fmt.Errorf("publish event %s: %w", event.ID, err))
+				failures = append(failures, fmt.Errorf("publish event %s: %w", event.ID, publishErr))
 			}
 			continue
 		}
-		if err := d.repository.MarkOutboxPublished(ctx, event.ID, d.id, event.LockFencingToken, d.now()); err != nil {
-			failures = append(failures, fmt.Errorf("acknowledge event %s: %w", event.ID, err))
+		ackCtx, cancelAck := context.WithTimeout(ctx, operationTimeout)
+		ackErr := d.repository.MarkOutboxPublished(ackCtx, event.ID, d.id, event.LockFencingToken, d.now())
+		cancelAck()
+		if ackErr != nil {
+			failures = append(failures, fmt.Errorf("acknowledge event %s: %w", event.ID, ackErr))
 			continue
 		}
 		published++

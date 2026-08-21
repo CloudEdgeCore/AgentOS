@@ -1,0 +1,8 @@
+{
+  "dev": {
+    "max_priority": 100,
+    "allowed_tools": ["echo.dev"],
+    "allowed_models": ["dev/echo-model"],
+    "approval_required_risk": "high"
+  }
+}

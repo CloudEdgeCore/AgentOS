@@ -28,8 +28,6 @@ type Store struct {
 
 var _ kernelstore.KernelStore = (*Store)(nil)
 
-var errRetryableTransaction = errors.New("retryable PostgreSQL transaction")
-
 func New(pool *pgxpool.Pool) *Store {
 	return NewWithClock(pool, func() time.Time { return time.Now().UTC() })
 }
@@ -44,7 +42,7 @@ func (s *Store) CreateTask(ctx context.Context, in kernelstore.CreateTaskInput) 
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
 		result, err := s.createTaskOnce(ctx, in)
-		if !errors.Is(err, errRetryableTransaction) {
+		if !kernelstore.IsRetryableTransaction(err) {
 			return result, err
 		}
 		lastErr = err
@@ -91,6 +89,11 @@ func (s *Store) createTaskOnce(ctx context.Context, in kernelstore.CreateTaskInp
 		if err := insertEvent(ctx, tx, created.TenantID, "Task", created.ID, created.ResourceVersion, "TaskQueued", map[string]any{
 			"taskId": created.ID, "namespace": created.Namespace,
 		}, now, s.newID()); err != nil {
+			return result, err
+		}
+		if err := auditHook(ctx, tx, created.TenantID, "task.queued", "Task", created.ID, map[string]any{
+			"namespace": created.Namespace, "agentVersionRef": created.AgentVersionRef,
+		}, now); err != nil {
 			return result, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -146,9 +149,21 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 	if err != nil {
 		return zero, classifyCAS(err, "task", id, expectedVersion)
 	}
+	// Quota reservation release (v0.8): a terminal task returns its reserved
+	// ceiling to the tenant window.
+	if to == domain.TaskFailed || to == domain.TaskCancelled {
+		if err := s.releaseTenantReservation(ctx, tx, updated.TenantID, updated.ID); err != nil {
+			return zero, err
+		}
+	}
 	if err := insertEvent(ctx, tx, updated.TenantID, "Task", updated.ID, updated.ResourceVersion, "Task"+title(string(to)), map[string]any{
 		"taskId": updated.ID, "phase": updated.Phase,
 	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, updated.TenantID, "task.transitioned", "Task", updated.ID, map[string]any{
+		"from": string(current.Phase), "to": string(to),
+	}, now); err != nil {
 		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -288,6 +303,11 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 	}, now, s.newID()); err != nil {
 		return zero, err
 	}
+	if err := auditHook(ctx, tx, run.TenantID, "attempt.acquired", "Attempt", attempt.ID, map[string]any{
+		"runId": run.ID, "fencingToken": token, "runtimeClass": in.RuntimeClass, "runtimeInstanceId": in.RuntimeInstanceID,
+	}, now); err != nil {
+		return zero, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return zero, classify(err)
 	}
@@ -363,6 +383,12 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 	if err := insertEvent(ctx, tx, attempt.TenantID, "Attempt", attempt.ID, updated.ResourceVersion, attemptEventType(in.To), map[string]any{
 		"attemptId": attempt.ID, "runId": attempt.RunID, "phase": in.To, "fencingToken": in.FencingToken,
 	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, attempt.TenantID, "attempt.transitioned", "Attempt", attempt.ID, map[string]any{
+		"runId": attempt.RunID, "from": string(attempt.Phase), "to": string(in.To),
+		"fencingToken": in.FencingToken, "failureCode": in.FailureCode,
+	}, now); err != nil {
 		return zero, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -482,6 +508,11 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 		WHERE attempt_id = $2 AND fencing_token = $3 AND released_at IS NULL`, now, attempt.ID.String(), in.FencingToken); err != nil {
 		return zeroRun, zeroTask, classify(err)
 	}
+	// Quota reservation release (v0.8): the task is terminal, so its reserved
+	// ceiling is returned to the tenant window it was admitted in.
+	if err := s.releaseTenantReservation(ctx, tx, task.TenantID, task.ID); err != nil {
+		return zeroRun, zeroTask, err
+	}
 	if err := insertEvent(ctx, tx, run.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunCompleted", map[string]any{
 		"runId": run.ID, "attemptId": attempt.ID, "resultRef": in.ResultRef,
 	}, now, s.newID()); err != nil {
@@ -500,7 +531,24 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 
 func (s *Store) now() time.Time { return s.clock().UTC() }
 
+// begin opens a READ COMMITTED transaction: state machines are expressed
+// with resource-version CAS, targeted row locks and unique constraints
+// (ADR-002). SERIALIZABLE was measured at ~94% conflict under 16-way
+// concurrent completions (PostgreSQL SSI page-level predicates), so it is
+// not used for the v0.1 hot paths; every invariant is enforced by row locks
+// and constraints instead.
 func (s *Store) begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, classify(err)
+	}
+	return tx, nil
+}
+
+// beginSerializable is retained for future cross-row invariants that row
+// locks cannot express. Any adoption must first measure the SSI conflict rate
+// under the target concurrency and calibrate retry budgets.
+func (s *Store) beginSerializable(ctx context.Context) (pgx.Tx, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return nil, classify(err)
@@ -588,7 +636,7 @@ func classify(err error) error {
 		case "23505":
 			return fmt.Errorf("%w: postgres %s", kernelstore.ErrVersionConflict, pgErr.Code)
 		case "40001", "40P01":
-			return fmt.Errorf("%w: %w: postgres %s", kernelstore.ErrVersionConflict, errRetryableTransaction, pgErr.Code)
+			return fmt.Errorf("%w: %w: postgres %s", kernelstore.ErrVersionConflict, kernelstore.ErrRetryableTransaction, pgErr.Code)
 		}
 	}
 	return err
@@ -612,8 +660,9 @@ func attemptEventType(phase domain.AttemptPhase) string {
 }
 
 const taskColumns = `
-	id::text, tenant_id, namespace, agent_version_ref, goal, spec, request_hash,
+	id::text, tenant_id, namespace, agent_version_ref, agent_version_id::text, goal, spec, request_hash,
 	idempotency_key, phase, admission_reason_code, admitted_at, cancel_requested_at, active_run_id::text, result_ref,
+	next_schedule_attempt_at, schedule_retry_count,
 	resource_version, created_at, updated_at`
 
 const runColumns = `
@@ -634,11 +683,13 @@ type scanner interface{ Scan(...any) error }
 func scanTask(row scanner) (kernelstore.Task, error) {
 	var task kernelstore.Task
 	var id string
+	var agentVersionID sql.NullString
 	var admissionReason, activeID, result sql.NullString
-	var admitted, cancel sql.NullTime
+	var admitted, cancel, nextSchedule sql.NullTime
 	var hash []byte
-	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &task.Goal,
-		&task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel, &activeID, &result,
+	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &agentVersionID,
+		&task.Goal, &task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel,
+		&activeID, &result, &nextSchedule, &task.ScheduleRetryCount,
 		&task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return task, err
 	}
@@ -647,6 +698,13 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 		return task, fmt.Errorf("parse task id: %w", err)
 	}
 	task.ID = parsed
+	if agentVersionID.Valid {
+		parsed, err := uuid.Parse(agentVersionID.String)
+		if err != nil {
+			return task, fmt.Errorf("parse agent version id: %w", err)
+		}
+		task.AgentVersionID = &parsed
+	}
 	if len(hash) != len(task.RequestHash) {
 		return task, fmt.Errorf("task request hash has length %d", len(hash))
 	}
@@ -659,6 +717,9 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 	}
 	if cancel.Valid {
 		task.CancelRequestedAt = &cancel.Time
+	}
+	if nextSchedule.Valid {
+		task.NextScheduleAttemptAt = &nextSchedule.Time
 	}
 	if activeID.Valid {
 		parsed, err := uuid.Parse(activeID.String)

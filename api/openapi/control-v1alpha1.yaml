@@ -68,6 +68,394 @@ paths:
                 $ref: '#/components/schemas/Task'
         '401': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/tasks/{taskId}:cancel:
+    post:
+      operationId: cancelTask
+      summary: Request cancellation of a durable task
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '202':
+          description: Cancellation was committed or durably requested from the active Runtime.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
+  /v1/tasks/{taskId}/events:
+    get:
+      operationId: watchTask
+      summary: Stream task lifecycle events over Server-Sent Events
+      description: >-
+        Opens a text/event-stream for the task. The stream immediately emits
+        one task.updated event with the current snapshot, then emits
+        task.updated on every resource-version change and closes with a
+        task.terminal event once the task reaches a terminal phase. Comment
+        heartbeats keep the connection alive. Events are best-effort (the
+        cursor is the resource version), so after a reconnect clients must
+        reconcile with GET /v1/tasks/{taskId}.
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: poll
+          in: query
+          required: false
+          description: State-check interval (default 500ms, 100ms..5s).
+          schema: { type: string, example: 500ms }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: A stream of Task snapshots, one SSE event per change.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/TaskEvent'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/memories:
+    post:
+      operationId: createMemory
+      summary: Persist one canonical memory record
+      description: >-
+        Writes a memory entry under a stable (namespace, key) pair. An
+        identical document replays idempotently; a different document under
+        the same key is a correction (new resource version) and resurrects a
+        tombstoned record. Content is embedded by the server unless an
+        embedding is supplied.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMemoryRequest'
+      responses:
+        '201':
+          description: A new memory record was persisted.
+          headers:
+            Location:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '200':
+          description: The identical document already exists.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, const: 'true' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: searchMemory
+      summary: Hybrid keyword/vector search over the tenant's memory
+      description: >-
+        Retrieves live (non-tombstoned, unexpired) records scored by FTS and
+        trigram similarity for the keyword query and cosine distance for the
+        optional embedding. The tenant scope and sensitivity filter are
+        applied before scoring (ADR-009).
+      parameters:
+        - name: query
+          in: query
+          required: false
+          description: Keyword query (FTS + trigram).
+          schema: { type: string }
+        - name: embedding
+          in: query
+          required: false
+          description: Optional JSON array of 384 floats; vector search component.
+          schema: { type: string }
+        - name: namespace
+          in: query
+          required: false
+          schema: { type: string }
+        - name: sensitivity
+          in: query
+          required: false
+          schema: { type: string, enum: [internal, confidential, restricted] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: Ranked memory records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryList'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /v1/memories/{memoryId}:
+    get:
+      operationId: getMemory
+      summary: Read one memory record (tombstone state included)
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The current memory record.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: tombstoneMemory
+      summary: Soft-delete one memory record (deletion intent survives)
+      description: >-
+        CAS-versioned tombstone: the record disappears from search while its
+        deletion intent remains observable and auditable (ADR-009).
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The tombstoned memory record.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
+  /v1/agent-versions:
+    post:
+      operationId: createAgentVersion
+      summary: Publish an immutable agent version
+      description: >-
+        Publishes an immutable AgentVersion. Reusing the same name and version
+        with an identical spec replays the existing publication; a different
+        spec for the same identity conflicts. When publish admission is
+        configured, a signed Agent Package (ADR-010) is required and is
+        verified fail-closed: an unsigned, tampered or unbound package is
+        rejected with 422 PACKAGE_REQUIRED / PACKAGE_SIGNATURE_INVALID.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentVersionRequest'
+      responses:
+        '201':
+          description: A new immutable agent version was published.
+          headers:
+            Location:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '200':
+          description: The identical publication already exists.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, const: 'true' }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /v1/agent-versions/{agentVersionId}:
+    get:
+      operationId: getAgentVersion
+      summary: Read a published agent version in the authenticated tenant
+      parameters:
+        - name: agentVersionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The immutable published agent version.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/tools:
+    get:
+      operationId: listTools
+      summary: Discover the tools the authenticated tenant may invoke
+      description: >-
+        Returns the versioned tool descriptors registered in the tenant's
+        registry. Invocation is gated by policy outside the LLM; this endpoint
+        only lists declared capabilities.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The tenant's registered tool descriptors.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolList'
+        '401': { $ref: '#/components/responses/Problem' }
+  /v1/approvals/{approvalId}:decide:
+    post:
+      operationId: decideApproval
+      summary: Approve or reject a high-risk tool call
+      description: >-
+        Records a human decision for a pending approval request. The decision
+        is bound to the canonical tool name, argument summary and target
+        resource of the original call and cannot be reused by another
+        invocation; expired requests transition to EXPIRED and cannot be
+        decided.
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecideApprovalRequest'
+      responses:
+        '200':
+          description: The decision was recorded and the approval advanced.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolApproval'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
+  /v1/audit:
+    get:
+      operationId: listAudit
+      summary: Page the tenant's audit ledger
+      description: >-
+        Returns the authenticated tenant's append-only audit ledger
+        (ADR-014), paged forward by seq. Events carry the per-tenant hash
+        chain so integrity can be verified independently.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        - name: afterSeq
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: One page of audit events and the next cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditList'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/audit/verify:
+    get:
+      operationId: verifyAudit
+      summary: Verify the tenant's audit hash chain
+      description: >-
+        Walks the tenant's ledger and reports whether every link and stored
+        chain hash is intact. A tampered or truncated chain reports the first
+        broken seq.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: Chain integrity result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditVerification'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/audit/export:
+    get:
+      operationId: exportAudit
+      summary: Export the tenant's audit ledger as a signed archive
+      description: >-
+        Returns the full ledger with its hash chain. When the control plane
+        is configured with -audit-signing-key, the archive is signed with
+        ed25519 over the canonical payload (schemaVersion, tenantId,
+        generatedAt, events) for WORM-style compliance archives.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The signed (or dev-unsigned) audit archive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditExport'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -89,6 +477,14 @@ components:
       in: header
       required: false
       schema: { type: string, format: uuid }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Current weak ETag returned by a Task response.
+      schema:
+        type: string
+        pattern: '^W/"[1-9][0-9]*"$'
   responses:
     Problem:
       description: Structured request failure.
@@ -106,6 +502,109 @@ components:
         goal: { type: string, minLength: 1, maxLength: 16384 }
         namespace: { type: string, minLength: 1, maxLength: 255 }
         spec: { type: object, additionalProperties: true }
+    CreateAgentVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [name, version, namespace, spec]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        version: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' }
+        namespace: { type: string, minLength: 1, maxLength: 255 }
+        spec: { type: object, additionalProperties: true }
+        package:
+          $ref: '#/components/schemas/AgentPackage'
+          description: >-
+            Signed Agent Package (ADR-010). Required when publish admission is
+            configured; when present it is always verified fail-closed and its
+            manifest must bind to this exact name@version reference and spec.
+    AgentPackage:
+      type: object
+      additionalProperties: false
+      required: [manifest, signature]
+      description: >-
+        Canonical signed package document (agentos.agentpkg/v1). The signature
+        covers the SHA-256 digest of the manifest encoding; use the output of
+        `agentos-pkg sign` verbatim so the manifest spec bytes round-trip.
+      properties:
+        manifest:
+          type: object
+          additionalProperties: false
+          required: [schema, agentVersionRef, specDigest, spec, provenance]
+          properties:
+            schema: { type: string, const: agentos.agentpkg/v1 }
+            agentVersionRef: { type: string, description: Canonical name@version reference this manifest signs. }
+            specDigest: { $ref: '#/components/schemas/Digest' }
+            spec: { type: object, additionalProperties: true }
+            runtimeLock: { type: array, items: { $ref: '#/components/schemas/Digest' } }
+            toolLock: { type: array, items: { $ref: '#/components/schemas/Digest' } }
+            permissions: { $ref: '#/components/schemas/Digest' }
+            memorySchema: { $ref: '#/components/schemas/Digest' }
+            sbom: { $ref: '#/components/schemas/Digest' }
+            signedImageDigest:
+              $ref: '#/components/schemas/Digest'
+              description: 'Digest-pinned OCI image the package ships (cosign-style binding); requires imageSignature.'
+            imageSignature:
+              $ref: '#/components/schemas/PackageSignature'
+              description: ed25519 signature over the namespaced image digest.
+            provenance:
+              type: object
+              additionalProperties: false
+              required: [builder, buildWorkflow, gitCommit]
+              properties:
+                builder: { type: string }
+                buildWorkflow: { type: string }
+                gitCommit: { type: string }
+                builtAt: { type: string, format: date-time }
+        signature:
+          $ref: '#/components/schemas/PackageSignature'
+    PackageSignature:
+      type: object
+      additionalProperties: false
+      required: [keyId, ed25519, createdAt]
+      properties:
+        keyId: { type: string, description: Signing key identity in the control plane trust registry. }
+        ed25519: { type: string, description: Base64 raw std ed25519 signature over the signed payload. }
+        createdAt: { type: string, format: date-time }
+    Digest:
+      type: object
+      additionalProperties: false
+      required: [algorithm, hex]
+      properties:
+        algorithm: { type: string, const: sha256 }
+        hex: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+    AgentVersion:
+      type: object
+      additionalProperties: false
+      required:
+        - apiVersion
+        - kind
+        - id
+        - tenantId
+        - namespace
+        - name
+        - version
+        - ref
+        - spec
+        - specDigest
+        - resourceVersion
+        - createdAt
+        - traceId
+      properties:
+        apiVersion: { type: string, const: agentos.dev/v1alpha1 }
+        kind: { type: string, const: AgentVersion }
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        version: { type: string }
+        ref: { type: string, description: Canonical name@version reference used by tasks. }
+        spec: { type: object, additionalProperties: true }
+        specDigest: { type: string, description: SHA-256 of the canonical spec document. }
+        resourceVersion: { type: integer, format: int64, const: 1, description: Immutable publications always have resource version 1. }
+        createdAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
+        packageKeyId: { type: string, description: 'Signing key identity of the verified package, when published signed.' }
+        packageManifestDigest: { type: string, description: 'SHA-256 of the canonical signed manifest, when published signed.' }
     Task:
       type: object
       additionalProperties: false
@@ -130,6 +629,19 @@ components:
         tenantId: { type: string }
         namespace: { type: string }
         agentVersionRef: { type: string }
+        agentVersionId: { type: [string, 'null'], format: uuid, description: The immutable publication the reference resolved to during admission. }
+        usage:
+          type: object
+          additionalProperties: false
+          description: Cumulative consumed budget dimensions from the settlement ledger.
+          properties:
+            tokens: { type: integer, format: int64, minimum: 0 }
+            costUsd: { type: number, minimum: 0 }
+            toolCalls: { type: integer, format: int64, minimum: 0 }
+            wallSeconds: { type: integer, format: int64, minimum: 0 }
+        budgetExhausted:
+          type: boolean
+          description: A settlement was rejected because it would exceed the reservation; new consumption must stop.
         goal: { type: string }
         spec: { type: object, additionalProperties: true }
         phase:
@@ -138,9 +650,163 @@ components:
         activeRunId: { type: [string, 'null'], format: uuid }
         resultRef: { type: [string, 'null'] }
         reasonCode: { type: [string, 'null'] }
+        cancelRequestedAt: { type: [string, 'null'], format: date-time }
         resourceVersion: { type: integer, format: int64, minimum: 1 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
+    TaskEvent:
+      type: object
+      additionalProperties: false
+      description: >-
+        One Server-Sent Event frame of the task event stream. The event field
+        is task.updated for snapshots and task.terminal for the closing frame;
+        the id field is the task resource version.
+      properties:
+        event:
+          type: string
+          enum: [task.updated, task.terminal]
+        id:
+          type: integer
+          format: int64
+          description: Resource version of the emitted snapshot.
+        data:
+          $ref: '#/components/schemas/Task'
+    CreateMemoryRequest:
+      type: object
+      additionalProperties: false
+      required: [namespace, key, contentType, content]
+      properties:
+        namespace: { type: string, minLength: 1, maxLength: 255 }
+        key: { type: string, minLength: 1, maxLength: 255, description: 'Stable logical key; identical documents replay, different documents correct.' }
+        contentType: { type: string, minLength: 1, maxLength: 255 }
+        content: { type: string, minLength: 1, maxLength: 262144 }
+        sensitivity:
+          type: string
+          enum: [internal, confidential, restricted]
+          default: internal
+        provenance:
+          type: object
+          additionalProperties: true
+          description: Free-form provenance document (e.g. source agent version).
+        retentionUntil: { type: [string, 'null'], format: date-time, description: Optional retention deadline; expired records are excluded from retrieval. }
+        embedding:
+          type: array
+          items: { type: number }
+          description: Optional caller-supplied 384-dimension embedding; the server embeds content otherwise.
+        sourceTaskId: { type: [string, 'null'], format: uuid }
+        sourceRunId: { type: [string, 'null'], format: uuid }
+        sourceAttemptId: { type: [string, 'null'], format: uuid }
+    Memory:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, id, tenantId, namespace, key, contentType, content, embeddingProvider, sensitivity, resourceVersion, createdAt, updatedAt, traceId]
+      properties:
+        apiVersion: { type: string, const: agentos.dev/v1alpha1 }
+        kind: { type: string, const: Memory }
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        namespace: { type: string }
+        key: { type: string }
+        contentType: { type: string }
+        content: { type: string }
+        embeddingProvider: { type: string, description: Which embedding service produced the vector. }
+        sensitivity: { type: string, enum: [internal, confidential, restricted] }
+        provenance: { type: object, additionalProperties: true }
+        sourceTaskId: { type: [string, 'null'], format: uuid }
+        sourceRunId: { type: [string, 'null'], format: uuid }
+        sourceAttemptId: { type: [string, 'null'], format: uuid }
+        retentionUntil: { type: [string, 'null'], format: date-time }
+        tombstoneAt: { type: [string, 'null'], format: date-time, description: Soft-deletion timestamp; the record is excluded from search. }
+        supersededBy: { type: [string, 'null'], format: uuid }
+        resourceVersion: { type: integer, format: int64, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        traceId: { type: string, format: uuid }
+    MemoryList:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, memories, traceId]
+      properties:
+        apiVersion: { type: string, const: 'agentos.dev/v1alpha1' }
+        kind: { type: string, const: MemoryList }
+        memories:
+          type: array
+          items:
+            $ref: '#/components/schemas/Memory'
+        traceId: { type: string, format: uuid }
+    ToolDescriptor:
+      type: object
+      additionalProperties: false
+      required: [name, version, sideEffectRisk, actions, resourcePatterns, paramsSchema, specDigest, createdAt]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        sideEffectRisk:
+          type: string
+          enum: [none, low, high]
+        actions:
+          type: array
+          items: { type: string }
+        resourcePatterns:
+          type: array
+          items: { type: string }
+        paramsSchema:
+          type: object
+          description: JSON Schema the invocation arguments must satisfy.
+        specDigest:
+          type: string
+          description: SHA-256 of the immutable descriptor spec.
+        createdAt: { type: string, format: date-time }
+    ToolList:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, tools, traceId]
+      properties:
+        apiVersion: { type: string, const: 'agentos.dev/v1alpha1' }
+        kind: { type: string, const: ToolList }
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolDescriptor'
+        traceId: { type: string, format: uuid }
+    DecideApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [decision, decidedBy]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVED, REJECTED]
+        decidedBy:
+          type: string
+          description: Identity of the human decision maker, for audit.
+    ToolApproval:
+      type: object
+      additionalProperties: false
+      required: [id, tenantId, callId, taskId, runId, attemptId, toolName, toolVersion, action, resource, argsHash, status, requestedAt, expiresAt, resourceVersion, traceId]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string }
+        callId: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        runId: { type: string, format: uuid }
+        attemptId: { type: string, format: uuid }
+        toolName: { type: string }
+        toolVersion: { type: string }
+        action: { type: string }
+        resource: { type: string }
+        argsHash:
+          type: string
+          description: SHA-256 of the canonical invocation arguments the decision is bound to.
+        status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED, EXPIRED]
+        requestedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        decidedAt: { type: [string, 'null'], format: date-time }
+        decidedBy: { type: [string, 'null'] }
+        resourceVersion: { type: integer, format: int64, minimum: 1 }
         traceId: { type: string, format: uuid }
     Problem:
       type: object
@@ -154,5 +820,63 @@ components:
         instance: { type: string }
         reasonCode: { type: string }
         traceId: { type: string, format: uuid }
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, seq, eventType, resourceType, resourceId, actor, details, prevHash, chainHash, occurredAt]
+      description: One append-only audit record (ADR-014); chainHash is the canonical hash the next event's prevHash must equal.
+      properties:
+        id: { type: string, format: uuid }
+        seq: { type: integer, format: int64, minimum: 1 }
+        eventType: { type: string, description: 'Dotted decision name, e.g. task.queued, approval.decided.' }
+        resourceType: { type: string }
+        resourceId: { type: string, format: uuid }
+        actor: { type: string, const: kernel }
+        details: { type: object, additionalProperties: true }
+        prevHash: { type: string, description: SHA-256 (hex) of the previous event's chainHash; the genesis anchor for seq 1. }
+        chainHash: { type: string, description: SHA-256 (hex) of this event's canonical record. }
+        occurredAt: { type: string, format: date-time }
+    AuditList:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        nextAfterSeq:
+          type: integer
+          format: int64
+          description: Cursor for the next page (the last returned seq).
+    AuditVerification:
+      type: object
+      additionalProperties: false
+      required: [valid, checked, firstBrokenSeq, headSeq, headHash]
+      properties:
+        valid: { type: boolean }
+        checked: { type: integer, format: int64, description: Number of events walked. }
+        firstBrokenSeq: { type: integer, format: int64, description: First seq whose link or hash is broken; 0 when valid. }
+        headSeq: { type: integer, format: int64 }
+        headHash: { type: string }
+    AuditExport:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, tenantId, generatedAt, signed, events]
+      properties:
+        schemaVersion: { type: string, const: 'agentos.audit/v1' }
+        tenantId: { type: string }
+        generatedAt: { type: string, format: date-time }
+        signed: { type: boolean, description: False in dev when no -audit-signing-key is configured. }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEvent' }
+        signature:
+          type: object
+          additionalProperties: false
+          required: [keyId, ed25519]
+          description: ed25519 over the SHA-256 of the canonical payload (schemaVersion, tenantId, generatedAt, events).
+          properties:
+            keyId: { type: string }
+            ed25519: { type: string, description: Base64 raw std signature. }
 security:
   - bearerAuth: []

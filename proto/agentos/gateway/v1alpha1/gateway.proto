@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package agentos.gateway.v1alpha1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/bian-cloud-skill/agentos/gen/go/agentos/gateway/v1alpha1;gatewayv1alpha1";
+
+// ToolGateway is the fenced tool-invocation boundary runtime workers call on
+// behalf of an Attempt. The gateway enforces policy, approval binding, budget
+// hard-stop and durable side-effect receipts outside the LLM. Large payloads
+// are bounded; arguments and results travel as JSON documents with hard size
+// caps.
+service ToolGatewayService {
+  // ListTools returns the tenant's registered tool descriptors.
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  // InvokeTool runs one invocation through the full decision chain. Outcomes
+  // are returned in the response; policy denials are outcomes, not errors.
+  rpc InvokeTool(InvokeToolRequest) returns (InvokeToolResponse);
+}
+
+message AttemptIdentity {
+  string tenant_id = 1;
+  string attempt_id = 2;
+  int64 fencing_token = 3;
+}
+
+message ToolDescriptor {
+  string name = 1;
+  string version = 2;
+  string side_effect_risk = 3;
+  repeated string actions = 4;
+  repeated string resource_patterns = 5;
+  bytes params_schema_json = 6;
+  string spec_digest = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message ListToolsRequest {
+  string tenant_id = 1;
+}
+
+message ListToolsResponse {
+  repeated ToolDescriptor tools = 1;
+}
+
+message InvokeToolRequest {
+  AttemptIdentity identity = 1;
+  string task_id = 2;
+  string run_id = 3;
+  string agent_version_ref = 4;
+  string tool_name = 5;
+  // Empty resolves the latest registered version.
+  string tool_version = 6;
+  string action = 7;
+  string resource = 8;
+  bytes args_json = 9;
+  string idempotency_key = 10;
+  // Required when the previous decision was REQUIRES_APPROVAL and a human
+  // decided it.
+  string approval_id = 11;
+}
+
+message InvokeToolResponse {
+  // EXECUTED | DENIED | REQUIRES_APPROVAL | REPLAYED
+  string outcome = 1;
+  // Sanitized tool output when outcome is EXECUTED or REPLAYED.
+  bytes result_json = 2;
+  string approval_id = 3;
+  repeated string deny_reasons = 4;
+  string policy_revision = 5;
+  string receipt_operation = 6;
+  string tool_call_id = 7;
+}

@@ -5,6 +5,7 @@
 /bin/
 /dist/
 /coverage/
+/target/
 *.coverprofile
 *.test
 
@@ -18,3 +19,8 @@
 .vscode/
 .DS_Store
 Thumbs.db
+
+# TLC scratch
+modelcheck/tla/states/
+modelcheck/tla/AgentOS_TTrace*
+

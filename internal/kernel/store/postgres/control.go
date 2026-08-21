@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,16 +37,33 @@ func (s *Store) ClaimTasks(ctx context.Context, in kernelstore.ClaimTasksInput) 
 	}
 	defer rollback(ctx, tx)
 
+	// Scheduling claims honor the O6 backoff: a task deferred after a
+	// no-placement is not claimable until next_schedule_attempt_at. Admission
+	// claims are unaffected (queued tasks are never deferred).
+	scheduleEligible := ""
+	if in.Kind == kernelstore.ControllerScheduling {
+		scheduleEligible = ` AND (t.next_schedule_attempt_at IS NULL OR t.next_schedule_attempt_at <= $3)`
+	}
+	// Tenant-consistent sharding (ADR-016): when ShardCount > 0, only tasks
+	// whose tenant maps to ShardIndex are claimable. The expression mirrors
+	// store.TenantShard: first 32 bits of md5(tenant_id) modulo count. md5
+	// keeps the mapping deterministic across PostgreSQL versions.
+	shardEligible := ""
+	args := []any{in.Phase, in.Kind, now, in.Limit}
+	if in.ShardCount > 0 {
+		shardEligible = ` AND ('x' || substr(md5(t.tenant_id), 1, 8))::bit(32)::bigint % $5 = $6`
+		args = append(args, in.ShardCount, in.ShardIndex)
+	}
 	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t
 		WHERE t.phase = $1
 		  AND NOT EXISTS (
 			SELECT 1 FROM task_controller_claims c
 			WHERE c.tenant_id = t.tenant_id AND c.task_id = t.id
 			  AND c.controller_kind = $2 AND c.expires_at > $3
-		  )
+		  )`+scheduleEligible+shardEligible+`
 		ORDER BY t.created_at, t.id
 		FOR UPDATE OF t SKIP LOCKED
-		LIMIT $4`, in.Phase, in.Kind, now, in.Limit)
+		LIMIT $4`, args...)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -102,6 +120,9 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 		strings.TrimSpace(in.ReasonCode) == "" || strings.TrimSpace(in.EvaluatorVersion) == "" {
 		return kernelstore.Task{}, fmt.Errorf("admission tenant, owner, reason code, and evaluator version are required")
 	}
+	if in.Budget != nil && !in.Budget.Valid() {
+		return kernelstore.Task{}, fmt.Errorf("budget values must not be negative")
+	}
 	reasons, err := json.Marshal(in.Reasons)
 	if err != nil {
 		return kernelstore.Task{}, fmt.Errorf("encode admission reasons: %w", err)
@@ -126,34 +147,79 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 	}
 	to := domain.TaskRejected
 	decision := "REJECT"
+	var quotaWindowStart *time.Time
 	if in.Admit {
+		// Tenant aggregate consumption quota gate (v0.8 reservation): the
+		// authoritative, atomic check under the window row lock at commit
+		// time reserves the task's ceiling on admission. The admission
+		// controller records a proper TENANT_QUOTA_EXCEEDED decision on the
+		// next claim round; this rejects the admission without recording
+		// anything when the read-only check raced a concurrent admission or
+		// settlement.
+		var err error
+		quotaWindowStart, err = s.enforceTenantQuota(ctx, tx, in.TenantID, in.Budget, now)
+		if err != nil {
+			return kernelstore.Task{}, err
+		}
 		to = domain.TaskAdmitted
 		decision = "ADMIT"
 	}
 	if err := domain.ValidateTaskTransition(task.Phase, to); err != nil {
 		return kernelstore.Task{}, fmt.Errorf("%w: %v", kernelstore.ErrInvalidTransition, err)
 	}
+	agentVersionID := sql.NullString{}
+	if in.AgentVersionID != nil {
+		agentVersionID = sql.NullString{String: in.AgentVersionID.String(), Valid: true}
+	}
 	updated, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = $1,
 		admission_reason_code = $2,
+		agent_version_id = $7,
 		admitted_at = CASE WHEN $1 = 'ADMITTED' THEN $3 ELSE admitted_at END,
 		resource_version = resource_version + 1, updated_at = $3
 		WHERE tenant_id = $4 AND id = $5 AND resource_version = $6
-		RETURNING `+taskColumns, to, in.ReasonCode, now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion))
+		RETURNING `+taskColumns, to, in.ReasonCode, now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion, agentVersionID))
 	if err != nil {
 		return kernelstore.Task{}, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO admission_decisions (
-		id, tenant_id, task_id, decision, reason_code, reasons, evaluator_version, decided_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, s.newID().String(), in.TenantID,
-		in.TaskID.String(), decision, in.ReasonCode, reasons, in.EvaluatorVersion, now); err != nil {
+		id, tenant_id, task_id, decision, reason_code, reasons, evaluator_version, policy_revision, decided_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9)`, s.newID().String(), in.TenantID,
+		in.TaskID.String(), decision, in.ReasonCode, reasons, in.EvaluatorVersion,
+		in.PolicyRevision, now); err != nil {
 		return kernelstore.Task{}, classify(err)
 	}
 	if err := deleteTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerAdmission, in.OwnerID, in.ClaimFencingToken); err != nil {
 		return kernelstore.Task{}, err
 	}
+	// The budget reservation commits atomically with the admission decision:
+	// only admitted tasks hold a ledger, and rejected tasks never reserve.
+	// quotaWindowStart pins which tenant window the reservation was taken
+	// from, so the terminal release decrements the exact row even when the
+	// task spans window boundaries.
+	if to == domain.TaskAdmitted && in.Budget != nil && !in.Budget.Zero() {
+		var windowStart any
+		if quotaWindowStart != nil {
+			windowStart = *quotaWindowStart
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO task_budget_ledgers (
+			tenant_id, task_id, reserved_tokens, reserved_cost_usd,
+			reserved_tool_calls, reserved_wall_seconds, quota_reserved_window_start, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+		ON CONFLICT (tenant_id, task_id) DO NOTHING`,
+			in.TenantID, in.TaskID.String(), in.Budget.Tokens, in.Budget.CostUSD,
+			in.Budget.ToolCalls, in.Budget.WallSeconds, windowStart, now); err != nil {
+			return kernelstore.Task{}, classify(err)
+		}
+	}
 	if err := insertEvent(ctx, tx, in.TenantID, "Task", task.ID, updated.ResourceVersion, "Task"+title(string(to)), map[string]any{
 		"taskId": task.ID, "phase": to, "reasonCode": in.ReasonCode, "reasons": in.Reasons,
 	}, now, s.newID()); err != nil {
+		return kernelstore.Task{}, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "task.admission."+strings.ToLower(decision), "Task", task.ID, map[string]any{
+		"reasonCode": in.ReasonCode, "reasons": in.Reasons, "evaluatorVersion": in.EvaluatorVersion,
+		"policyRevision": in.PolicyRevision,
+	}, now); err != nil {
 		return kernelstore.Task{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -176,6 +242,66 @@ func (s *Store) ReleaseTaskClaim(ctx context.Context, claim kernelstore.TaskClai
 	return nil
 }
 
+// DeferTaskSchedule releases the scheduling claim on a task that no pool
+// could place and defers its next attempt until Until (O6). The deferral
+// commits atomically with the claim release, bumps the task's resource
+// version (so task-event streams observe it), and emits a
+// TaskScheduleDeferred outbox event. The caller must still own the claim;
+// stale owners are fenced.
+func (s *Store) DeferTaskSchedule(ctx context.Context, in kernelstore.DeferTaskScheduleInput) (kernelstore.Task, error) {
+	var zero kernelstore.Task
+	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.OwnerID) == "" || in.Until.IsZero() {
+		return zero, fmt.Errorf("tenant, owner, and a deferral deadline are required")
+	}
+	now := s.now()
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return zero, err
+	}
+	defer rollback(ctx, tx)
+
+	task, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks
+		WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.TaskID.String()))
+	if err != nil {
+		return zero, classify(err)
+	}
+	if task.ResourceVersion != in.ExpectedTaskVersion {
+		return zero, versionConflict("task", task.ID, in.ExpectedTaskVersion, task.ResourceVersion)
+	}
+	if err := requireTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerScheduling, in.OwnerID, in.ClaimFencingToken, now); err != nil {
+		return zero, err
+	}
+	if task.Phase != domain.TaskAdmitted {
+		return zero, fmt.Errorf("%w: task is %s", kernelstore.ErrInvalidTransition, task.Phase)
+	}
+	updated, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET
+		next_schedule_attempt_at = $1,
+		schedule_retry_count = schedule_retry_count + 1,
+		resource_version = resource_version + 1, updated_at = $2
+		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
+		in.Until.UTC(), now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion))
+	if err != nil {
+		return zero, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
+	}
+	if err := deleteTaskClaim(ctx, tx, in.TenantID, in.TaskID, kernelstore.ControllerScheduling, in.OwnerID, in.ClaimFencingToken); err != nil {
+		return zero, err
+	}
+	if err := insertEvent(ctx, tx, in.TenantID, "Task", task.ID, updated.ResourceVersion, "TaskScheduleDeferred", map[string]any{
+		"taskId": task.ID, "until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount,
+	}, now, s.newID()); err != nil {
+		return zero, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "task.schedule.deferred", "Task", task.ID, map[string]any{
+		"until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount,
+	}, now); err != nil {
+		return zero, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return zero, classify(err)
+	}
+	return updated, nil
+}
+
 func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInput) (kernelstore.AttemptLease, error) {
 	if err := validateScheduleInput(in); err != nil {
 		return kernelstore.AttemptLease{}, err
@@ -190,6 +316,8 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 		in.LeaseID = s.newID()
 	}
 	now := s.now()
+	// Placement is a cross-row invariant (ADR-002): the run, attempt, lease,
+	// task state and outbox events share one SERIALIZABLE transaction.
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return kernelstore.AttemptLease{}, err
@@ -240,6 +368,7 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 		return kernelstore.AttemptLease{}, classify(err)
 	}
 	updatedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'RUNNING', active_run_id = $1,
+		next_schedule_attempt_at = NULL, schedule_retry_count = 0,
 		resource_version = resource_version + 1, updated_at = $2
 		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
 		run.ID.String(), now, in.TenantID, task.ID.String(), in.ExpectedTaskVersion))
@@ -264,6 +393,12 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 		if err := insertEvent(ctx, tx, in.TenantID, event.aggregateType, event.aggregateID, event.version, event.eventType, event.payload, now, s.newID()); err != nil {
 			return kernelstore.AttemptLease{}, err
 		}
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "task.scheduled", "Task", task.ID, map[string]any{
+		"runId": run.ID, "attemptId": attempt.ID, "runtimeClass": in.RuntimeClass,
+		"runtimePoolId": in.RuntimePoolID, "runtimeInstanceId": in.RuntimeInstanceID,
+	}, now); err != nil {
+		return kernelstore.AttemptLease{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.AttemptLease{}, classify(err)
@@ -358,6 +493,19 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, eventID uuid.UUID, dispatc
 func validateClaimInput(in kernelstore.ClaimTasksInput) error {
 	if strings.TrimSpace(in.OwnerID) == "" || in.Limit < 1 || in.Limit > 100 || in.TTL <= 0 {
 		return fmt.Errorf("claim owner, limit 1..100, and positive TTL are required")
+	}
+	// ADR-016: sharding is either fully off (0,0) or a valid index within a
+	// positive count. The count is a deployment-wide invariant: every
+	// controller instance must share it.
+	if in.ShardCount < 0 || in.ShardIndex < 0 {
+		return fmt.Errorf("shard index and count must not be negative")
+	}
+	if in.ShardCount == 0 {
+		if in.ShardIndex != 0 {
+			return fmt.Errorf("shard index without a shard count is invalid")
+		}
+	} else if in.ShardIndex >= in.ShardCount {
+		return fmt.Errorf("shard index %d must be below shard count %d", in.ShardIndex, in.ShardCount)
 	}
 	valid := (in.Kind == kernelstore.ControllerAdmission && in.Phase == domain.TaskQueued) ||
 		(in.Kind == kernelstore.ControllerScheduling && in.Phase == domain.TaskAdmitted)

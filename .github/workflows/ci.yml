@@ -15,10 +15,12 @@ concurrency:
 jobs:
   kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     services:
       postgres:
-        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        # pgvector image: the v0.1 Memory slice (ADR-009) requires the vector
+        # extension alongside FTS/pg_trgm.
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
         env:
           POSTGRES_DB: agentos_test
           POSTGRES_USER: agentos
@@ -34,6 +36,8 @@ jobs:
     env:
       AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
       AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
+      AGENTOS_WASMTIME_RUNTIME: ${{ github.workspace }}/target/debug/agentos-runtime-wasm
+      AGENTOS_WASMTIME_PACKAGE_ROOT: ${{ github.workspace }}/target/conformance
 
     steps:
       - name: Check out source
@@ -42,7 +46,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: 1.26.5
+          go-version: 1.26.6
           cache-dependency-path: go.sum
 
       - name: Start NATS JetStream
@@ -50,6 +54,17 @@ jobs:
 
       - name: Verify module graph
         run: go mod verify
+
+      - name: Verify Runtime Protocol schema and generated bindings
+        run: |
+          export GOBIN="$RUNNER_TEMP/bin"
+          export PATH="$GOBIN:$PATH"
+          go install github.com/bufbuild/buf/cmd/buf@v1.72.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0
+          buf lint
+          buf generate
+          git diff --exit-code -- gen/go
 
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
@@ -63,8 +78,132 @@ jobs:
       - name: Unit tests with race detector
         run: go test -race -count=1 ./...
 
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Build Wasmtime provider
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo +1.97.1 build --bin agentos-runtime-wasm --locked
+
+      - name: Build conformance component
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo +1.97.1 run --bin component-fixture --locked -- --out target/conformance/agent.wasm
+
       - name: PostgreSQL integration tests with race detector
         run: go test -race -tags=integration -count=1 ./...
 
       - name: Build control-plane commands
         run: go build ./cmd/...
+
+      # The OCI/gVisor provider is Linux-only at the executor layer and its
+      # conformance leg needs a containerd + runsc host; this step guarantees
+      # the linux build and unit tests (already run above with -race), and
+      # puts the binary on PATH so an opt-in sandbox job can enable the
+      # conformance leg with AGENTOS_OCI_CONTAINERD_NAMESPACE.
+      - name: Build OCI/gVisor provider
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/agentos-runtime-oci" ./cmd/agentos-runtime-oci
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Check Rust formatting
+        run: cargo +1.97.1 fmt --all -- --check
+
+      - name: Lint Wasmtime Provider
+        run: cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test Wasmtime Provider
+        run: cargo +1.97.1 test --workspace --locked
+
+      - name: Audit Rust dependencies
+        run: |
+          cargo +1.97.1 install cargo-audit --version 0.22.2 --locked
+          cargo +1.97.1 audit
+
+  # v0.7 real-machine leg: containerd + runsc on a Linux host, environment
+  # fingerprint, the OCI/gVisor conformance leg, and the Firecracker KVM
+  # probe. GitHub-hosted runners have no /dev/kvm, so the probe reports
+  # KVM-absent there by design; a self-hosted runner with KVM (label
+  # agentos-kvm) runs the same leg without --allow-no-kvm.
+  #
+  # Version pinning follows deploy/ci/runtime-matrix.md: the exact
+  # containerd/runsc patch versions and sha256 sums are backfilled on the
+  # first runner bring-up (setup-containerd-runsc.sh prints them). Until then
+  # this job fails loudly instead of silently running unpinned runtimes.
+  runtime-linux-leg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: agentos_test
+          POSTGRES_USER: agentos
+          POSTGRES_PASSWORD: agentos-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos -d agentos_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
+      AGENTOS_OCI_CONTAINERD_NAMESPACE: agentos-ci
+      # Pinned runtime toolchain (verified URLs 2026-08-16; backfill sha256
+      # in deploy/ci/runtime-matrix.md).
+      CONTAINERD_VERSION: "2.0.2"
+      RUNSC_TAG: "20260810.0"
+      # Bring-up finding 2026-08-17: runsc 20260810.0 sandbox startup hangs
+      # on GitHub-hosted runners with both systrap and ptrace platforms.
+      # ptrace + full debug logging pinpoints the hang; the debug log is
+      # dumped by the probe on failure. KVM-capable self-hosted runners may
+      # drop the flags.
+      RUNSC_EXTRA_FLAGS: "--platform ptrace --debug --debug-log=/tmp/runsc-debug.log --alsologtostderr"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: go.sum
+
+      - name: Install pinned containerd and runsc
+        run: sudo -E bash deploy/ci/setup-containerd-runsc.sh
+
+      - name: Environment fingerprint
+        run: bash deploy/ci/env-fingerprint.sh | tee runtime-fingerprint.txt
+
+      - name: Upload runtime fingerprint
+        uses: actions/upload-artifact@v4 # TODO(v0.7): pin digest like the other actions
+        with:
+          name: runtime-fingerprint
+          path: runtime-fingerprint.txt
+
+      - name: Build OCI/gVisor provider
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/agentos-runtime-oci" ./cmd/agentos-runtime-oci
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Pin and pull the conformance workload image
+        run: |
+          docker pull alpine:latest
+          digest="$(docker image inspect --format '{{index .RepoDigests 0}}' alpine:latest)"
+          # RepoDigests[0] is of the form alpine@sha256:...; the conformance
+          # worker runs with --skip-image-pull, so the digest-pinned image
+          # must already live in the containerd namespace.
+          ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" images pull "docker.io/library/${digest}"
+          echo "AGENTOS_OCI_IMAGE=docker.io/library/${digest}" >> "$GITHUB_ENV"
+
+      - name: OCI/gVisor conformance leg
+        run: go test -race -tags=integration -count=1 -run 'TestSameAgentVersionRunsOnBothProviders/oci' ./internal/runtime/control/...
+
+      - name: Firecracker KVM probe
+        run: bash deploy/ci/firecracker-smoke.sh --allow-no-kvm
