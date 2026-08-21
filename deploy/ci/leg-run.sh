@@ -8,8 +8,8 @@ set -euo pipefail
 : "${AGENTOS_TEST_DATABASE_URL:?AGENTOS_TEST_DATABASE_URL is required}"
 : "${AGENTOS_OCI_CONTAINERD_NAMESPACE:=agentos-ci}"
 # Pinned runtime toolchain; CI overrides these with the approved matrix.
-: "${CONTAINERD_VERSION:=2.0.2}"
-: "${CONTAINERD_SHA256:=9bd5b6a1bdf505d520d9a329c520258ed0a17faa9fe3db12712ee858ad59aae3}"
+: "${CONTAINERD_VERSION:=2.2.7}"
+: "${CONTAINERD_SHA256:=91cd216ea26a1b8b512219d3f205375c967e7b7de4dae571bc3dd16bfacd34b5}"
 : "${RUNSC_TAG:=20260810.0}"
 export CONTAINERD_VERSION CONTAINERD_SHA256 RUNSC_TAG
 # Overlayfs on production hosts; nested containers (Docker Desktop/WSL2)

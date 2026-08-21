@@ -14,7 +14,7 @@ set -euo pipefail
 # the step log) instead of hanging until the CI job timeout kills the step.
 command -v timeout >/dev/null 2>&1 || { echo "coreutils timeout is required" >&2; exit 1; }
 
-CONTAINERD_VERSION="${CONTAINERD_VERSION:?set a pinned containerd release (e.g. 2.0.2)}"
+CONTAINERD_VERSION="${CONTAINERD_VERSION:?set a pinned containerd release (e.g. 2.2.7)}"
 CONTAINERD_SHA256="${CONTAINERD_SHA256:?set the approved containerd archive SHA-256}"
 RUNSC_TAG="${RUNSC_TAG:?set a pinned gVisor release tag (e.g. 20260810.0)}"
 GVISOR_ARCH="$(uname -m)"
@@ -43,7 +43,7 @@ echo ">> apparmor=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || e
 # Runner images may ship containerd (e.g. 2.3.3 on ubuntu-24.04). The pinned
 # version must win, so install when missing or when the installed binary is
 # not the pinned one. `containerd --version` prints
-# "containerd github.com/containerd/containerd/v2 v2.0.2 ..." — the third
+# "containerd github.com/containerd/containerd/v2 v2.2.7 ..." — the third
 # field is the version.
 INSTALLED_CONTAINERD="$(containerd --version 2>/dev/null | awk '{print $3}' || true)"
 if [ "$INSTALLED_CONTAINERD" != "v${CONTAINERD_VERSION}" ]; then
