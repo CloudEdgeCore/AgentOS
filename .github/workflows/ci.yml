@@ -163,6 +163,8 @@ jobs:
       # ctr emits a cgroupfs-style OCI path. The runsc systemd driver expects
       # systemd slice:prefix:name syntax, so use runsc's cgroupfs driver here.
       RUNSC_SYSTEMD_CGROUP: "false"
+      # Apply the OCI seccomp profile inside gVisor's application kernel.
+      RUNSC_OCI_SECCOMP: "true"
 
     steps:
       - name: Check out source
