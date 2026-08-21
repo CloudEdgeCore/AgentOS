@@ -35,26 +35,26 @@ trap cleanup EXIT
 
 # Expansion is intentionally deferred until /bin/sh runs inside the sandbox.
 # shellcheck disable=SC2016
-probe='set -eu
+probe='set -u
 cap_eff="$(awk "/^CapEff:/{print \$2}" /proc/self/status)"
 no_new_privs="$(awk "/^NoNewPrivs:/{print \$2}" /proc/self/status)"
 seccomp="$(awk "/^Seccomp:/{print \$2}" /proc/self/status)"
 interfaces="$(ls -1 /sys/class/net | sort | tr "\n" " ")"
 printf "observed isolation: CapEff=%s NoNewPrivs=%s Seccomp=%s interfaces=%s\n" \
-  "$cap_eff" "$no_new_privs" "$seccomp" "$interfaces"
-test "$cap_eff" = "0000000000000000"
-test "$no_new_privs" = "1"
-test "$seccomp" = "2"
+  "$cap_eff" "$no_new_privs" "$seccomp" "$interfaces" >&2
+test "$cap_eff" = "0000000000000000" || exit 11
+test "$no_new_privs" = "1" || exit 12
+test "$seccomp" = "2" || exit 13
 if touch /agentos-rootfs-must-remain-read-only 2>/dev/null; then
   echo "root filesystem is writable" >&2
-  exit 1
+  exit 14
 fi
-dd if=/dev/zero of=/agentos/workspace/within-limit bs=1024 count=1 2>/dev/null
+dd if=/dev/zero of=/agentos/workspace/within-limit bs=1024 count=1 2>/dev/null || exit 15
 if dd if=/dev/zero of=/agentos/workspace/over-limit bs=1048576 count=9 2>/dev/null; then
   echo "workspace tmpfs exceeded its 8 MiB limit" >&2
-  exit 1
+  exit 16
 fi
-test "$interfaces" = "lo "
+test "$interfaces" = "lo " || exit 17
 echo "read-only rootfs, bounded workspace, zero capabilities, no-new-privileges, seccomp, and network isolation: PASS"'
 
 echo ">> asserting OCI/gVisor sandbox isolation (bounded 120s)"
