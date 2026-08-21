@@ -98,7 +98,7 @@ RUNSC_IGNORE_CGROUPS="${RUNSC_IGNORE_CGROUPS:-false}"
 CONTAINERD_SOCKET_GID="${CONTAINERD_SOCKET_GID:-${SUDO_GID:-0}}"
 mkdir -p /tmp/agentos-runsc
 cat > "$RUNSC_CONFIG_PATH" <<EOF
-log_path = "/tmp/agentos-runsc/%ID%/shim.log"
+log_path = "/tmp/agentos-runsc/shim.log"
 log_level = "debug"
 
 [runsc_config]
@@ -107,7 +107,8 @@ log_level = "debug"
   systemd-cgroup = "${RUNSC_SYSTEMD_CGROUP}"
   ignore-cgroups = "${RUNSC_IGNORE_CGROUPS}"
   debug = "true"
-  debug-log = "/tmp/agentos-runsc/%ID%/gvisor.%COMMAND%.log"
+  debug-log = "/tmp/agentos-runsc/gvisor.log"
+  alsologtostderr = "true"
 EOF
 
 cat > /etc/containerd/config.toml <<EOF
