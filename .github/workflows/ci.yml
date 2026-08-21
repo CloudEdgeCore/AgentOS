@@ -196,10 +196,10 @@ jobs:
         run: ctr -n "$AGENTOS_OCI_CONTAINERD_NAMESPACE" images pull --snapshotter "$AGENTOS_OCI_SNAPSHOTTER" "$AGENTOS_OCI_IMAGE"
 
       - name: Assert OCI/gVisor isolation boundary
-        run: bash deploy/ci/runtime-isolation.sh
+        run: sudo -E bash deploy/ci/runtime-isolation.sh
 
       - name: OCI/gVisor conformance leg
-        run: go test -race -tags=integration -count=1 -run 'TestSameAgentVersionRunsOnBothProviders/oci' ./internal/runtime/control/...
+        run: sudo -E env "PATH=$PATH" go test -race -tags=integration -count=1 -run 'TestSameAgentVersionRunsOnBothProviders/oci' ./internal/runtime/control/...
 
       - name: Verify OCI orphan recovery and cleanup
         run: |
