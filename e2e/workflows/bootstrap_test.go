@@ -186,11 +186,11 @@ func (f *fakeOpenAI) ServeHTTP(writer http.ResponseWriter, request *http.Request
 }
 
 func (f *fakeOpenAI) shouldFail(city string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(f.failCities) == 0 {
 		return false
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	remaining, marked := f.failCities[city]
 	if !marked || remaining <= 0 {
 		return false
