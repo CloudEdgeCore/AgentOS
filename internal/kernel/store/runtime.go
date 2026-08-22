@@ -230,6 +230,10 @@ type HeartbeatStatus struct {
 
 type RuntimeStore interface {
 	KernelStore
+	// WorkflowLineage resolves the workflow origin of one task from its
+	// idempotency key (v1.3); ok=false marks standalone tasks. The version is
+	// the workflow's current resource version at read time.
+	WorkflowLineage(context.Context, string, string) (workflowID uuid.UUID, stepName string, version int64, ok bool, err error)
 	PollRuntimeAssignment(context.Context, string, string) (RuntimeAssignment, error)
 	GetRuntimeAssignment(context.Context, string, uuid.UUID, int64) (RuntimeAssignment, error)
 	GetHeartbeatStatus(context.Context, string, uuid.UUID, int64) (HeartbeatStatus, error)

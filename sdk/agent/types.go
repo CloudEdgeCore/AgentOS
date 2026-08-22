@@ -32,10 +32,12 @@ var (
 // Adapters use these identifiers to select a Gateway; they are never network
 // endpoints, credentials, or raw secret values.
 type CapabilityGrant struct {
-	Tools   []string `json:"tools"`
-	Models  []string `json:"models"`
-	Memory  []string `json:"memory"`
-	Secrets []string `json:"secrets"`
+	Tools       []string `json:"tools"`
+	Models      []string `json:"models"`
+	Memory      []string `json:"memory"`
+	Secrets     []string `json:"secrets"`
+	SpawnTasks  bool     `json:"spawnTasks,omitempty"`
+	ChildAgents []string `json:"childAgents,omitempty"`
 }
 
 type StartRequest struct {

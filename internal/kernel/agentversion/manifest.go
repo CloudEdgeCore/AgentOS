@@ -58,10 +58,12 @@ type RuntimeTarget struct {
 // Capabilities contains symbolic permission identifiers. Empty arrays are an
 // explicit default-deny declaration and are different from an omitted block.
 type Capabilities struct {
-	Tools   []string `json:"tools"`
-	Models  []string `json:"models"`
-	Memory  []string `json:"memory"`
-	Secrets []string `json:"secrets"`
+	Tools       []string `json:"tools"`
+	Models      []string `json:"models"`
+	Memory      []string `json:"memory"`
+	Secrets     []string `json:"secrets"`
+	SpawnTasks  bool     `json:"spawnTasks,omitempty"`
+	ChildAgents []string `json:"childAgents,omitempty"`
 }
 
 type ResourceLimits struct {
@@ -231,6 +233,14 @@ func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error 
 			if err := validateCapabilitySet(set.values); err != nil {
 				return fmt.Errorf("capabilities.%s: %w", set.name, err)
 			}
+		}
+		if spec.Capabilities.ChildAgents != nil {
+			if err := validateCapabilitySet(spec.Capabilities.ChildAgents); err != nil {
+				return fmt.Errorf("capabilities.childAgents: %w", err)
+			}
+		}
+		if spec.Capabilities.SpawnTasks && len(spec.Capabilities.ChildAgents) == 0 {
+			return fmt.Errorf("capabilities.childAgents requires at least one entry when spawnTasks is enabled")
 		}
 	}
 	if spec.Resources != nil {

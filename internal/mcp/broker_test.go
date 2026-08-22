@@ -33,6 +33,18 @@ type fakeMemoryBroker struct {
 	records     []store.MemoryRecord
 }
 
+type fakeWorkflowSpawner struct {
+	input   SpawnRequest
+	output  SpawnOutcome
+	invoked int
+}
+
+func (f *fakeWorkflowSpawner) Spawn(_ context.Context, input SpawnRequest) (SpawnOutcome, error) {
+	f.input = input
+	f.invoked++
+	return f.output, nil
+}
+
 func (f *fakeMemoryBroker) Put(_ context.Context, _ AttemptContext, input memory.PutInput) (store.MemoryRecord, bool, error) {
 	f.putInput = input
 	return store.MemoryRecord{
@@ -76,7 +88,7 @@ func newBrokerForTest(t *testing.T, identity AttemptContext, models ModelBroker,
 	t.Helper()
 	slot := &StaticIdentity{Context: identity}
 	tools := NewToolAdapter(&fakeToolInvokerForBroker{listed: listed}, slot)
-	return NewBroker(tools, models, memories, slot)
+	return NewBroker(tools, models, memories, nil, slot)
 }
 
 func decodeToolJSON(t *testing.T, result any) map[string]any {
@@ -230,6 +242,67 @@ func TestBrokerMemoryToolsEnforceNamespaceGrantAndProvenance(t *testing.T) {
 	}
 }
 
+func TestBrokerSpawnEnforcesCapabilityAllowlistAndFencedIdentity(t *testing.T) {
+	identity := brokerTestContext()
+	identity.WorkflowID = uuid.New()
+	identity.ParentStepName = "planner"
+	identity.CanSpawnTasks = true
+	identity.AllowedChildAgents = []string{"worker@1"}
+	spawner := &fakeWorkflowSpawner{output: SpawnOutcome{Code: "created", StepName: "child-1", SpawnDepth: 1}}
+	slot := &StaticIdentity{Context: identity}
+	broker := NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, slot), nil, nil, spawner, slot)
+
+	result, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
+		"name": SystemTaskSpawn,
+		"arguments": map[string]any{
+			"name": "child-1", "goal": "execute the delegated task", "agentVersionRef": "worker@1",
+		},
+	}))
+	if rpcErr != nil {
+		t.Fatalf("spawn: %v", rpcErr)
+	}
+	payload := decodeToolJSON(t, result)
+	if payload["outcome"] != "created" || payload["step"] != "child-1" {
+		t.Fatalf("spawn payload = %#v", payload)
+	}
+	if spawner.invoked != 1 || spawner.input.TenantID != identity.TenantID ||
+		spawner.input.AttemptID != identity.AttemptID || spawner.input.FencingToken != identity.FencingToken ||
+		spawner.input.WorkflowID != identity.WorkflowID || spawner.input.ParentStepName != "planner" {
+		t.Fatalf("spawn identity was not fenced: %+v", spawner.input)
+	}
+
+	denied := identity
+	denied.CanSpawnTasks = false
+	deniedSlot := &StaticIdentity{Context: denied}
+	deniedBroker := NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, deniedSlot), nil, nil, spawner, deniedSlot)
+	result, rpcErr = deniedBroker.CallTool(context.Background(), mustJSON(t, map[string]any{
+		"name": SystemTaskSpawn, "arguments": map[string]any{"name": "child-2", "goal": "no", "agentVersionRef": "worker@1"},
+	}))
+	if rpcErr != nil {
+		t.Fatalf("capability denial must be a tool outcome: %v", rpcErr)
+	}
+	if payload = decodeToolJSON(t, result); !strings.Contains(payload["error"].(string), "not granted") {
+		t.Fatalf("spawn capability denial = %#v", payload)
+	}
+
+	denied.CanSpawnTasks = true
+	denied.AllowedChildAgents = []string{"other@1"}
+	deniedSlot = &StaticIdentity{Context: denied}
+	deniedBroker = NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, deniedSlot), nil, nil, spawner, deniedSlot)
+	result, rpcErr = deniedBroker.CallTool(context.Background(), mustJSON(t, map[string]any{
+		"name": SystemTaskSpawn, "arguments": map[string]any{"name": "child-3", "goal": "no", "agentVersionRef": "worker@1"},
+	}))
+	if rpcErr != nil {
+		t.Fatalf("allowlist denial must be a tool outcome: %v", rpcErr)
+	}
+	if payload = decodeToolJSON(t, result); !strings.Contains(payload["error"].(string), "allowlist") {
+		t.Fatalf("child allowlist denial = %#v", payload)
+	}
+	if spawner.invoked != 1 {
+		t.Fatalf("denied spawns reached the kernel: %d invocations", spawner.invoked)
+	}
+}
+
 // closedWindowResolver simulates an MCP call outside any execution window.
 type closedWindowResolver struct{}
 
@@ -242,7 +315,7 @@ func TestBrokerDeniesWithoutIdentity(t *testing.T) {
 		output: kernelmodel.InvokeOutput{Call: store.ModelCall{ID: uuid.New(), Status: store.ModelCallCompleted}},
 	}
 	tools := NewToolAdapter(&fakeToolInvokerForBroker{}, closedWindowResolver{})
-	broker := NewBroker(tools, models, &fakeMemoryBroker{}, closedWindowResolver{})
+	broker := NewBroker(tools, models, &fakeMemoryBroker{}, nil, closedWindowResolver{})
 	result, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name":      SystemModelInvoke,
 		"arguments": map[string]any{"modelRef": "fake/agent-model", "messages": []map[string]any{{"role": "user", "content": "hi"}}},
@@ -278,7 +351,7 @@ func TestBrokerFailsClosedWithoutBrokers(t *testing.T) {
 	identity := brokerTestContext()
 	identity.AllowedModels = nil
 	tools := NewToolAdapter(&fakeToolInvokerForBroker{}, &StaticIdentity{Context: identity})
-	broker := NewBroker(tools, nil, nil, &StaticIdentity{Context: identity})
+	broker := NewBroker(tools, nil, nil, nil, &StaticIdentity{Context: identity})
 	_, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name":      SystemModelInvoke,
 		"arguments": map[string]any{"modelRef": "fake/agent-model", "messages": []map[string]any{{"role": "user", "content": "hi"}}},

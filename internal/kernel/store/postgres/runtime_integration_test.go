@@ -136,6 +136,19 @@ func TestExpiredRuntimeRecoversCheckpointWithHigherFence(t *testing.T) {
 	if _, err := repository.GetRuntimeAssignment(ctx, "tenant-a", assignment.Attempt.ID, 1); !errors.Is(err, kernelstore.ErrFenced) {
 		t.Fatalf("old owner was not fenced: %v", err)
 	}
+	secondStarting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
+		AttemptID: recovered.Lease.Attempt.ID, FencingToken: 2,
+		ExpectedAttemptVersion: recovered.Lease.Attempt.ResourceVersion, To: domain.AttemptStarting,
+	})
+	if err != nil {
+		t.Fatalf("start recovered attempt: %v", err)
+	}
+	if _, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
+		AttemptID: recovered.Lease.Attempt.ID, FencingToken: 2,
+		ExpectedAttemptVersion: secondStarting.ResourceVersion, To: domain.AttemptRunning,
+	}); err != nil {
+		t.Fatalf("run recovered attempt: %v", err)
+	}
 
 	clock.Advance(31 * time.Second)
 	exhausted, err := repository.RecoverExpiredAttempt(ctx, kernelstore.RecoverExpiredAttemptInput{

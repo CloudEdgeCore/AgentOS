@@ -538,8 +538,12 @@ type Assignment struct {
 	Phase                string                 `protobuf:"bytes,14,opt,name=phase,proto3" json:"phase,omitempty"`
 	ApprovalId           string                 `protobuf:"bytes,15,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
 	AgentVersionSpecJson []byte                 `protobuf:"bytes,16,opt,name=agent_version_spec_json,json=agentVersionSpecJson,proto3" json:"agent_version_spec_json,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// workflow lineage of a workflow-originated task (v1.3): "workflow_id/
+	// step_name/version", empty for standalone tasks. The adapter injects it
+	// into the fenced MCP identity so agentos.task.spawn can extend the run.
+	WorkflowLineage string `protobuf:"bytes,17,opt,name=workflow_lineage,json=workflowLineage,proto3" json:"workflow_lineage,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Assignment) Reset() {
@@ -682,6 +686,13 @@ func (x *Assignment) GetAgentVersionSpecJson() []byte {
 		return x.AgentVersionSpecJson
 	}
 	return nil
+}
+
+func (x *Assignment) GetWorkflowLineage() string {
+	if x != nil {
+		return x.WorkflowLineage
+	}
+	return ""
 }
 
 type TransitionAttemptRequest struct {
@@ -1423,7 +1434,7 @@ const file_agentos_runtime_v1_runtime_proto_rawDesc = "" +
 	"\x15GetAssignmentResponse\x12>\n" +
 	"\n" +
 	"assignment\x18\x01 \x01(\v2\x1e.agentos.runtime.v1.AssignmentR\n" +
-	"assignment\"\xc0\x05\n" +
+	"assignment\"\xeb\x05\n" +
 	"\n" +
 	"Assignment\x12?\n" +
 	"\bidentity\x18\x01 \x01(\v2#.agentos.runtime.v1.AttemptIdentityR\bidentity\x12\x15\n" +
@@ -1443,7 +1454,8 @@ const file_agentos_runtime_v1_runtime_proto_rawDesc = "" +
 	"\x05phase\x18\x0e \x01(\tR\x05phase\x12\x1f\n" +
 	"\vapproval_id\x18\x0f \x01(\tR\n" +
 	"approvalId\x125\n" +
-	"\x17agent_version_spec_json\x18\x10 \x01(\fR\x14agentVersionSpecJson\"\xcf\x02\n" +
+	"\x17agent_version_spec_json\x18\x10 \x01(\fR\x14agentVersionSpecJson\x12)\n" +
+	"\x10workflow_lineage\x18\x11 \x01(\tR\x0fworkflowLineage\"\xcf\x02\n" +
 	"\x18TransitionAttemptRequest\x12?\n" +
 	"\bidentity\x18\x01 \x01(\v2#.agentos.runtime.v1.AttemptIdentityR\bidentity\x128\n" +
 	"\x18expected_attempt_version\x18\x02 \x01(\x03R\x16expectedAttemptVersion\x12'\n" +

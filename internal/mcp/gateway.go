@@ -24,12 +24,28 @@ type AttemptContext struct {
 	AttemptID       uuid.UUID
 	FencingToken    int64
 	AgentVersionRef string
+	// WorkflowID names the workflow run this attempt's task belongs to
+	// (empty for standalone tasks); the brokered spawn tool extends that
+	// run with dynamic steps.
+	WorkflowID uuid.UUID
+	// WorkflowVersion is the observed resource version of the workflow run
+	// at assignment time.
+	WorkflowVersion int64
+	// ParentStepName names the workflow step this attempt's task executes
+	// (empty for standalone tasks); spawned steps carry it as lineage.
+	ParentStepName string
 	// AllowedModels is the AgentVersion's declared model capability grant;
 	// the brokered model tool denies everything outside it (default deny).
 	AllowedModels []string
 	// AllowedMemoryNamespaces is the declared memory capability grant; the
 	// brokered memory tools deny writes and reads outside it.
 	AllowedMemoryNamespaces []string
+	// CanSpawnTasks is the explicit AgentVersion capability for dynamic
+	// workflow expansion. It defaults to false.
+	CanSpawnTasks bool
+	// AllowedChildAgents is the immutable allowlist of AgentVersion refs the
+	// calling version may spawn. An empty list denies every child.
+	AllowedChildAgents []string
 }
 
 // IdentityResolver supplies the fenced identity for inbound MCP calls.

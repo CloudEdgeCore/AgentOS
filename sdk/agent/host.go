@@ -448,6 +448,24 @@ func validateStart(request StartRequest) error {
 			seen[value] = struct{}{}
 		}
 	}
+	if request.Capabilities.ChildAgents != nil {
+		if len(request.Capabilities.ChildAgents) > 256 {
+			return fmt.Errorf("capabilities.childAgents exceeds 256 grants")
+		}
+		seen := map[string]struct{}{}
+		for _, value := range request.Capabilities.ChildAgents {
+			if strings.TrimSpace(value) == "" || len(value) > 256 {
+				return fmt.Errorf("capabilities.childAgents contains an invalid grant")
+			}
+			if _, exists := seen[value]; exists {
+				return fmt.Errorf("capabilities.childAgents contains duplicate grant %q", value)
+			}
+			seen[value] = struct{}{}
+		}
+	}
+	if request.Capabilities.SpawnTasks && len(request.Capabilities.ChildAgents) == 0 {
+		return errors.New("capabilities.childAgents requires at least one entry when spawnTasks is enabled")
+	}
 	return nil
 }
 

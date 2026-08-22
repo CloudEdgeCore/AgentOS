@@ -11,6 +11,7 @@ import (
 
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
+	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
@@ -151,4 +152,37 @@ func memoryRecordFromProto(record *gatewayv1.MemoryRecord) store.MemoryRecord {
 		converted.UpdatedAt = record.GetUpdatedAt().AsTime()
 	}
 	return converted
+}
+
+// GrpcWorkflowSpawner implements mcp.WorkflowSpawner against the
+// orchestrator's WorkflowSpawnService (v1.3).
+type GrpcWorkflowSpawner struct {
+	client runtimev1.WorkflowSpawnServiceClient
+}
+
+// NewGrpcWorkflowSpawner binds the spawner to an orchestrator connection.
+func NewGrpcWorkflowSpawner(client runtimev1.WorkflowSpawnServiceClient) *GrpcWorkflowSpawner {
+	return &GrpcWorkflowSpawner{client: client}
+}
+
+// Spawn forwards one dynamic-step spawn; guard denials arrive as structured
+// outcomes, not gRPC errors.
+func (s *GrpcWorkflowSpawner) Spawn(ctx context.Context, in mcp.SpawnRequest) (mcp.SpawnOutcome, error) {
+	response, err := s.client.SpawnStep(ctx, &runtimev1.SpawnStepRequest{
+		Identity: &runtimev1.AttemptIdentity{
+			TenantId: in.TenantID, AttemptId: in.AttemptID.String(), FencingToken: in.FencingToken,
+		},
+		WorkflowId: in.WorkflowID.String(),
+		ParentStep: in.ParentStepName, Name: in.Name, Goal: in.Goal,
+		AgentVersionRef: in.AgentVersionRef, SpecJson: string(in.Spec),
+		MaxAttempts: int32(in.MaxAttempts), IdempotencyKey: in.IdempotencyKey,
+		ArgumentsJson: string(in.Arguments),
+	})
+	if err != nil {
+		return mcp.SpawnOutcome{}, fmt.Errorf("spawn step: %w", err)
+	}
+	return mcp.SpawnOutcome{
+		Code: response.GetOutcome(), Message: response.GetMessage(),
+		StepName: response.GetStepName(), SpawnDepth: int(response.GetSpawnDepth()),
+	}, nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -68,8 +70,10 @@ func TestDecodeSpecRejectsInvalidGraphs(t *testing.T) {
 		"condition two predicates": `{"steps":[
 			{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{}},
 			{"name":"b","agentVersionRef":"x@1","goal":"g","spec":{},"dependsOn":["a"],"condition":{"step":"a","outputEquals":"x","outputContains":"y"}}]}`,
-		"retry out of bounds": `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{},"retry":{"maxAttempts":11}}]}`,
-		"unknown field":       `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{},"bogus":true}]}`,
+		"retry out of bounds":           `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{},"retry":{"maxAttempts":11}}]}`,
+		"unknown field":                 `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{},"bogus":true}]}`,
+		"dynamic limits without enable": `{"runtime":{"dynamic":{"maxDynamicSteps":2}},"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{"priority":1}}]}`,
+		"dynamic without hard envelope": `{"runtime":{"dynamic":{"enabled":true,"maxDynamicSteps":2,"maxChildrenPerStep":2,"maxSpawnDepth":2,"maxWorkflowSteps":4}},"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{"priority":1}}]}`,
 	}
 	for name, document := range cases {
 		if _, err := DecodeSpec([]byte(document)); err == nil {
@@ -77,6 +81,51 @@ func TestDecodeSpecRejectsInvalidGraphs(t *testing.T) {
 		} else {
 			t.Logf("%s rejected: %v", name, err)
 		}
+	}
+}
+
+func TestDecodeSpecPreservesV13BudgetRuntimeAndDeadline(t *testing.T) {
+	deadline := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	document := fmt.Sprintf(`{
+		"budget":{"maxTasks":25,"maxTokens":5000,"maxCostUsd":2.5},
+		"runtime":{"dynamic":{"enabled":true,"maxDynamicSteps":10,"maxChildrenPerStep":4,"maxSpawnDepth":3,"maxWorkflowSteps":20}},
+		"deadline":%q,
+		"steps":[{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{"priority":1}}]
+	}`, deadline.Format(time.RFC3339))
+	spec, err := DecodeWorkflowSpec([]byte(document))
+	if err != nil {
+		t.Fatalf("decode v1.3 spec: %v", err)
+	}
+	tasks, tokens, cost := spec.Budgets()
+	if tasks != 25 || tokens != 5000 || cost != 2.5 || spec.Deadline == nil || !spec.Deadline.Equal(deadline) {
+		t.Fatalf("v1.3 policy lost: %+v", spec)
+	}
+	if spec.Runtime == nil || spec.Runtime.Dynamic.MaxSpawnDepth != 3 {
+		t.Fatalf("dynamic policy lost: %+v", spec.Runtime)
+	}
+}
+
+func TestDecodeSpecAcceptsDynamicGroupJoinOnlyWhenEnabled(t *testing.T) {
+	deadline := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	document := fmt.Sprintf(`{
+		"budget":{"maxTasks":10},
+		"runtime":{"dynamic":{"enabled":true,"maxDynamicSteps":5,"maxChildrenPerStep":5,"maxSpawnDepth":2,"maxWorkflowSteps":7}},
+		"deadline":%q,
+		"steps":[
+			{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{"priority":1}},
+			{"name":"join","agentVersionRef":"join@1","goal":"join","spec":{"priority":1},"dependsOn":["spawn:planner"]}
+		]
+	}`, deadline)
+	if _, err := DecodeWorkflowSpec([]byte(document)); err != nil {
+		t.Fatalf("dynamic group join rejected: %v", err)
+	}
+	if _, err := DecodeWorkflowSpec([]byte(`{
+		"steps":[
+			{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{}},
+			{"name":"join","agentVersionRef":"join@1","goal":"join","spec":{},"dependsOn":["spawn:planner"]}
+		]
+	}`)); err == nil {
+		t.Fatal("dynamic group join accepted without runtime.dynamic.enabled")
 	}
 }
 
@@ -108,6 +157,8 @@ func (f *fakeWorkflowStore) CreateWorkflow(_ context.Context, in kernelstore.Cre
 	workflow := kernelstore.Workflow{
 		ID: in.ID, TenantID: in.TenantID, Namespace: in.Namespace, IdempotencyKey: in.IdempotencyKey,
 		Goal: in.Goal, Spec: in.Spec, Status: kernelstore.WorkflowPending, ResourceVersion: 1,
+		BudgetMaxTasks: in.BudgetMaxTasks, BudgetMaxTokens: in.BudgetMaxTokens,
+		BudgetMaxCostUSD: in.BudgetMaxCostUSD, DeadlineAt: in.DeadlineAt,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 	f.workflows[workflow.ID] = &workflow
@@ -152,11 +203,7 @@ func (f *fakeWorkflowStore) ListWorkflowSteps(_ context.Context, _ string, workf
 	for _, step := range f.steps[workflowID] {
 		steps = append(steps, *step)
 	}
-	for i := 1; i < len(steps); i++ {
-		for j := i; j > 0 && steps[j].Ordinal < steps[j-1].Ordinal; j-- {
-			steps[j], steps[j-1] = steps[j-1], steps[j]
-		}
-	}
+	sort.Slice(steps, func(i, j int) bool { return steps[i].Ordinal < steps[j].Ordinal })
 	return steps, nil
 }
 
@@ -249,6 +296,106 @@ func (f *fakeWorkflowStore) RequestWorkflowCancellation(_ context.Context, tenan
 
 func (f *fakeWorkflowStore) ArtifactMetadata(_ context.Context, _, _ string) ([]byte, int64, string, error) {
 	return make([]byte, 32), 0, "application/json", nil
+}
+
+func (f *fakeWorkflowStore) ClaimWorkflows(_ context.Context, in kernelstore.ClaimWorkflowsInput) ([]kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	claimed := []kernelstore.Workflow{}
+	for _, workflow := range f.workflows {
+		if !workflow.Status.Terminal() && workflow.BudgetExhaustedAt == nil {
+			claimed = append(claimed, *workflow)
+		}
+		if len(claimed) >= in.Batch {
+			break
+		}
+	}
+	return claimed, nil
+}
+
+func (f *fakeWorkflowStore) SpawnWorkflowStep(_ context.Context, in kernelstore.SpawnWorkflowStepInput) (kernelstore.SpawnWorkflowStepResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[in.WorkflowID]
+	if !ok || workflow.TenantID != in.TenantID {
+		return kernelstore.SpawnWorkflowStepResult{}, kernelstore.ErrWorkflowNotFound
+	}
+	spawnKey := in.IdempotencyKey + "-" + kernelstore.SpawnKeyHash(in.Arguments)
+	for _, step := range f.steps[in.WorkflowID] {
+		if step.SpawnKey == spawnKey {
+			return kernelstore.SpawnWorkflowStepResult{Step: *step, Workflow: *workflow}, nil
+		}
+	}
+	parentDepth := 0
+	if in.ParentStepName != "" {
+		if parent, ok := f.steps[in.WorkflowID][in.ParentStepName]; ok {
+			parentDepth = parent.SpawnDepth
+		}
+	}
+	ordinal := 0
+	for _, step := range f.steps[in.WorkflowID] {
+		if step.Ordinal >= ordinal {
+			ordinal = step.Ordinal + 1
+		}
+	}
+	created := kernelstore.WorkflowStep{
+		ID: uuid.New(), TenantID: in.TenantID, WorkflowID: in.WorkflowID, Name: in.Name,
+		Ordinal: ordinal, Status: kernelstore.StepPending, ParentStepName: in.ParentStepName,
+		SpawnDepth: parentDepth + 1, IsDynamic: true, SpawnKey: spawnKey, Goal: in.Goal,
+		AgentVersionRef: in.AgentVersionRef, Spec: in.Spec, MaxAttempts: in.MaxAttempts,
+		ResourceVersion: 1, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	f.steps[in.WorkflowID][in.Name] = &created
+	return kernelstore.SpawnWorkflowStepResult{Step: created, Workflow: *workflow, Created: true}, nil
+}
+
+func (f *fakeWorkflowStore) MarkWorkflowBudgetExhausted(_ context.Context, tenantID string, workflowID uuid.UUID, expectedVersion int64) (kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[workflowID]
+	if !ok || workflow.TenantID != tenantID {
+		return kernelstore.Workflow{}, kernelstore.ErrWorkflowNotFound
+	}
+	if workflow.ResourceVersion != expectedVersion {
+		return kernelstore.Workflow{}, fmt.Errorf("%w: workflow", kernelstore.ErrVersionConflict)
+	}
+	if workflow.BudgetExhaustedAt == nil {
+		now := time.Now()
+		workflow.BudgetExhaustedAt = &now
+		workflow.ResourceVersion++
+	}
+	return *workflow, nil
+}
+
+func (f *fakeWorkflowStore) MarkWorkflowDeadlineExceeded(_ context.Context, tenantID string, workflowID uuid.UUID, expectedVersion int64) (kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[workflowID]
+	if !ok || workflow.TenantID != tenantID {
+		return kernelstore.Workflow{}, kernelstore.ErrWorkflowNotFound
+	}
+	if workflow.ResourceVersion != expectedVersion {
+		return kernelstore.Workflow{}, fmt.Errorf("%w: workflow", kernelstore.ErrVersionConflict)
+	}
+	if workflow.DeadlineExceededAt == nil {
+		now := time.Now()
+		workflow.DeadlineExceededAt = &now
+		workflow.ResourceVersion++
+	}
+	return *workflow, nil
+}
+
+func (f *fakeWorkflowStore) WorkflowUsageSnapshot(_ context.Context, _ string, workflowID uuid.UUID) (kernelstore.WorkflowUsage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[workflowID]
+	if !ok {
+		return kernelstore.WorkflowUsage{}, kernelstore.ErrWorkflowNotFound
+	}
+	return kernelstore.WorkflowUsage{
+		BudgetMaxTasks: workflow.BudgetMaxTasks, BudgetMaxTokens: workflow.BudgetMaxTokens,
+		BudgetMaxCostUSD: workflow.BudgetMaxCostUSD,
+	}, nil
 }
 
 type fakeTaskPipeline struct {
@@ -351,10 +498,16 @@ func newEngine(workflows *fakeWorkflowStore, tasks *fakeTaskPipeline) *Controlle
 
 func createWorkflowForTest(t *testing.T, store *fakeWorkflowStore, spec string) kernelstore.Workflow {
 	t.Helper()
-	steps := mustSpec(t, spec)
+	decoded, err := DecodeWorkflowSpec([]byte(spec))
+	if err != nil {
+		t.Fatalf("decode workflow: %v", err)
+	}
+	tasksBudget, tokensBudget, costBudget := decoded.Budgets()
 	created, err := store.CreateWorkflow(context.Background(), kernelstore.CreateWorkflowInput{
 		ID: uuid.New(), TenantID: "tenant-1", Namespace: "default", IdempotencyKey: "wf-" + uuid.NewString(),
-		Goal: "workflow goal", Spec: []byte(spec), Steps: steps,
+		Goal: "workflow goal", Spec: []byte(spec), Steps: decoded.StepInputs(),
+		BudgetMaxTasks: tasksBudget, BudgetMaxTokens: tokensBudget, BudgetMaxCostUSD: costBudget,
+		DeadlineAt: decoded.Deadline,
 	})
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
@@ -407,6 +560,130 @@ func TestEngineRunsSequentialDependencyChain(t *testing.T) {
 	if len(tasks.byKey) != 2 {
 		t.Fatalf("tasks created = %d, want 2", len(tasks.byKey))
 	}
+}
+
+func TestEngineRunsDynamicChildThenGroupJoin(t *testing.T) {
+	deadline := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	spec := fmt.Sprintf(`{
+		"budget":{"maxTasks":10},
+		"runtime":{"dynamic":{"enabled":true,"maxDynamicSteps":5,"maxChildrenPerStep":5,"maxSpawnDepth":2,"maxWorkflowSteps":7}},
+		"deadline":%q,
+		"steps":[
+			{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{"priority":1}},
+			{"name":"join","agentVersionRef":"join@1","goal":"combine children","spec":{"priority":1},"dependsOn":["spawn:planner"]}
+		]
+	}`, deadline)
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+	spawned, err := store.SpawnWorkflowStep(context.Background(), kernelstore.SpawnWorkflowStepInput{
+		WorkflowID: workflow.ID, TenantID: workflow.TenantID, WorkflowVersion: workflow.ResourceVersion,
+		ParentStepName: "planner", Name: "child-1", Goal: "execute child", AgentVersionRef: "worker@1",
+		Spec: []byte(`{}`), MaxAttempts: 1, IdempotencyKey: "child-1", Arguments: []byte(`{}`),
+	})
+	if err != nil || !spawned.Created {
+		t.Fatalf("spawn dynamic child: %+v err=%v", spawned, err)
+	}
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	steps, _ := store.ListWorkflowSteps(context.Background(), workflow.TenantID, workflow.ID)
+	byName := map[string]kernelstore.WorkflowStep{}
+	for _, step := range steps {
+		byName[step.Name] = step
+	}
+	for _, name := range []string{"planner", "child-1", "join"} {
+		if byName[name].Status != kernelstore.StepSucceeded {
+			t.Fatalf("step %s = %s", name, byName[name].Status)
+		}
+	}
+	childGoal := tasks.goals[*byName["child-1"].TaskID]
+	if !strings.Contains(childGoal, "Upstream result [planner]") {
+		t.Fatalf("dynamic child did not receive parent output: %q", childGoal)
+	}
+	joinGoal := tasks.goals[*byName["join"].TaskID]
+	if !strings.Contains(joinGoal, "Upstream result [child-1]") {
+		t.Fatalf("group join did not receive dynamic child output: %q", joinGoal)
+	}
+}
+
+func TestEngineDoesNotCloseEmptySpawnGroupBeforeParentCompletes(t *testing.T) {
+	deadline := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	spec := fmt.Sprintf(`{
+		"budget":{"maxTasks":10},
+		"runtime":{"dynamic":{"enabled":true,"maxDynamicSteps":5,"maxChildrenPerStep":5,"maxSpawnDepth":2,"maxWorkflowSteps":7}},
+		"deadline":%q,
+		"steps":[
+			{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{"priority":1}},
+			{"name":"join","agentVersionRef":"join@1","goal":"join empty group","spec":{"priority":1},"dependsOn":["spawn:planner"]}
+		]
+	}`, deadline)
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+	if _, err := engine.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	steps, _ := store.ListWorkflowSteps(context.Background(), workflow.TenantID, workflow.ID)
+	byName := map[string]kernelstore.WorkflowStep{}
+	for _, step := range steps {
+		byName[step.Name] = step
+	}
+	if byName["planner"].Status != kernelstore.StepRunning || byName["join"].Status != kernelstore.StepPending {
+		t.Fatalf("empty group closed before parent completed: planner=%s join=%s", byName["planner"].Status, byName["join"].Status)
+	}
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	final, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
+	if final.Status != kernelstore.WorkflowSucceeded {
+		t.Fatalf("empty dynamic group workflow = %s", final.Status)
+	}
+}
+
+func TestV13Orchestrates10KDynamicTasks(t *testing.T) {
+	if os.Getenv("AGENTOS_V13_SCALE_TEST") != "1" {
+		t.Skip("set AGENTOS_V13_SCALE_TEST=1 to run the 10k dynamic-task acceptance leg")
+	}
+	deadline := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	spec := fmt.Sprintf(`{
+		"budget":{"maxTasks":10000},
+		"runtime":{"dynamic":{"enabled":true,"maxDynamicSteps":9999,"maxChildrenPerStep":9999,"maxSpawnDepth":1,"maxWorkflowSteps":10000}},
+		"deadline":%q,
+		"steps":[{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{"priority":1}}]
+	}`, deadline)
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks).WithMaxInFlightSteps(64)
+	workflow := createWorkflowForTest(t, store, spec)
+	for index := 0; index < 9_999; index++ {
+		name := fmt.Sprintf("child-%05d", index)
+		result, err := store.SpawnWorkflowStep(context.Background(), kernelstore.SpawnWorkflowStepInput{
+			WorkflowID: workflow.ID, TenantID: workflow.TenantID, WorkflowVersion: workflow.ResourceVersion,
+			ParentStepName: "planner", Name: name, Goal: "execute child", AgentVersionRef: "worker@1",
+			Spec: []byte(`{"priority":1}`), MaxAttempts: 1,
+			IdempotencyKey: name, Arguments: []byte(fmt.Sprintf(`{"index":%d}`, index)),
+		})
+		if err != nil || !result.Created {
+			t.Fatalf("seed dynamic step %d: created=%v err=%v", index, result.Created, err)
+		}
+	}
+	started := time.Now()
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
+		return current.Status.Terminal()
+	}, 30*time.Second)
+	elapsed := time.Since(started)
+	final, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
+	if final.Status != kernelstore.WorkflowSucceeded || len(tasks.byKey) != 10_000 {
+		t.Fatalf("10k task workflow status=%s tasks=%d", final.Status, len(tasks.byKey))
+	}
+	t.Logf("10k dynamic tasks orchestrated in %s (%.1f tasks/s)", elapsed, 10_000/elapsed.Seconds())
 }
 
 func TestEngineSkipsDependentsOfFailedStep(t *testing.T) {
@@ -694,5 +971,30 @@ func TestEngineRecoversAfterRestart(t *testing.T) {
 	}, 5*time.Second)
 	if final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID); final.Status != kernelstore.WorkflowSucceeded {
 		t.Fatalf("workflow = %s", final.Status)
+	}
+}
+
+func TestEngineHardStopsExpiredWorkflow(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	deadline := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	spec := fmt.Sprintf(`{
+		"deadline":%q,
+		"steps":[{"name":"planner","agentVersionRef":"planner@1","goal":"plan","spec":{"priority":1}}]
+	}`, deadline.Format(time.RFC3339))
+	created := createWorkflowForTest(t, store, spec)
+	engine := newEngine(store, tasks)
+	engine.now = func() time.Time { return deadline.Add(time.Minute) }
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", created.ID)
+		return current.Status.Terminal()
+	}, 2*time.Second)
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", created.ID)
+	if final.Status != kernelstore.WorkflowFailed || final.FailureCode != "WORKFLOW_DEADLINE_EXCEEDED" || final.DeadlineExceededAt == nil {
+		t.Fatalf("expired workflow = %+v", final)
+	}
+	if len(tasks.tasks) != 0 {
+		t.Fatalf("expired workflow dispatched %d tasks", len(tasks.tasks))
 	}
 }

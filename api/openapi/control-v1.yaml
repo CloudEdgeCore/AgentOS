@@ -665,6 +665,8 @@ components:
         status: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
         failureCode: { type: string }
         cancelRequestedAt: { type: string, format: date-time }
+        deadline: { type: string, format: date-time }
+        deadlineExceededAt: { type: string, format: date-time }
         resourceVersion: { type: integer, format: int64 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -788,6 +790,14 @@ components:
             models: { $ref: '#/components/schemas/CapabilitySet' }
             memory: { $ref: '#/components/schemas/CapabilitySet' }
             secrets: { $ref: '#/components/schemas/CapabilitySet' }
+            spawnTasks:
+              type: boolean
+              default: false
+              description: Allows the AgentVersion to request guarded dynamic workflow steps.
+            childAgents:
+              allOf:
+                - { $ref: '#/components/schemas/CapabilitySet' }
+              description: AgentVersion references this version may dynamically spawn; empty denies all children.
         resources:
           type: object
           additionalProperties: false

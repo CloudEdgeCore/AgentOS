@@ -28,8 +28,41 @@ const (
 	SystemModelInvoke   = "agentos.model.invoke"
 	SystemMemoryPut     = "agentos.memory.put"
 	SystemMemorySearch  = "agentos.memory.search"
-	systemToolsRevision = "v1.1"
+	SystemTaskSpawn     = "agentos.task.spawn"
+	systemToolsRevision = "v1.3"
 )
+
+// SpawnRequest is one dynamic-step spawn derived from the fenced identity:
+// the workflow lineage (workflow id, version, parent step) comes from the
+// worker-injected execution window, never from agent arguments.
+type SpawnRequest struct {
+	TenantID        string
+	AttemptID       uuid.UUID
+	FencingToken    int64
+	WorkflowID      uuid.UUID
+	ParentStepName  string
+	Name            string
+	Goal            string
+	AgentVersionRef string
+	Spec            json.RawMessage
+	MaxAttempts     int
+	IdempotencyKey  string
+	Arguments       json.RawMessage
+}
+
+// SpawnOutcome is the authoritative result of one spawn call.
+type SpawnOutcome struct {
+	Code       string // "created" | "replayed" | guard denial code
+	Message    string
+	StepName   string
+	SpawnDepth int
+}
+
+// WorkflowSpawner executes dynamic-step spawns through the kernel's guarded
+// transaction. The runtime-adapter gRPC client satisfies it.
+type WorkflowSpawner interface {
+	Spawn(context.Context, SpawnRequest) (SpawnOutcome, error)
+}
 
 // ModelBroker executes fenced model invocations. The kernel model.Invoker
 // and the runtime-adapter gRPC client both satisfy it.
@@ -73,13 +106,15 @@ type Broker struct {
 	tools    *ToolAdapter
 	models   ModelBroker
 	memory   MemoryBroker
+	spawner  WorkflowSpawner
 	identity IdentityResolver
 }
 
-// NewBroker builds the brokered MCP surface. models and memory may be nil:
-// the corresponding tools are then not listed and their calls deny closed.
-func NewBroker(tools *ToolAdapter, models ModelBroker, memories MemoryBroker, identity IdentityResolver) *Broker {
-	return &Broker{tools: tools, models: models, memory: memories, identity: identity}
+// NewBroker builds the brokered MCP surface. models, memory and spawner may
+// be nil: the corresponding tools are then not listed and their calls deny
+// closed.
+func NewBroker(tools *ToolAdapter, models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner, identity IdentityResolver) *Broker {
+	return &Broker{tools: tools, models: models, memory: memories, spawner: spawner, identity: identity}
 }
 
 type systemTool struct {
@@ -88,7 +123,7 @@ type systemTool struct {
 	schema      string
 }
 
-func systemToolDeclarations(models ModelBroker, memories MemoryBroker) []systemTool {
+func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner) []systemTool {
 	var declarations []systemTool
 	if models != nil {
 		declarations = append(declarations, systemTool{
@@ -110,6 +145,13 @@ func systemToolDeclarations(models ModelBroker, memories MemoryBroker) []systemT
 				schema:      `{"type":"object","properties":{"query":{"type":"string"},"namespace":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`,
 			})
 	}
+	if spawner != nil {
+		declarations = append(declarations, systemTool{
+			name:        SystemTaskSpawn,
+			description: "Spawn a new dynamic step into the running workflow (recursion, fan-out and budget guards enforced by the kernel; identical calls replay the same step)",
+			schema:      `{"type":"object","properties":{"name":{"type":"string","description":"step name, lowercase token"},"goal":{"type":"string"},"agentVersionRef":{"type":"string"},"spec":{"type":"object"},"maxAttempts":{"type":"integer"}},"required":["name","goal"]}`,
+		})
+	}
 	return declarations
 }
 
@@ -130,7 +172,7 @@ func (b *Broker) ListTools(ctx context.Context, params json.RawMessage) (any, *E
 	if tools == nil {
 		tools = []map[string]any{}
 	}
-	for _, declaration := range systemToolDeclarations(b.models, b.memory) {
+	for _, declaration := range systemToolDeclarations(b.models, b.memory, b.spawner) {
 		tools = append(tools, map[string]any{
 			"name":        declaration.name,
 			"description": declaration.description + " (system tool " + systemToolsRevision + ")",
@@ -165,6 +207,11 @@ func (b *Broker) CallTool(ctx context.Context, params json.RawMessage) (any, *Er
 			return nil, invalidParams("memory access is not configured on this runtime")
 		}
 		return b.searchMemory(ctx, call.Arguments)
+	case SystemTaskSpawn:
+		if b.spawner == nil {
+			return nil, invalidParams("dynamic spawn is not configured on this runtime")
+		}
+		return b.spawnTask(ctx, call.Arguments)
 	default:
 		return b.tools.CallTool(ctx, params)
 	}
@@ -339,6 +386,66 @@ func (b *Broker) searchMemory(ctx context.Context, params json.RawMessage) (any,
 	}
 	document, _ := json.Marshal(map[string]any{"records": results})
 	return textResult(document, false), nil
+}
+
+// spawnTask extends the calling attempt's workflow with one dynamic step.
+// The workflow lineage comes from the fenced identity (worker-injected);
+// the agent only names the step, its goal and its task spec. Standalone
+// tasks (no workflow) deny closed.
+func (b *Broker) spawnTask(ctx context.Context, params json.RawMessage) (any, *Error) {
+	var call struct {
+		Name            string          `json:"name"`
+		Goal            string          `json:"goal"`
+		AgentVersionRef string          `json:"agentVersionRef"`
+		Spec            json.RawMessage `json:"spec,omitempty"`
+		MaxAttempts     int             `json:"maxAttempts"`
+	}
+	if err := strictDecode(params, &call); err != nil {
+		return nil, invalidParams(err.Error())
+	}
+	if strings.TrimSpace(call.Name) == "" || strings.TrimSpace(call.Goal) == "" {
+		return nil, invalidParams("name and goal are required")
+	}
+	if len(call.Goal) > 8192 {
+		return nil, invalidParams("goal exceeds 8192 bytes")
+	}
+	if call.MaxAttempts < 0 || call.MaxAttempts > 10 {
+		return nil, invalidParams("maxAttempts must be 0..10")
+	}
+	identity, err := b.resolveIdentity(ctx)
+	if err != nil {
+		return toolErrorResult("no fenced attempt identity"), nil
+	}
+	if identity.WorkflowID == uuid.Nil {
+		return toolErrorResult("task is not part of a workflow; dynamic spawn is unavailable"), nil
+	}
+	if !identity.CanSpawnTasks {
+		return toolErrorResult("dynamic spawn is not granted by the AgentVersion"), nil
+	}
+	agentVersionRef := call.AgentVersionRef
+	if agentVersionRef == "" {
+		agentVersionRef = identity.AgentVersionRef
+	}
+	if !granted(agentVersionRef, identity.AllowedChildAgents) {
+		return toolErrorResult("child agent is not in the AgentVersion spawn allowlist: " + agentVersionRef), nil
+	}
+	outcome, spawnErr := b.spawner.Spawn(ctx, SpawnRequest{
+		TenantID: identity.TenantID, AttemptID: identity.AttemptID, FencingToken: identity.FencingToken,
+		WorkflowID:     identity.WorkflowID,
+		ParentStepName: identity.ParentStepName, Name: call.Name, Goal: call.Goal,
+		AgentVersionRef: agentVersionRef, Spec: call.Spec, MaxAttempts: call.MaxAttempts,
+		IdempotencyKey: systemIdempotencyKey(identity, SystemTaskSpawn, params),
+		Arguments:      params,
+	})
+	if spawnErr != nil {
+		return toolErrorResult("spawn failed: " + boundedMessage(spawnErr)), nil
+	}
+	document, _ := json.Marshal(map[string]any{
+		"outcome": outcome.Code, "message": outcome.Message, "step": outcome.StepName,
+		"spawnDepth": outcome.SpawnDepth,
+	})
+	isError := outcome.Code != "created" && outcome.Code != "replayed"
+	return textResult(document, isError), nil
 }
 
 // resolveIdentity prefers the execution-scoped window when the agent

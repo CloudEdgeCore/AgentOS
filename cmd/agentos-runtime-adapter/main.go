@@ -42,6 +42,7 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "worker X.509-SVID private key")
 	trustBundle := flag.String("trust-bundle", "", "SPIFFE trust bundle")
 	devMode := flag.Bool("dev-mode", false, "allow plaintext Runtime Protocol for local development")
+	spawnAddress := flag.String("spawn-address", "", "orchestrator WorkflowSpawnService address (dynamic step spawn; empty disables)")
 	flag.Parse()
 	if strings.TrimSpace(*endpoint) == "" || strings.TrimSpace(*tenantID) == "" ||
 		strings.TrimSpace(*runtimeInstanceID) == "" || strings.TrimSpace(*artifactRoot) == "" ||
@@ -116,10 +117,21 @@ func main() {
 		defer gatewayConnection.Close()
 		slot := mcp.NewExecutionRegistry()
 		tools := mcp.NewToolAdapter(reference.NewGrpcToolInvoker(gatewayv1.NewToolGatewayServiceClient(gatewayConnection)), slot)
+		var spawner mcp.WorkflowSpawner
+		if strings.TrimSpace(*spawnAddress) != "" {
+			spawnConnection, dialErr := grpc.NewClient(*spawnAddress,
+				append([]grpc.DialOption{grpc.WithTransportCredentials(credentials)}, grpcx.ClientOptions()...)...)
+			if dialErr != nil {
+				slog.Error("connect to orchestrator spawn service", "error", dialErr)
+				os.Exit(1)
+			}
+			defer spawnConnection.Close()
+			spawner = runtimeadapter.NewGrpcWorkflowSpawner(runtimev1.NewWorkflowSpawnServiceClient(spawnConnection))
+		}
 		broker := mcp.NewBroker(tools,
 			runtimeadapter.NewGrpcModelBroker(modelv1.NewModelInvocationServiceClient(gatewayConnection)),
 			runtimeadapter.NewGrpcMemoryBroker(gatewayv1.NewMemoryGatewayServiceClient(gatewayConnection)),
-			slot)
+			spawner, slot)
 		worker.WithExecutionWindow(slot)
 		mcpServer := mcp.NewServer("agentos-adapter", "v1.1.0", broker)
 		listener, listenErr := net.Listen("tcp", *mcpListen)

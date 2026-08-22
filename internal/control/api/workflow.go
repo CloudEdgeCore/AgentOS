@@ -89,14 +89,18 @@ func (h *Handler) createWorkflow(writer http.ResponseWriter, request *http.Reque
 		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_WORKFLOW", "goal must be 1..8192 bytes", traceID)
 		return
 	}
-	steps, err := workflow.DecodeSpec(body.Workflow)
+	workflowSpec, err := workflow.DecodeWorkflowSpec(body.Workflow)
 	if err != nil {
 		h.writeProblem(writer, request, http.StatusUnprocessableEntity, "INVALID_WORKFLOW", err.Error(), traceID)
 		return
 	}
+	steps := workflowSpec.StepInputs()
+	budgetTasks, budgetTokens, budgetCostUSD := workflowSpec.Budgets()
 	result, err := h.workflows.CreateWorkflow(request.Context(), store.CreateWorkflowInput{
 		ID: h.newID(), TenantID: principal.TenantID, Namespace: namespace,
 		IdempotencyKey: idempotencyKey, Goal: body.Goal, Spec: body.Workflow, Steps: steps,
+		BudgetMaxTasks: budgetTasks, BudgetMaxTokens: budgetTokens, BudgetMaxCostUSD: budgetCostUSD,
+		DeadlineAt: workflowSpec.Deadline,
 	})
 	if err != nil {
 		h.writeStoreProblem(writer, request, err, traceID)
@@ -281,6 +285,12 @@ func (h *Handler) writeWorkflow(writer http.ResponseWriter, status int, target s
 	}
 	if target.CancelRequestedAt != nil {
 		document["cancelRequestedAt"] = target.CancelRequestedAt.UTC().Format(time.RFC3339)
+	}
+	if target.DeadlineAt != nil {
+		document["deadline"] = target.DeadlineAt.UTC().Format(time.RFC3339)
+	}
+	if target.DeadlineExceededAt != nil {
+		document["deadlineExceededAt"] = target.DeadlineExceededAt.UTC().Format(time.RFC3339)
 	}
 	encodedSteps := make([]map[string]any, 0, len(steps))
 	for _, step := range steps {
