@@ -13,6 +13,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -59,17 +60,17 @@ func TestTaskIdempotencyAndCAS(t *testing.T) {
 		t.Fatalf("expected idempotency conflict, got %v", err)
 	}
 
-	admitted, err := store.TransitionTask(ctx, created.Task.ID, 1, domain.TaskAdmitted)
+	admitted, err := store.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, 1, domain.TaskAdmitted)
 	if err != nil {
 		t.Fatalf("admit task: %v", err)
 	}
 	if admitted.ResourceVersion != 2 {
 		t.Fatalf("task version = %d, want 2", admitted.ResourceVersion)
 	}
-	if _, err := store.TransitionTask(ctx, created.Task.ID, 1, domain.TaskCancelled); !errors.Is(err, kernelstore.ErrVersionConflict) {
+	if _, err := store.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, 1, domain.TaskCancelled); !errors.Is(err, kernelstore.ErrVersionConflict) {
 		t.Fatalf("expected stale CAS rejection, got %v", err)
 	}
-	if _, err := store.TransitionTask(ctx, created.Task.ID, 2, domain.TaskSucceeded); !errors.Is(err, kernelstore.ErrResultRequired) {
+	if _, err := store.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, 2, domain.TaskSucceeded); !errors.Is(err, kernelstore.ErrResultRequired) {
 		t.Fatalf("expected direct-success rejection, got %v", err)
 	}
 
@@ -142,28 +143,28 @@ func TestCompletionCommitsResultBeforeTaskSuccess(t *testing.T) {
 	task, run := createAdmittedRun(t, ctx, store, "completion")
 
 	owned, err := store.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: task.TenantID, AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci", RuntimeInstanceID: "worker-1", TTL: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("acquire attempt: %v", err)
 	}
 	starting, err := store.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
+		TenantID: task.TenantID, AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
 		ExpectedAttemptVersion: owned.Attempt.ResourceVersion, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatalf("start attempt: %v", err)
 	}
 	running, err := store.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: starting.ID, FencingToken: starting.FencingToken,
+		TenantID: task.TenantID, AttemptID: starting.ID, FencingToken: starting.FencingToken,
 		ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
 	})
 	if err != nil {
 		t.Fatalf("run attempt: %v", err)
 	}
 	lease, err := store.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
-		AttemptID: running.ID, FencingToken: running.FencingToken,
+		TenantID: task.TenantID, AttemptID: running.ID, FencingToken: running.FencingToken,
 		ExpectedLeaseVersion: owned.Lease.ResourceVersion, TTL: 2 * time.Minute,
 	})
 	if err != nil {
@@ -173,7 +174,7 @@ func TestCompletionCommitsResultBeforeTaskSuccess(t *testing.T) {
 		t.Fatalf("lease version = %d, want 2", lease.ResourceVersion)
 	}
 	completed, err := store.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: running.ID, FencingToken: running.FencingToken,
+		TenantID: task.TenantID, AttemptID: running.ID, FencingToken: running.FencingToken,
 		ExpectedAttemptVersion: running.ResourceVersion, To: domain.AttemptCompleted,
 	})
 	if err != nil {
@@ -181,7 +182,7 @@ func TestCompletionCommitsResultBeforeTaskSuccess(t *testing.T) {
 	}
 	clock.Advance(3 * time.Minute)
 	if _, err := store.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: task.TenantID, AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: owned.Run.ResourceVersion, RuntimeClass: "oci", RuntimeInstanceID: "worker-2", TTL: time.Minute,
 	}); !errors.Is(err, kernelstore.ErrCompletionPending) {
 		t.Fatalf("expected completed attempt to retain result-commit ownership, got %v", err)
@@ -197,7 +198,7 @@ func TestCompletionCommitsResultBeforeTaskSuccess(t *testing.T) {
 	}
 
 	finalRun, finalTask, err := store.CompleteRun(ctx, kernelstore.CompleteRunInput{
-		RunID: run.ID, AttemptID: completed.ID, FencingToken: completed.FencingToken,
+		TenantID: task.TenantID, RunID: run.ID, AttemptID: completed.ID, FencingToken: completed.FencingToken,
 		ExpectedRunVersion: owned.Run.ResourceVersion, ResultRef: "cas://sha256/result-1",
 	})
 	if err != nil {
@@ -218,7 +219,7 @@ func TestExpiredLeaseIssuesNewFenceAndRejectsOldOwner(t *testing.T) {
 	_, run := createAdmittedRun(t, ctx, store, "fencing")
 
 	oldOwner, err := store.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: "tenant-a", AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci", RuntimeInstanceID: "worker-old", TTL: time.Second,
 	})
 	if err != nil {
@@ -226,7 +227,7 @@ func TestExpiredLeaseIssuesNewFenceAndRejectsOldOwner(t *testing.T) {
 	}
 	clock.Advance(2 * time.Second)
 	newOwner, err := store.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: "tenant-a", AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: oldOwner.Run.ResourceVersion, RuntimeClass: "oci", RuntimeInstanceID: "worker-new", TTL: time.Minute,
 	})
 	if err != nil {
@@ -236,13 +237,13 @@ func TestExpiredLeaseIssuesNewFenceAndRejectsOldOwner(t *testing.T) {
 		t.Fatalf("fencing token did not increase: old=%d new=%d", oldOwner.Attempt.FencingToken, newOwner.Attempt.FencingToken)
 	}
 	if _, err := store.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
-		AttemptID: oldOwner.Attempt.ID, FencingToken: oldOwner.Attempt.FencingToken,
+		TenantID: "tenant-a", AttemptID: oldOwner.Attempt.ID, FencingToken: oldOwner.Attempt.FencingToken,
 		ExpectedLeaseVersion: oldOwner.Lease.ResourceVersion, TTL: time.Minute,
 	}); !errors.Is(err, kernelstore.ErrFenced) {
 		t.Fatalf("expected stale heartbeat fencing, got %v", err)
 	}
 	if _, err := store.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: oldOwner.Attempt.ID, FencingToken: oldOwner.Attempt.FencingToken,
+		TenantID: "tenant-a", AttemptID: oldOwner.Attempt.ID, FencingToken: oldOwner.Attempt.FencingToken,
 		ExpectedAttemptVersion: oldOwner.Attempt.ResourceVersion, To: domain.AttemptStarting,
 	}); !errors.Is(err, kernelstore.ErrFenced) {
 		t.Fatalf("expected stale transition fencing, got %v", err)
@@ -268,7 +269,7 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostMicroUSD: money.MustFromUSD(10),
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
 	admissionController := admission.NewController(repository, engine, testPolicyEngine(t), "admission-1", 10, time.Minute)
@@ -474,12 +475,12 @@ func createAdmittedRun(t *testing.T, ctx context.Context, store *postgresstore.S
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	admitted, err := store.TransitionTask(ctx, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted)
+	admitted, err := store.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted)
 	if err != nil {
 		t.Fatalf("admit task: %v", err)
 	}
 	run, err := store.CreateRun(ctx, kernelstore.CreateRunInput{
-		ID: uuid.New(), TaskID: admitted.ID, ExpectedTaskVersion: admitted.ResourceVersion,
+		ID: uuid.New(), TenantID: admitted.TenantID, TaskID: admitted.ID, ExpectedTaskVersion: admitted.ResourceVersion,
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -528,7 +529,9 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE workflow_steps, workflows,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
 		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,

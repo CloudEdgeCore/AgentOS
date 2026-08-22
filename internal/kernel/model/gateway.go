@@ -7,12 +7,15 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -25,6 +28,11 @@ var (
 	// exhausted and new consumption must stop (invariant 12).
 	ErrBudgetExhausted = errors.New("task budget exhausted: new consumption stopped")
 )
+
+// defaultMaxOutputTokens is the bounded provider limit used when a caller
+// omits max_tokens. The gateway further reduces it to the task's currently
+// affordable token and cost headroom before opening the call.
+const defaultMaxOutputTokens int64 = 512
 
 // PolicyChecker decides model calls outside the LLM. The engine is
 // fail-closed: missing tenant data and evaluation errors deny by default.
@@ -52,6 +60,11 @@ type BeginInput struct {
 	// ModelRef is the canonical provider/model reference.
 	ModelRef       string
 	IdempotencyKey string
+	// EstimatedInputTokens and MaxOutputTokens define the worst-case call
+	// envelope reserved before the provider request is sent. A zero output
+	// limit asks the gateway to select a budget-aware bounded default.
+	EstimatedInputTokens int64
+	MaxOutputTokens      int64
 }
 
 func (in BeginInput) validate() error {
@@ -60,15 +73,19 @@ func (in BeginInput) validate() error {
 		strings.TrimSpace(in.IdempotencyKey) == "" {
 		return fmt.Errorf("tenant, task, run, attempt, agent version, and idempotency key are required")
 	}
+	if in.EstimatedInputTokens < 0 || in.MaxOutputTokens < 0 {
+		return fmt.Errorf("estimated input and maximum output tokens must not be negative")
+	}
 	return store.ValidateModelRef(in.ModelRef)
 }
 
 // BeginResult is the outcome of starting an invocation.
 type BeginResult struct {
-	Call           store.ModelCall
-	Descriptor     store.ModelDescriptor
-	PolicyRevision string
-	DenyReasons    []string
+	Call                     store.ModelCall
+	Descriptor               store.ModelDescriptor
+	EffectiveMaxOutputTokens int64
+	PolicyRevision           string
+	DenyReasons              []string
 }
 
 // Usage is one settlement step of a streaming call.
@@ -138,8 +155,31 @@ func (g *Gateway) Begin(ctx context.Context, in BeginInput) (BeginResult, error)
 	result.Descriptor, result.PolicyRevision = descriptor, policy.Revision
 	result.DenyReasons = decision.DenyReasons
 
-	if err := g.enforceBudgetHeadroom(ctx, in.TenantID, in.TaskID); err != nil {
+	effectiveMax, err := g.effectiveMaxOutputTokens(ctx, in, descriptor)
+	if err != nil {
 		return result, err
+	}
+	result.EffectiveMaxOutputTokens = effectiveMax
+	in.MaxOutputTokens = effectiveMax
+	reservationKey := modelReservationKey(in.AttemptID, in.ModelRef, in.IdempotencyKey)
+	worstCaseCost, err := costMicroUSD(descriptor, in.EstimatedInputTokens, in.MaxOutputTokens)
+	if err != nil {
+		return result, fmt.Errorf("calculate model reservation: %w", err)
+	}
+	reservation := store.TaskBudget{
+		Tokens:       in.EstimatedInputTokens + in.MaxOutputTokens,
+		CostMicroUSD: worstCaseCost,
+	}
+	if !reservation.Zero() {
+		if err := g.budget.ReserveTaskUsage(ctx, store.ReserveTaskUsageInput{
+			TenantID: in.TenantID, TaskID: in.TaskID, ReservationKey: reservationKey,
+			Amount: reservation, ExpiresAt: g.now().UTC().Add(10 * time.Minute),
+		}); err != nil && !errors.Is(err, store.ErrBudgetNotReserved) {
+			if errors.Is(err, store.ErrBudgetExceeded) {
+				return result, ErrBudgetExhausted
+			}
+			return result, fmt.Errorf("reserve model usage: %w", err)
+		}
 	}
 	created, err := g.models.CreateModelCall(ctx, store.CreateModelCallInput{
 		ID: g.newID(), TenantID: in.TenantID, TaskID: in.TaskID, RunID: in.RunID,
@@ -147,10 +187,76 @@ func (g *Gateway) Begin(ctx context.Context, in BeginInput) (BeginResult, error)
 		IdempotencyKey: in.IdempotencyKey,
 	})
 	if err != nil {
+		_ = g.budget.ReleaseTaskUsageReservation(ctx, in.TenantID, in.TaskID, reservationKey)
 		return result, err
 	}
 	result.Call = created.ModelCall
 	return result, nil
+}
+
+// effectiveMaxOutputTokens resolves an omitted provider limit against the
+// task's remaining token and fixed-point cost ceilings. The result is only a
+// preflight hint: ReserveTaskUsage remains the atomic serialization point and
+// may reject concurrent headroom contention.
+func (g *Gateway) effectiveMaxOutputTokens(ctx context.Context, in BeginInput, descriptor store.ModelDescriptor) (int64, error) {
+	status, err := g.budget.GetTaskBudget(ctx, in.TenantID, in.TaskID)
+	if err != nil {
+		if errors.Is(err, store.ErrBudgetNotReserved) {
+			if in.MaxOutputTokens > 0 {
+				return in.MaxOutputTokens, nil
+			}
+			return defaultMaxOutputTokens, nil
+		}
+		return 0, fmt.Errorf("read task budget: %w", err)
+	}
+	if status.Exhausted {
+		return 0, ErrBudgetExhausted
+	}
+	if in.MaxOutputTokens > 0 {
+		return in.MaxOutputTokens, nil
+	}
+
+	limit := defaultMaxOutputTokens
+	if status.Reserved.Tokens > 0 {
+		remaining := status.Reserved.Tokens - status.Consumed.Tokens - in.EstimatedInputTokens
+		if remaining <= 0 {
+			return 0, ErrBudgetExhausted
+		}
+		if remaining < limit {
+			limit = remaining
+		}
+	}
+	if status.Reserved.CostMicroUSD > 0 {
+		remaining := status.Reserved.CostMicroUSD - status.Consumed.CostMicroUSD
+		inputCost, costErr := money.TokenCost(in.EstimatedInputTokens, descriptor.InputPriceMicroUSDPerMillion)
+		if costErr != nil {
+			return 0, fmt.Errorf("calculate input reservation: %w", costErr)
+		}
+		remaining -= inputCost
+		if remaining < 0 || (remaining == 0 && descriptor.OutputPriceMicroUSDPerMillion > 0) {
+			return 0, ErrBudgetExhausted
+		}
+		// Find the largest bounded output whose rounded-up fixed-point charge
+		// fits. This avoids floating-point under-reservation at price edges.
+		low, high := int64(0), limit
+		for low < high {
+			mid := low + (high-low+1)/2
+			cost, costErr := money.TokenCost(mid, descriptor.OutputPriceMicroUSDPerMillion)
+			if costErr != nil {
+				return 0, fmt.Errorf("calculate output reservation: %w", costErr)
+			}
+			if cost <= remaining {
+				low = mid
+			} else {
+				high = mid - 1
+			}
+		}
+		limit = low
+	}
+	if limit <= 0 {
+		return 0, ErrBudgetExhausted
+	}
+	return limit, nil
 }
 
 // Settle appends one idempotent usage step to the ledger. A settlement that
@@ -169,6 +275,7 @@ func (g *Gateway) Settle(ctx context.Context, call store.ModelCall, sequence int
 		TenantID: call.TenantID, TaskID: call.TaskID,
 		IdempotencyKey: fmt.Sprintf("model:%s:%d", call.ID, sequence),
 		Usage:          store.TaskBudget{Tokens: usage.InputTokens + usage.OutputTokens},
+		ReservationKey: modelReservationKey(call.AttemptID, call.ModelRef, call.IdempotencyKey),
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrBudgetNotReserved) {
@@ -194,6 +301,7 @@ type FinishInput struct {
 	OutputTokens      int64
 	ProviderRequestID string
 	FinishReason      string
+	UsageCertainty    store.ModelUsageCertainty
 }
 
 // Finish finalizes the invocation: the final usage is settled idempotently,
@@ -209,6 +317,24 @@ func (g *Gateway) Finish(ctx context.Context, call store.ModelCall, in FinishInp
 	if in.InputTokens < 0 || in.OutputTokens < 0 {
 		return store.ModelCall{}, fmt.Errorf("usage must not be negative")
 	}
+	if in.UsageCertainty == "" {
+		if in.InputTokens+in.OutputTokens > 0 {
+			in.UsageCertainty = store.ModelUsageKnown
+		} else if in.Status == store.ModelCallCompleted {
+			in.UsageCertainty = store.ModelUsageKnownZero
+		} else {
+			in.UsageCertainty = store.ModelUsageUnknown
+		}
+	}
+	if !in.UsageCertainty.Valid() {
+		return store.ModelCall{}, fmt.Errorf("usage certainty is invalid")
+	}
+	total := in.InputTokens + in.OutputTokens
+	if (in.UsageCertainty == store.ModelUsageKnownZero && total != 0) ||
+		(in.UsageCertainty == store.ModelUsageKnown && total == 0) ||
+		(in.UsageCertainty == store.ModelUsageUnknown && total != 0) {
+		return store.ModelCall{}, fmt.Errorf("usage certainty does not match reported usage")
+	}
 	provider, modelName, ok := strings.Cut(call.ModelRef, "/")
 	if !ok {
 		return store.ModelCall{}, fmt.Errorf("call model reference is malformed")
@@ -218,17 +344,23 @@ func (g *Gateway) Finish(ctx context.Context, call store.ModelCall, in FinishInp
 		return store.ModelCall{}, fmt.Errorf("resolve model %s: %w", call.ModelRef, err)
 	}
 	status := in.Status
-	total := in.InputTokens + in.OutputTokens
-	if total > 0 {
+	if total > 0 && in.UsageCertainty == store.ModelUsageKnown {
 		// Exact settlement: the final usage is the cumulative target of this
 		// call's settlement family (model:<callID>:*), so the gateway charges
 		// only the remainder after the per-step Settle records — a stream
 		// that settled steps and finalizes with the cumulative total is
 		// charged exactly once, and a retried Finish after a crash converges.
+		settlementCost, costErr := costMicroUSD(descriptor, in.InputTokens, in.OutputTokens)
+		if costErr != nil {
+			return store.ModelCall{}, fmt.Errorf("calculate final model usage: %w", costErr)
+		}
 		if _, err := g.budget.SettleTaskUsageDelta(ctx, store.SettleTaskUsageDeltaInput{
 			TenantID: call.TenantID, TaskID: call.TaskID,
-			FamilyPrefix: "model:" + call.ID.String(), Target: store.TaskBudget{Tokens: total},
+			FamilyPrefix: "model:" + call.ID.String(), Target: store.TaskBudget{
+				Tokens: total, CostMicroUSD: settlementCost,
+			},
 			IdempotencyKey: fmt.Sprintf("model:%s:finish", call.ID),
+			ReservationKey: modelReservationKey(call.AttemptID, call.ModelRef, call.IdempotencyKey),
 		}); err != nil {
 			if errors.Is(err, store.ErrBudgetNotReserved) {
 				// No reservation: no ceiling, nothing to meter.
@@ -239,21 +371,31 @@ func (g *Gateway) Finish(ctx context.Context, call store.ModelCall, in FinishInp
 			}
 		}
 	}
-	cost := costUSD(descriptor, in.InputTokens, in.OutputTokens)
+	cost, err := costMicroUSD(descriptor, in.InputTokens, in.OutputTokens)
+	if err != nil {
+		return store.ModelCall{}, fmt.Errorf("calculate model cost: %w", err)
+	}
 	updated, err := g.models.FinishModelCall(ctx, store.FinishModelCallInput{
 		TenantID: call.TenantID, ModelCallID: call.ID, ExpectedVersion: in.ExpectedVersion,
 		Status: status, InputTokens: in.InputTokens, OutputTokens: in.OutputTokens,
-		CostUSD: cost, PriceRevision: descriptor.PriceRevision,
+		CostMicroUSD: cost, PriceRevision: descriptor.PriceRevision,
 		ProviderRequestID: in.ProviderRequestID, FinishReason: in.FinishReason,
+		UsageCertainty: in.UsageCertainty,
 	})
 	if err != nil {
 		return store.ModelCall{}, err
 	}
+	if err := g.budget.ReleaseTaskUsageReservation(ctx, call.TenantID, call.TaskID,
+		modelReservationKey(call.AttemptID, call.ModelRef, call.IdempotencyKey)); err != nil {
+		return store.ModelCall{}, fmt.Errorf("release model usage reservation: %w", err)
+	}
 	receipt, err := json.Marshal(map[string]any{
 		"modelRef": updated.ModelRef, "status": updated.Status,
 		"inputTokens": updated.InputTokens, "outputTokens": updated.OutputTokens,
-		"costUsd": updated.CostUSD, "priceRevision": updated.PriceRevision,
-		"finishReason": updated.FinishReason, "providerRequestId": updated.ProviderRequestID,
+		"costUsd": updated.CostMicroUSD.USD(), "costMicroUsd": updated.CostMicroUSD,
+		"priceRevision": updated.PriceRevision,
+		"finishReason":  updated.FinishReason, "providerRequestId": updated.ProviderRequestID,
+		"usageCertainty": updated.UsageCertainty,
 	})
 	if err != nil {
 		return store.ModelCall{}, err
@@ -271,26 +413,19 @@ func (g *Gateway) Finish(ctx context.Context, call store.ModelCall, in FinishInp
 	return updated, nil
 }
 
-// costUSD computes the dollar cost of a call against the descriptor's price
-// table (per million tokens).
-func costUSD(descriptor store.ModelDescriptor, inputTokens, outputTokens int64) float64 {
-	inputCost := float64(inputTokens) / 1_000_000 * descriptor.InputPricePerMillion
-	outputCost := float64(outputTokens) / 1_000_000 * descriptor.OutputPricePerMillion
-	return inputCost + outputCost
+func costMicroUSD(descriptor store.ModelDescriptor, inputTokens, outputTokens int64) (money.MicroUSD, error) {
+	inputCost, err := money.TokenCost(inputTokens, descriptor.InputPriceMicroUSDPerMillion)
+	if err != nil {
+		return 0, err
+	}
+	outputCost, err := money.TokenCost(outputTokens, descriptor.OutputPriceMicroUSDPerMillion)
+	if err != nil {
+		return 0, err
+	}
+	return money.Add(inputCost, outputCost)
 }
 
-// enforceBudgetHeadroom applies the hard-stop invariant before any stream
-// starts: an exhausted ledger must not open new consumption.
-func (g *Gateway) enforceBudgetHeadroom(ctx context.Context, tenantID string, taskID uuid.UUID) error {
-	status, err := g.budget.GetTaskBudget(ctx, tenantID, taskID)
-	if err != nil {
-		if errors.Is(err, store.ErrBudgetNotReserved) {
-			return nil
-		}
-		return fmt.Errorf("read task budget: %w", err)
-	}
-	if status.Exhausted {
-		return ErrBudgetExhausted
-	}
-	return nil
+func modelReservationKey(attemptID uuid.UUID, modelRef, idempotencyKey string) string {
+	digest := sha256.Sum256([]byte(attemptID.String() + "\x00" + modelRef + "\x00" + idempotencyKey))
+	return "model:" + hex.EncodeToString(digest[:])
 }

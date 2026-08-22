@@ -1,4 +1,4 @@
-// Package workload defines the bounded task specification understood by v0.1
+// Package workload defines the bounded task specification understood by
 // admission and placement. Unknown fields remain available to later stages.
 package workload
 
@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 )
 
 // imageDigestPattern bounds digests to "sha256:<64 lowercase hex>".
@@ -144,16 +146,16 @@ func (p RetryPolicy) EffectiveMaxAttempts() int {
 }
 
 type Budget struct {
-	Tokens      int64   `json:"tokens"`
-	CostUSD     float64 `json:"costUsd"`
-	ToolCalls   int64   `json:"toolCalls"`
-	WallSeconds int64   `json:"wallSeconds"`
+	Tokens       int64          `json:"tokens"`
+	CostMicroUSD money.MicroUSD `json:"costUsd"`
+	ToolCalls    int64          `json:"toolCalls"`
+	WallSeconds  int64          `json:"wallSeconds"`
 }
 
 // Zero reports whether every dimension is unset, meaning the task carries no
 // budget ceiling and its usage is not enforced.
 func (b Budget) Zero() bool {
-	return b.Tokens == 0 && b.CostUSD == 0 && b.ToolCalls == 0 && b.WallSeconds == 0
+	return b.Tokens == 0 && b.CostMicroUSD == 0 && b.ToolCalls == 0 && b.WallSeconds == 0
 }
 
 type Placement struct {
@@ -162,8 +164,11 @@ type Placement struct {
 	Region         string   `json:"region"`
 	DataResidency  string   `json:"dataResidency,omitempty"`
 	ArtifactRegion string   `json:"artifactRegion,omitempty"`
-	CPU            int64    `json:"cpuMillis"`
-	Memory         int64    `json:"memoryMiB"`
+	// AvoidFailureDomains prevents retry placement into a known failed zone,
+	// rack, node, or other provider-defined domain.
+	AvoidFailureDomains []string `json:"avoidFailureDomains,omitempty"`
+	CPU                 int64    `json:"cpuMillis"`
+	Memory              int64    `json:"memoryMiB"`
 	// WorkspaceBytes is the sandbox workspace size (tmpfs) container-class
 	// workloads must declare; Admission rejects container classes with a
 	// zero workspace (ADR-010 hardening checklist).

@@ -7,6 +7,7 @@ import (
 
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -107,7 +108,7 @@ func (f *fakeModelInvoker) Finish(_ context.Context, call store.ModelCall, in mo
 	f.finished = true
 	call.Status = in.Status
 	call.InputTokens, call.OutputTokens = in.InputTokens, in.OutputTokens
-	call.CostUSD = 0.0033
+	call.CostMicroUSD = money.MustFromUSD(0.0033)
 	call.PriceRevision = "v1"
 	call.FinishReason = in.FinishReason
 	return call, nil

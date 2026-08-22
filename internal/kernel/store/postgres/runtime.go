@@ -345,7 +345,7 @@ func (s *Store) CommitCheckpoint(ctx context.Context, input kernelstore.CommitCh
 		return zeroCheckpoint, zeroAttempt, err
 	}
 	var ordinal int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM checkpoints WHERE run_id = $1`, run.ID.String()).Scan(&ordinal); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM checkpoints WHERE tenant_id = $1 AND run_id = $2`, input.TenantID, run.ID.String()).Scan(&ordinal); err != nil {
 		return zeroCheckpoint, zeroAttempt, classify(err)
 	}
 	now := s.now()
@@ -477,8 +477,14 @@ func (s *Store) CompleteAttempt(ctx context.Context, in kernelstore.CompleteAtte
 		return result, classifyCAS(err, "task", task.ID, task.ResourceVersion)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = 'COMPLETED'
-		WHERE id = $2 AND released_at IS NULL`, now, lease.ID.String()); err != nil {
+		WHERE tenant_id = $2 AND id = $3 AND released_at IS NULL`, now, in.TenantID, lease.ID.String()); err != nil {
 		return result, classify(err)
+	}
+	if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+		return result, err
+	}
+	if err := s.releaseRuntimeCapacity(ctx, tx, in.TenantID, task.ID, now); err != nil {
+		return result, err
 	}
 	for _, event := range []struct {
 		typeName string
@@ -604,11 +610,14 @@ func (s *Store) AcknowledgeCancellation(ctx context.Context, in kernelstore.Canc
 		return result, classifyCAS(err, "task", task.ID, task.ResourceVersion)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = 'CANCELLED'
-		WHERE id = $2 AND released_at IS NULL`, now, lease.ID.String()); err != nil {
+		WHERE tenant_id = $2 AND id = $3 AND released_at IS NULL`, now, in.TenantID, lease.ID.String()); err != nil {
 		return result, classify(err)
 	}
 	// Quota reservation release (v0.8): the task is terminal.
 	if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+		return result, err
+	}
+	if err := s.releaseRuntimeCapacity(ctx, tx, in.TenantID, task.ID, now); err != nil {
 		return result, err
 	}
 	for _, event := range []struct {
@@ -655,14 +664,16 @@ func (s *Store) ListExpiredAttempts(ctx context.Context, now time.Time, limit in
 	if limit <= 0 || limit > 1000 {
 		return nil, fmt.Errorf("recovery limit must be between 1 and 1000")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT a.tenant_id, a.id::text, a.fencing_token, t.spec
+	rows, err := s.pool.Query(ctx, `SELECT a.tenant_id, a.id::text, a.fencing_token, t.spec,
+		(t.execution_deadline_at IS NOT NULL AND t.execution_deadline_at <= $1) AS deadline_exceeded
 		FROM runtime_leases l
 		JOIN attempts a ON a.tenant_id = l.tenant_id AND a.id = l.attempt_id
 		JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
 		JOIN tasks t ON t.tenant_id = r.tenant_id AND t.id = r.task_id
-		WHERE l.released_at IS NULL AND l.expires_at <= $1
+		WHERE l.released_at IS NULL AND (l.expires_at <= $1 OR
+			(t.phase = 'RUNNING' AND t.execution_deadline_at IS NOT NULL AND t.execution_deadline_at <= $1))
 		  AND r.active_attempt_id = a.id AND r.current_fencing_token = a.fencing_token
-		ORDER BY l.expires_at, l.id LIMIT $2`, now.UTC(), limit)
+		ORDER BY LEAST(l.expires_at, t.execution_deadline_at), l.id LIMIT $2`, now.UTC(), limit)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -671,7 +682,7 @@ func (s *Store) ListExpiredAttempts(ctx context.Context, now time.Time, limit in
 	for rows.Next() {
 		var candidate kernelstore.RecoveryCandidate
 		var id string
-		if err := rows.Scan(&candidate.TenantID, &id, &candidate.FencingToken, &candidate.TaskSpec); err != nil {
+		if err := rows.Scan(&candidate.TenantID, &id, &candidate.FencingToken, &candidate.TaskSpec, &candidate.DeadlineExceeded); err != nil {
 			return nil, classify(err)
 		}
 		candidate.AttemptID, err = uuid.Parse(id)
@@ -708,12 +719,71 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 		return result, err
 	}
 	now := s.now()
-	if lease.ExpiresAt.After(now) {
+	if lease.ExpiresAt.After(now) && !in.DeadlineExceeded {
 		return result, kernelstore.ErrLeaseNotExpired
 	}
-	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = 'EXPIRED'
-		WHERE id = $2 AND released_at IS NULL`, now, lease.ID.String()); err != nil {
+	releaseReason := "EXPIRED"
+	if in.DeadlineExceeded {
+		releaseReason = "EXECUTION_DEADLINE_EXCEEDED"
+	}
+	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = $2
+		WHERE tenant_id = $3 AND id = $4 AND released_at IS NULL`, now, releaseReason, in.TenantID, lease.ID.String()); err != nil {
 		return result, classify(err)
+	}
+	if in.DeadlineExceeded {
+		failedAttempt, err := scanAttempt(tx.QueryRow(ctx, `UPDATE attempts SET phase = 'ATTEMPT_FAILED',
+			failure_code = 'WALL_TIME_EXCEEDED', failure_message = 'task execution deadline exceeded',
+			finished_at = $1, resource_version = resource_version + 1, updated_at = $1
+			WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+attemptColumns,
+			now, in.TenantID, attempt.ID.String(), attempt.ResourceVersion))
+		if err != nil {
+			return result, classifyCAS(err, "attempt", attempt.ID, attempt.ResourceVersion)
+		}
+		failedRun, err := scanRun(tx.QueryRow(ctx, `UPDATE runs SET phase = 'FAILED', active_attempt_id = NULL,
+			resource_version = resource_version + 1, updated_at = $1, completed_at = $1
+			WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+runColumns,
+			now, in.TenantID, run.ID.String(), run.ResourceVersion))
+		if err != nil {
+			return result, classifyCAS(err, "run", run.ID, run.ResourceVersion)
+		}
+		failedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'FAILED',
+			resource_version = resource_version + 1, updated_at = $1
+			WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+taskColumns,
+			now, in.TenantID, task.ID.String(), task.ResourceVersion))
+		if err != nil {
+			return result, classifyCAS(err, "task", task.ID, task.ResourceVersion)
+		}
+		if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+			return result, err
+		}
+		if err := s.releaseRuntimeCapacity(ctx, tx, in.TenantID, task.ID, now); err != nil {
+			return result, err
+		}
+		for _, event := range []struct {
+			aggregate string
+			id        uuid.UUID
+			version   int64
+			typeName  string
+		}{
+			{"Attempt", failedAttempt.ID, failedAttempt.ResourceVersion, "AttemptFailed"},
+			{"Run", failedRun.ID, failedRun.ResourceVersion, "RunFailed"},
+			{"Task", failedTask.ID, failedTask.ResourceVersion, "TaskFailed"},
+		} {
+			if err := insertEvent(ctx, tx, in.TenantID, event.aggregate, event.id, event.version, event.typeName, map[string]any{
+				"taskId": task.ID, "runId": run.ID, "attemptId": attempt.ID, "failureCode": "WALL_TIME_EXCEEDED",
+			}, now, s.newID()); err != nil {
+				return result, err
+			}
+		}
+		if err := auditHook(ctx, tx, in.TenantID, "task.wall_time.exceeded", "Task", task.ID, map[string]any{
+			"runId": run.ID, "attemptId": attempt.ID, "executionDeadline": task.ExecutionDeadlineAt,
+		}, now); err != nil {
+			return result, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return result, classify(err)
+		}
+		return result, nil
 	}
 	if task.CancelRequestedAt != nil {
 		cancelledAttempt, err := scanAttempt(tx.QueryRow(ctx, `UPDATE attempts SET phase = 'CANCELLED',
@@ -739,6 +809,9 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 		}
 		// Quota reservation release (v0.8): the task is terminal.
 		if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+			return result, err
+		}
+		if err := s.releaseRuntimeCapacity(ctx, tx, in.TenantID, task.ID, now); err != nil {
 			return result, err
 		}
 		for _, event := range []struct {
@@ -807,6 +880,9 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 		}
 		// Quota reservation release (v0.8): the task is terminal.
 		if err := s.releaseTenantReservation(ctx, tx, in.TenantID, task.ID); err != nil {
+			return result, err
+		}
+		if err := s.releaseRuntimeCapacity(ctx, tx, in.TenantID, task.ID, now); err != nil {
 			return result, err
 		}
 		if err := insertEvent(ctx, tx, in.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunFailed", map[string]any{

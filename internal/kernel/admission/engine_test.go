@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
@@ -49,7 +50,7 @@ func TestEngineAdmitsBoundedWorkload(t *testing.T) {
 
 func testLimits() Limits {
 	return Limits{
-		RuntimeClasses: []string{"oci", "wasm"}, MaxTokens: 1000, MaxCostUSD: 10,
+		RuntimeClasses: []string{"oci", "wasm"}, MaxTokens: 1000, MaxCostMicroUSD: money.MustFromUSD(10),
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096,
 		MaxLLMConcurrency: 4,
 	}

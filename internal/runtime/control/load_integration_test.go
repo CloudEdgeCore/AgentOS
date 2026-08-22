@@ -25,6 +25,7 @@ import (
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -92,13 +93,13 @@ func TestThousandConcurrentTasksStableUnderLoad(t *testing.T) {
 	// Phase 2: run admission + scheduling reconciliation and the runtime
 	// workers until every task is terminal.
 	limits := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1_000_000, MaxCostUSD: 1_000, MaxToolCalls: 100_000,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1_000_000, MaxCostMicroUSD: money.MustFromUSD(1_000), MaxToolCalls: 100_000,
 		MaxWallSeconds: 86_400, MaxCPU: 64_000, MaxMemory: 262_144, MaxLLMConcurrency: 128,
 	})
 	pools := staticPools{{
 		ID: "load-pool", TenantIDs: []string{tenant}, RuntimeClass: "oci", RuntimeInstanceID: "load-worker-1",
 		Region: "cn-east", DataResidency: "cn", Ready: true,
-		AvailableCPU: 64_000, AvailableMemory: 262_144, AvailableLLMSlots: 128,
+		AvailableCPU: int64(taskCount) * 100, AvailableMemory: int64(taskCount) * 128, AvailableLLMSlots: taskCount,
 	}}
 	admissionController := admission.NewController(store, limits, testPolicyEngine(t), "load/admission", 50, time.Minute)
 	schedulerController := scheduler.NewController(store, pools, "load/scheduler", 50, time.Minute, 3*time.Minute)
@@ -472,7 +473,10 @@ func newLoadDatabase(t *testing.T) (*pgxpool.Pool, *postgresstore.Store) {
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
+		model_calls, model_descriptors,
 		tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,

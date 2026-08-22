@@ -32,12 +32,13 @@ var (
 // Adapters use these identifiers to select a Gateway; they are never network
 // endpoints, credentials, or raw secret values.
 type CapabilityGrant struct {
-	Tools       []string `json:"tools"`
-	Models      []string `json:"models"`
-	Memory      []string `json:"memory"`
-	Secrets     []string `json:"secrets"`
-	SpawnTasks  bool     `json:"spawnTasks,omitempty"`
-	ChildAgents []string `json:"childAgents,omitempty"`
+	Tools               []string `json:"tools"`
+	Models              []string `json:"models"`
+	Memory              []string `json:"memory"`
+	MemorySensitivities []string `json:"memorySensitivities,omitempty"`
+	Secrets             []string `json:"secrets"`
+	SpawnTasks          bool     `json:"spawnTasks,omitempty"`
+	ChildAgents         []string `json:"childAgents,omitempty"`
 }
 
 type StartRequest struct {
@@ -70,6 +71,7 @@ type EventList struct {
 	ExecutionID string  `json:"executionId"`
 	Events      []Event `json:"events"`
 	NextAfter   int64   `json:"nextAfter"`
+	Truncated   bool    `json:"truncated,omitempty"`
 }
 
 type Result struct {

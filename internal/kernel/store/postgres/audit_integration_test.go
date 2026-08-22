@@ -30,7 +30,7 @@ func TestAuditLedgerChainIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	if _, err := repository.TransitionTask(ctx, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted); err != nil {
+	if _, err := repository.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted); err != nil {
 		t.Fatalf("admit task: %v", err)
 	}
 	// A second tenant's chain is independent.
@@ -109,7 +109,7 @@ func TestAuditLedgerChainIntegrity(t *testing.T) {
 	}
 
 	// Appending after the tamper keeps the chain broken at the same link.
-	if _, err := repository.TransitionTask(ctx, created.Task.ID, 2, domain.TaskRunning); err != nil {
+	if _, err := repository.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, 2, domain.TaskRunning); err != nil {
 		t.Fatalf("transition after tamper: %v", err)
 	}
 	verification, err = repository.VerifyAuditChain(ctx, "tenant-a")

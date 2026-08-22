@@ -198,6 +198,14 @@ func (f *fakeTools) DecideToolApproval(_ context.Context, in store.DecideToolApp
 
 type fakeBudget struct{}
 
+func (f *fakeBudget) ReserveTaskUsage(context.Context, store.ReserveTaskUsageInput) error {
+	return nil
+}
+
+func (f *fakeBudget) ReleaseTaskUsageReservation(context.Context, string, uuid.UUID, string) error {
+	return nil
+}
+
 func (f *fakeBudget) GetTaskBudget(context.Context, string, uuid.UUID) (store.TaskBudgetStatus, error) {
 	return store.TaskBudgetStatus{}, store.ErrBudgetNotReserved
 }

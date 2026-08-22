@@ -198,10 +198,11 @@ type CancelAttemptResult struct {
 }
 
 type RecoveryCandidate struct {
-	TenantID     string
-	AttemptID    uuid.UUID
-	FencingToken int64
-	TaskSpec     json.RawMessage
+	TenantID         string
+	AttemptID        uuid.UUID
+	FencingToken     int64
+	TaskSpec         json.RawMessage
+	DeadlineExceeded bool
 }
 
 type RecoverExpiredAttemptInput struct {
@@ -212,6 +213,9 @@ type RecoverExpiredAttemptInput struct {
 	NewLeaseID   uuid.UUID
 	LeaseTTL     time.Duration
 	MaxAttempts  int
+	// DeadlineExceeded terminally stops the task even if the worker lease is
+	// still healthy. It must never create a retry attempt.
+	DeadlineExceeded bool
 }
 
 type RecoveryResult struct {
@@ -230,10 +234,10 @@ type HeartbeatStatus struct {
 
 type RuntimeStore interface {
 	KernelStore
-	// WorkflowLineage resolves the workflow origin of one task from its
-	// idempotency key (v1.3); ok=false marks standalone tasks. The version is
-	// the workflow's current resource version at read time.
-	WorkflowLineage(context.Context, string, string) (workflowID uuid.UUID, stepName string, version int64, ok bool, err error)
+	// WorkflowLineage resolves the workflow origin from the task's explicit
+	// lineage columns; ok=false marks standalone tasks. The version is the
+	// workflow's current resource version at read time.
+	WorkflowLineage(context.Context, string, uuid.UUID) (workflowID uuid.UUID, stepName string, version int64, ok bool, err error)
 	PollRuntimeAssignment(context.Context, string, string) (RuntimeAssignment, error)
 	GetRuntimeAssignment(context.Context, string, uuid.UUID, int64) (RuntimeAssignment, error)
 	GetHeartbeatStatus(context.Context, string, uuid.UUID, int64) (HeartbeatStatus, error)

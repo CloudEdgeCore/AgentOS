@@ -5,11 +5,14 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/google/uuid"
 )
+
+var ErrCapacityExhausted = errors.New("runtime pool capacity exhausted")
 
 type ControllerKind string
 
@@ -96,6 +99,12 @@ type ScheduleTaskInput struct {
 	RuntimeClass        string
 	RuntimeInstanceID   string
 	LeaseTTL            time.Duration
+	PoolCPUCapacity     int64
+	PoolMemoryCapacity  int64
+	PoolLLMCapacity     int
+	RequestedCPU        int64
+	RequestedMemory     int64
+	RequestedLLMSlots   int
 }
 
 // DeferTaskScheduleInput releases the scheduler's claim on a task that no
@@ -110,6 +119,7 @@ type DeferTaskScheduleInput struct {
 	ClaimFencingToken   int64
 	ExpectedTaskVersion int64
 	Until               time.Time
+	Rejection           json.RawMessage
 }
 
 type OutboxEvent struct {

@@ -20,7 +20,10 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/version"
+	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
+	"github.com/CloudEdgeCore/AgentOS/sdk/conformance"
 	"github.com/google/uuid"
 )
 
@@ -35,7 +38,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs> [flags]")
+		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs|workflow|runtime|conformance> [flags]")
 	}
 	switch args[0] {
 	case "version":
@@ -56,9 +59,54 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runSubmit(args[1:], stdout, stderr)
 	case "logs":
 		return runLogs(args[1:], stdout, stderr)
+	case "workflow":
+		return runWorkflow(args[1:], stdout, stderr)
+	case "runtime":
+		return runRuntime(args[1:], stdout, stderr)
+	case "conformance":
+		return runConformance(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runConformance(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("conformance", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", "http://127.0.0.1:8088", "Runtime Interface endpoint")
+	timeout := flags.Duration("timeout", 2*time.Minute, "conformance timeout (maximum 10m)")
+	legacy := flags.Bool("legacy-v1alpha1", false, "test the deprecated N-1 Runtime Interface")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *timeout <= 0 || *timeout > 10*time.Minute {
+		return errors.New("-timeout must be between 1ns and 10m")
+	}
+	client, err := agent.NewClient(*endpoint, nil)
+	if *legacy {
+		client, err = agent.NewLegacyClient(*endpoint, nil)
+	}
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	report, err := conformance.Run(ctx, client)
+	result := map[string]any{
+		"schema": "agentos.conformance/v1", "endpoint": *endpoint,
+		"passed": err == nil, "report": report,
+	}
+	encoded, encodeErr := json.Marshal(result)
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if _, encodeErr = fmt.Fprintln(stdout, string(encoded)); encodeErr != nil {
+		return encodeErr
+	}
+	if err != nil {
+		return fmt.Errorf("conformance failed: %w", err)
+	}
+	return nil
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) error {
@@ -151,7 +199,7 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 				Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{},
 			},
 			Resources:  &agentversion.ResourceLimits{CPUMillis: 250, MemoryMiB: 256},
-			Budget:     &agentversion.Budget{Tokens: 10_000, CostUSD: 1, ToolCalls: 20, WallSeconds: 300},
+			Budget:     &agentversion.Budget{Tokens: 10_000, CostMicroUSD: money.MustFromUSD(1), ToolCalls: 20, WallSeconds: 300},
 			Checkpoint: &agentversion.CheckpointPolicy{Mode: agentversion.CheckpointLogical, SchemaVersion: agentName + "/v1"},
 		},
 	}
@@ -382,41 +430,61 @@ func runLogs(args []string, stdout, stderr io.Writer) error {
 }
 
 func controlRequest(ctx context.Context, method, endpoint, path, idempotency string, body any, stdout io.Writer) error {
-	base, err := normalizeEndpoint(endpoint)
+	headers := map[string]string{}
+	if idempotency != "" {
+		headers["Idempotency-Key"] = idempotency
+	}
+	reply, err := controlRequestBytes(ctx, method, endpoint, path, headers, body)
 	if err != nil {
 		return err
-	}
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(encoded))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", idempotency)
-	setBearer(request)
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return responseError(response)
-	}
-	reply, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if err != nil {
-		return err
-	}
-	if len(reply) > maxResponseBytes {
-		return errors.New("Control API response exceeds 2 MiB")
-	}
-	if !json.Valid(reply) {
-		return errors.New("Control API returned invalid JSON")
 	}
 	_, err = fmt.Fprintln(stdout, string(reply))
 	return err
+}
+
+func controlRequestBytes(ctx context.Context, method, endpoint, path string, headers map[string]string, body any) ([]byte, error) {
+	base, err := normalizeEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var requestBody io.Reader
+	if body != nil {
+		encoded, encodeErr := json.Marshal(body)
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		requestBody = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, base+path, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
+	setBearer(request)
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, responseError(response)
+	}
+	reply, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(reply) > maxResponseBytes {
+		return nil, errors.New("control API response exceeds 2 MiB")
+	}
+	if !json.Valid(reply) {
+		return nil, errors.New("control API returned invalid JSON")
+	}
+	return reply, nil
 }
 
 func loadManifest(path string) (agentversion.Manifest, json.RawMessage, [32]byte, error) {
@@ -455,7 +523,7 @@ func normalizeEndpoint(endpoint string) (string, error) {
 
 func responseError(response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
-	return fmt.Errorf("Control API returned HTTP %d: %s", response.StatusCode, body)
+	return fmt.Errorf("control API returned HTTP %d: %s", response.StatusCode, body)
 }
 
 func setBearer(request *http.Request) {

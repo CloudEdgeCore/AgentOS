@@ -13,12 +13,12 @@ import (
 
 const modelDescriptorColumns = `
 	id::text, tenant_id, provider, model_name, supports_streaming,
-	input_price_per_million, output_price_per_million, price_revision, spec_hash, created_at`
+	input_price_micro_usd_per_million, output_price_micro_usd_per_million, price_revision, spec_hash, created_at`
 
 const modelCallColumns = `
 	id::text, tenant_id, task_id::text, run_id::text, attempt_id::text, model_ref, status,
-	idempotency_key, request_hash, input_tokens, output_tokens, cost_usd, price_revision,
-	provider_request_id, finish_reason, resource_version, created_at, updated_at`
+	idempotency_key, request_hash, input_tokens, output_tokens, cost_micro_usd, price_revision,
+	provider_request_id, finish_reason, usage_certainty, resource_version, created_at, updated_at`
 
 func (s *Store) RegisterModelDescriptor(ctx context.Context, in kernelstore.RegisterModelDescriptorInput) (kernelstore.ModelDescriptor, error) {
 	var zero kernelstore.ModelDescriptor
@@ -31,10 +31,10 @@ func (s *Store) RegisterModelDescriptor(ctx context.Context, in kernelstore.Regi
 	descriptor.CreatedAt = s.now()
 	if _, err := s.pool.Exec(ctx, `INSERT INTO model_descriptors (
 		id, tenant_id, provider, model_name, supports_streaming,
-		input_price_per_million, output_price_per_million, price_revision, spec_hash, created_at
+		input_price_micro_usd_per_million, output_price_micro_usd_per_million, price_revision, spec_hash, created_at
 	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		descriptor.ID.String(), descriptor.TenantID, descriptor.Provider, descriptor.ModelName,
-		descriptor.SupportsStreaming, descriptor.InputPricePerMillion, descriptor.OutputPricePerMillion,
+		descriptor.SupportsStreaming, descriptor.InputPriceMicroUSDPerMillion, descriptor.OutputPriceMicroUSDPerMillion,
 		descriptor.PriceRevision, descriptor.SpecHash[:], descriptor.CreatedAt); err != nil {
 		if !isUniqueViolation(err) {
 			return zero, classify(err)
@@ -117,8 +117,17 @@ func (s *Store) GetModelCall(ctx context.Context, tenantID string, id uuid.UUID)
 
 func (s *Store) FinishModelCall(ctx context.Context, in kernelstore.FinishModelCallInput) (kernelstore.ModelCall, error) {
 	var zero kernelstore.ModelCall
+	if in.UsageCertainty == "" {
+		if in.InputTokens+in.OutputTokens > 0 {
+			in.UsageCertainty = kernelstore.ModelUsageKnown
+		} else if in.Status == kernelstore.ModelCallCompleted {
+			in.UsageCertainty = kernelstore.ModelUsageKnownZero
+		} else {
+			in.UsageCertainty = kernelstore.ModelUsageUnknown
+		}
+	}
 	if in.ModelCallID == uuid.Nil || in.ExpectedVersion <= 0 || !in.Status.Terminal() ||
-		in.InputTokens < 0 || in.OutputTokens < 0 || in.CostUSD < 0 || strings.TrimSpace(in.PriceRevision) == "" {
+		in.InputTokens < 0 || in.OutputTokens < 0 || in.CostMicroUSD < 0 || strings.TrimSpace(in.PriceRevision) == "" || !in.UsageCertainty.Valid() {
 		return zero, fmt.Errorf("call ID, expected version, terminal status, non-negative usage, and price revision are required")
 	}
 	tx, err := s.begin(ctx)
@@ -138,12 +147,12 @@ func (s *Store) FinishModelCall(ctx context.Context, in kernelstore.FinishModelC
 		return zero, fmt.Errorf("%w: model call %s -> %s", kernelstore.ErrInvalidTransition, current.Status, in.Status)
 	}
 	updated, err := scanModelCall(tx.QueryRow(ctx, `UPDATE model_calls
-		SET status = $1, input_tokens = $2, output_tokens = $3, cost_usd = $4, price_revision = $5,
-			provider_request_id = $6, finish_reason = $7,
-			resource_version = resource_version + 1, updated_at = $8
-		WHERE tenant_id = $9 AND id = $10 AND resource_version = $11 RETURNING `+modelCallColumns,
-		string(in.Status), in.InputTokens, in.OutputTokens, in.CostUSD, in.PriceRevision,
-		nullableString(in.ProviderRequestID), nullableString(in.FinishReason), s.now(),
+		SET status = $1, input_tokens = $2, output_tokens = $3, cost_micro_usd = $4, price_revision = $5,
+			provider_request_id = $6, finish_reason = $7, usage_certainty = $8,
+			resource_version = resource_version + 1, updated_at = $9
+		WHERE tenant_id = $10 AND id = $11 AND resource_version = $12 RETURNING `+modelCallColumns,
+		string(in.Status), in.InputTokens, in.OutputTokens, in.CostMicroUSD, in.PriceRevision,
+		nullableString(in.ProviderRequestID), nullableString(in.FinishReason), in.UsageCertainty, s.now(),
 		in.TenantID, in.ModelCallID.String(), in.ExpectedVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "model call", in.ModelCallID, in.ExpectedVersion)
@@ -165,9 +174,9 @@ func scanModelDescriptor(row scanner) (kernelstore.ModelDescriptor, error) {
 	var descriptor kernelstore.ModelDescriptor
 	var id, tenantID, provider, modelName string
 	var specHash []byte
-	var inputPrice, outputPrice float64
 	err := row.Scan(&id, &tenantID, &provider, &modelName, &descriptor.SupportsStreaming,
-		&inputPrice, &outputPrice, &descriptor.PriceRevision, &specHash, &descriptor.CreatedAt)
+		&descriptor.InputPriceMicroUSDPerMillion, &descriptor.OutputPriceMicroUSDPerMillion,
+		&descriptor.PriceRevision, &specHash, &descriptor.CreatedAt)
 	if err != nil {
 		return descriptor, err
 	}
@@ -180,7 +189,6 @@ func scanModelDescriptor(row scanner) (kernelstore.ModelDescriptor, error) {
 	}
 	copy(descriptor.SpecHash[:], specHash)
 	descriptor.TenantID, descriptor.Provider, descriptor.ModelName = tenantID, provider, modelName
-	descriptor.InputPricePerMillion, descriptor.OutputPricePerMillion = inputPrice, outputPrice
 	return descriptor, nil
 }
 
@@ -190,8 +198,8 @@ func scanModelCall(row scanner) (kernelstore.ModelCall, error) {
 	var requestHash []byte
 	var providerRequestID, finishReason sql.NullString
 	err := row.Scan(&id, &tenantID, &taskID, &runID, &attemptID, &modelRef, &status,
-		&call.IdempotencyKey, &requestHash, &call.InputTokens, &call.OutputTokens, &call.CostUSD,
-		&call.PriceRevision, &providerRequestID, &finishReason, &call.ResourceVersion,
+		&call.IdempotencyKey, &requestHash, &call.InputTokens, &call.OutputTokens, &call.CostMicroUSD,
+		&call.PriceRevision, &providerRequestID, &finishReason, &call.UsageCertainty, &call.ResourceVersion,
 		&call.CreatedAt, &call.UpdatedAt)
 	if err != nil {
 		return call, err

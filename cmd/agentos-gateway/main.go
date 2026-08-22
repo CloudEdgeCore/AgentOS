@@ -26,6 +26,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
@@ -134,9 +135,15 @@ func main() {
 			slog.Error("-seed-dev-model must be provider/model", "ref", *seedDevModel)
 			os.Exit(2)
 		}
+		inputPrice, inputPriceErr := money.FromUSD(*seedDevModelInputPrice)
+		outputPrice, outputPriceErr := money.FromUSD(*seedDevModelOutputPrice)
+		if inputPriceErr != nil || outputPriceErr != nil {
+			slog.Error("development model prices must be non-negative six-decimal USD values")
+			os.Exit(2)
+		}
 		seedModel, seedModelErr := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 			TenantID: *tenantID, Provider: providerName, ModelName: modelName, SupportsStreaming: true,
-			InputPricePerMillion: *seedDevModelInputPrice, OutputPricePerMillion: *seedDevModelOutputPrice,
+			InputPriceMicroUSDPerMillion: inputPrice, OutputPriceMicroUSDPerMillion: outputPrice,
 			PriceRevision: "dev",
 		})
 		if seedModelErr != nil {
@@ -252,6 +259,7 @@ func main() {
 		slog.Error("load model providers", "error", err)
 		os.Exit(2)
 	}
+	modelProviders.UseCircuitBreaker(repository)
 	if names := modelProviders.Names(); len(names) > 0 {
 		slog.Info("model provider execution layer active", "providers", names)
 	} else {

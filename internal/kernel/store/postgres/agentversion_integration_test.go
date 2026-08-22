@@ -187,32 +187,32 @@ func TestCheckpointRejectsUnpublishedAgentVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	admitted, err := repository.TransitionTask(ctx, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted)
+	admitted, err := repository.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted)
 	if err != nil {
 		t.Fatalf("admit task: %v", err)
 	}
 	run, err := repository.CreateRun(ctx, kernelstore.CreateRunInput{
-		ID: uuid.New(), TaskID: admitted.ID, ExpectedTaskVersion: admitted.ResourceVersion,
+		ID: uuid.New(), TenantID: admitted.TenantID, TaskID: admitted.ID, ExpectedTaskVersion: admitted.ResourceVersion,
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 	owned, err := repository.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: admitted.TenantID, AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci", RuntimeInstanceID: "worker-1", TTL: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("acquire attempt: %v", err)
 	}
 	starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
+		TenantID: admitted.TenantID, AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
 		ExpectedAttemptVersion: owned.Attempt.ResourceVersion, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatalf("start attempt: %v", err)
 	}
 	running, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: starting.ID, FencingToken: starting.FencingToken,
+		TenantID: admitted.TenantID, AttemptID: starting.ID, FencingToken: starting.FencingToken,
 		ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
 	})
 	if err != nil {

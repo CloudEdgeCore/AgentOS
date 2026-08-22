@@ -15,24 +15,37 @@ import (
 	"time"
 )
 
-const maxInterfaceBody = 2 << 20
+const (
+	maxInterfaceBody   = 2 << 20
+	maxEventPayload    = 256 << 10
+	maxEventPage       = 1 << 20
+	maxEventsPerPage   = 256
+	defaultRunDeadline = time.Hour
+)
 
 type HostOptions struct {
-	Adapter        string
-	MaxConcurrent  int
-	EventLimit     int
-	ExecutionLimit int
-	Now            func() time.Time
+	Adapter          string
+	MaxConcurrent    int
+	EventLimit       int
+	ExecutionLimit   int
+	ExecutionTimeout time.Duration
+	Now              func() time.Time
+	TerminationGrace time.Duration
+	// ForceTerminate must kill the isolated execution boundary (subprocess,
+	// container or microVM) after cooperative cancellation fails. Production
+	// adapters should configure it; embedded dev adapters may leave it nil.
+	ForceTerminate func(executionID string) error
 }
 
 type execution struct {
-	digest    [sha256.Size]byte
-	cancel    context.CancelFunc
-	status    string
-	events    []Event
-	next      int64
-	result    Result
-	createdAt time.Time
+	digest     [sha256.Size]byte
+	cancel     context.CancelFunc
+	status     string
+	events     []Event
+	next       int64
+	result     Result
+	createdAt  time.Time
+	workerDone bool
 }
 
 // Host exposes one Runtime through the stable HTTP+JSON Runtime Interface.
@@ -66,8 +79,14 @@ func NewHost(runtime Runtime, options HostOptions) (*Host, error) {
 	if options.ExecutionLimit < options.MaxConcurrent {
 		return nil, errors.New("execution retention limit must cover maximum concurrency")
 	}
+	if options.ExecutionTimeout <= 0 {
+		options.ExecutionTimeout = defaultRunDeadline
+	}
 	if options.Now == nil {
 		options.Now = time.Now
+	}
+	if options.TerminationGrace <= 0 {
+		options.TerminationGrace = 5 * time.Second
 	}
 	return &Host{runtime: runtime, opts: options, executions: map[string]*execution{}}, nil
 }
@@ -144,7 +163,7 @@ func (h *Host) start(writer http.ResponseWriter, request *http.Request) {
 		writeProblem(writer, http.StatusTooManyRequests, "RETENTION_EXHAUSTED", "execution retention capacity exhausted")
 		return
 	}
-	executionCtx, cancel := context.WithCancel(context.Background())
+	executionCtx, cancel := context.WithTimeout(context.Background(), h.opts.ExecutionTimeout)
 	state := &execution{digest: digest, cancel: cancel, status: StatusAccepted, next: 1, createdAt: h.opts.Now().UTC()}
 	h.executions[body.ExecutionID] = state
 	h.active++
@@ -165,7 +184,7 @@ func (h *Host) run(ctx context.Context, request StartRequest, state *execution) 
 		if len(payload) == 0 {
 			payload = json.RawMessage(`{}`)
 		}
-		if !json.Valid(payload) || len(payload) > maxInterfaceBody {
+		if !json.Valid(payload) || len(payload) > maxEventPayload {
 			return errors.New("event payload must be bounded valid JSON")
 		}
 		h.mu.Lock()
@@ -182,24 +201,40 @@ func (h *Host) run(ctx context.Context, request StartRequest, state *execution) 
 		state.next++
 		return nil
 	}
-	var output json.RawMessage
-	var err error
-	func() {
+	type outcome struct {
+		output json.RawMessage
+		err    error
+	}
+	completed := make(chan outcome, 1)
+	go func() {
+		var output json.RawMessage
+		var err error
 		defer func() {
 			if recover() != nil {
 				err = errors.New("adapter panicked")
 			}
+			completed <- outcome{output: output, err: err}
 		}()
 		output, err = h.runtime.Run(ctx, request, emit)
 	}()
+	var output json.RawMessage
+	var err error
+	workerCompleted := false
+	select {
+	case result := <-completed:
+		output, err, workerCompleted = result.output, result.err, true
+	case <-ctx.Done():
+	}
 	completedAt := h.opts.Now().UTC()
 	result := Result{ExecutionID: request.ExecutionID, CompletedAt: &completedAt}
 	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		result.Status, result.ErrorCode, result.Error = StatusFailed, "EXECUTION_TIMEOUT", "adapter execution timed out"
 	case errors.Is(ctx.Err(), context.Canceled):
 		result.Status, result.ErrorCode, result.Error = StatusCancelled, "EXECUTION_CANCELLED", "execution cancelled"
 	case err != nil:
-		result.Status, result.ErrorCode, result.Error = StatusFailed, "ADAPTER_FAILED", err.Error()
-	case len(output) == 0 || !json.Valid(output):
+		result.Status, result.ErrorCode, result.Error = StatusFailed, "ADAPTER_FAILED", "adapter execution failed"
+	case len(output) == 0 || !json.Valid(output) || len(output) > maxInterfaceBody:
 		result.Status, result.ErrorCode, result.Error = StatusFailed, "INVALID_RESULT", "adapter returned invalid JSON"
 	default:
 		result.Status, result.Output = StatusSucceeded, bytes.Clone(output)
@@ -207,8 +242,27 @@ func (h *Host) run(ctx context.Context, request StartRequest, state *execution) 
 	h.mu.Lock()
 	state.status = result.Status
 	state.result = result
-	h.active--
+	state.workerDone = workerCompleted
+	if workerCompleted {
+		h.active--
+	}
 	h.mu.Unlock()
+	if !workerCompleted {
+		timer := time.NewTimer(h.opts.TerminationGrace)
+		select {
+		case <-completed:
+			timer.Stop()
+		case <-timer.C:
+			if h.opts.ForceTerminate != nil {
+				_ = h.opts.ForceTerminate(request.ExecutionID)
+			}
+			<-completed
+		}
+		h.mu.Lock()
+		state.workerDone = true
+		h.active--
+		h.mu.Unlock()
+	}
 }
 
 func (h *Host) executionRoute(writer http.ResponseWriter, request *http.Request, prefix string) {
@@ -286,9 +340,15 @@ func (h *Host) checkpoint(writer http.ResponseWriter, request *http.Request, exe
 		writeProblem(writer, http.StatusNotFound, "EXECUTION_NOT_FOUND", ErrExecutionNotFound.Error())
 		return
 	}
-	checkpoint, err := h.runtime.Checkpoint(request.Context(), executionID)
+	checkpointCtx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	checkpoint, err := h.runtime.Checkpoint(checkpointCtx, executionID)
 	if err != nil {
-		writeProblem(writer, http.StatusUnprocessableEntity, "CHECKPOINT_FAILED", err.Error())
+		if errors.Is(checkpointCtx.Err(), context.DeadlineExceeded) {
+			writeProblem(writer, http.StatusGatewayTimeout, "CHECKPOINT_TIMEOUT", "checkpoint operation timed out")
+		} else {
+			writeProblem(writer, http.StatusUnprocessableEntity, "CHECKPOINT_FAILED", "checkpoint operation failed")
+		}
 		return
 	}
 	if err := validateCheckpoint(checkpoint); err != nil {
@@ -315,8 +375,14 @@ func (h *Host) restore(writer http.ResponseWriter, request *http.Request, execut
 		writeProblem(writer, http.StatusUnprocessableEntity, "INVALID_CHECKPOINT", err.Error())
 		return
 	}
-	if err := h.runtime.Restore(request.Context(), body); err != nil {
-		writeProblem(writer, http.StatusUnprocessableEntity, "RESTORE_FAILED", err.Error())
+	restoreCtx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	if err := h.runtime.Restore(restoreCtx, body); err != nil {
+		if errors.Is(restoreCtx.Err(), context.DeadlineExceeded) {
+			writeProblem(writer, http.StatusGatewayTimeout, "RESTORE_TIMEOUT", "restore operation timed out")
+		} else {
+			writeProblem(writer, http.StatusUnprocessableEntity, "RESTORE_FAILED", "restore operation failed")
+		}
 		return
 	}
 	writeJSON(writer, http.StatusOK, RestoreResponse{ExecutionID: executionID, Restored: true})
@@ -344,10 +410,18 @@ func (h *Host) events(writer http.ResponseWriter, request *http.Request, executi
 		return
 	}
 	events := make([]Event, 0, len(state.events))
+	pageBytes := 0
+	truncated := false
 	for _, event := range state.events {
 		if event.Sequence > after {
+			encoded, _ := json.Marshal(event)
+			if len(events) >= maxEventsPerPage || pageBytes+len(encoded) > maxEventPage {
+				truncated = true
+				break
+			}
 			event.Payload = bytes.Clone(event.Payload)
 			events = append(events, event)
+			pageBytes += len(encoded)
 		}
 	}
 	next := after
@@ -355,7 +429,7 @@ func (h *Host) events(writer http.ResponseWriter, request *http.Request, executi
 		next = events[len(events)-1].Sequence
 	}
 	h.mu.RUnlock()
-	writeJSON(writer, http.StatusOK, EventList{ExecutionID: executionID, Events: events, NextAfter: next})
+	writeJSON(writer, http.StatusOK, EventList{ExecutionID: executionID, Events: events, NextAfter: next, Truncated: truncated})
 }
 
 func (h *Host) result(writer http.ResponseWriter, request *http.Request, executionID string) {
@@ -391,7 +465,7 @@ func (h *Host) evictOldestTerminalLocked() bool {
 	var oldestID string
 	var oldest time.Time
 	for id, state := range h.executions {
-		if state.status == StatusAccepted || state.status == StatusRunning {
+		if state.status == StatusAccepted || state.status == StatusRunning || !state.workerDone {
 			continue
 		}
 		if oldestID == "" || state.createdAt.Before(oldest) {
@@ -446,6 +520,11 @@ func validateStart(request StartRequest) error {
 				return fmt.Errorf("capabilities.%s contains duplicate grant %q", set.name, value)
 			}
 			seen[value] = struct{}{}
+		}
+	}
+	for _, sensitivity := range request.Capabilities.MemorySensitivities {
+		if sensitivity != "internal" && sensitivity != "confidential" && sensitivity != "restricted" {
+			return fmt.Errorf("capabilities.memorySensitivities contains invalid tier %q", sensitivity)
 		}
 	}
 	if request.Capabilities.ChildAgents != nil {

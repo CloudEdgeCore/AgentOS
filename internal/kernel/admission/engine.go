@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
@@ -24,7 +25,7 @@ const EvaluatorVersion = "builtin/v1"
 type Limits struct {
 	RuntimeClasses    []string
 	MaxTokens         int64
-	MaxCostUSD        float64
+	MaxCostMicroUSD   money.MicroUSD
 	MaxToolCalls      int64
 	MaxWallSeconds    int64
 	MaxCPU            int64
@@ -83,7 +84,7 @@ func (e *Engine) Evaluate(task store.Task) Decision {
 	checkPositiveLimit(&reasons, "BUDGET_TOKENS_INVALID", "budget.tokens", spec.Budget.Tokens, e.limits.MaxTokens)
 	checkPositiveLimit(&reasons, "BUDGET_TOOL_CALLS_INVALID", "budget.toolCalls", spec.Budget.ToolCalls, e.limits.MaxToolCalls)
 	checkPositiveLimit(&reasons, "BUDGET_WALL_TIME_INVALID", "budget.wallSeconds", spec.Budget.WallSeconds, e.limits.MaxWallSeconds)
-	if spec.Budget.CostUSD <= 0 || (e.limits.MaxCostUSD > 0 && spec.Budget.CostUSD > e.limits.MaxCostUSD) {
+	if spec.Budget.CostMicroUSD <= 0 || (e.limits.MaxCostMicroUSD > 0 && spec.Budget.CostMicroUSD > e.limits.MaxCostMicroUSD) {
 		reasons = append(reasons, reason("BUDGET_COST_INVALID", "budget.costUsd", "cost budget must be positive and within the tenant limit"))
 	}
 	checkPositiveLimit(&reasons, "CPU_REQUEST_INVALID", "placement.cpuMillis", spec.Placement.CPU, e.limits.MaxCPU)
@@ -307,7 +308,7 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 	var budget *store.TaskBudget
 	if !spec.Budget.Zero() {
 		value := store.TaskBudget{
-			Tokens: spec.Budget.Tokens, CostUSD: spec.Budget.CostUSD,
+			Tokens: spec.Budget.Tokens, CostMicroUSD: spec.Budget.CostMicroUSD,
 			ToolCalls: spec.Budget.ToolCalls, WallSeconds: spec.Budget.WallSeconds,
 		}
 		budget = &value

@@ -49,7 +49,7 @@ A typical task moves through the following lifecycle:
 | Task kernel | `Task → Run → Attempt` state machine, cancellation, retry, timeout, SSE event streams, and durable results |
 | Scheduling and recovery | Admission, default-deny Rego policy, capacity-aware placement, leases, fencing tokens, backoff, and orphan recovery |
 | Runtimes | Wasmtime/Wasm provider, OCI provider, Linux gVisor isolation, reference provider, and HTTP adapter worker |
-| Agent SDKs | Go Runtime Interface SDK, Python 3.11+ Runtime Interface SDK, LangGraph adapter, and A2A adapter |
+| Agent SDKs | Go and Python Runtime Interface SDKs, typed TypeScript Control/Runtime clients, LangGraph adapter, and A2A adapter |
 | Gateways | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
 | Multi-tenancy | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, and tenant binding |
 | Secrets and supply chain | OpenBao secret broker, dynamic database credentials, package signing, OCI digest pinning, and SBOM validation |
@@ -207,9 +207,34 @@ agentos sign      Sign a package with an Ed25519 key
 agentos publish   Publish an immutable AgentVersion
 agentos run       Submit a durable task
 agentos logs      Stream task events over SSE
+agentos workflow  Create, inspect, cancel, approve/reject, and render workflow trees
+agentos runtime   Activate, cordon, or drain a runtime pool with CAS protection
+agentos conformance  Certify a running Runtime Interface adapter
 ```
 
 `publish`, `run`, and `logs` use `http://127.0.0.1:8080` by default. In production, pass the HTTPS Control API through `-endpoint` and provide a bearer token through `AGENTOS_TOKEN`.
+
+Model provider configuration may also declare `routes`, mapping a stable
+tenant-visible `modelRef` to an independently selected provider and wire model.
+This keeps workflow and Agent manifests stable while operations change model
+hosts or aliases. See `deploy/dev/model-providers.example.json` for the strict
+configuration shape; keep private endpoint files in `deploy/dev/*.local.json`.
+
+### Safety limits reference
+
+| Boundary | Default hard limit |
+| --- | ---: |
+| Control API request body | 1 MiB |
+| Workflow document / declared steps | 1 MiB / 1,024 |
+| Dynamic workflow total steps | 100,000 |
+| Step goal / retry attempts | 8 KiB / 10 |
+| Runtime interface body / event payload | 2 MiB / 256 KiB |
+| Runtime event page | 256 events and 1 MiB |
+| Model provider request / response | 4 MiB / 32 MiB |
+| MCP memory response aggregate | 1 MiB |
+
+Deployment-specific admission, tenant quota, concurrency, and workflow budget
+limits may be lower; zero never silently disables a required sandbox limit.
 
 ## Production security baseline
 
@@ -261,6 +286,10 @@ gofmt -l .
 go vet ./...
 go test -race -count=1 ./...
 go tool govulncheck ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+(cd sdk/python && python -m unittest discover -s tests -v)
+npm --prefix sdk/typescript ci
+npm --prefix sdk/typescript test
 ```
 
 Real PostgreSQL/NATS integration tests:
@@ -273,6 +302,14 @@ go test -race -tags=integration -count=1 ./...
 ```
 
 > The integration suite applies migrations and clears AgentOS test tables. Never point `AGENTOS_TEST_DATABASE_URL` at a database containing durable business data.
+
+Production migrations are forward-only and use expand/contract deployment:
+take and verify a restorable backup, apply additive schema changes, deploy
+code compatible with both shapes, backfill and reconcile, then remove the old
+shape in a later release. Rollback means rolling back the application while
+the expanded schema remains; destructive data rollback requires restoring the
+verified backup into a replacement database and switching traffic after
+integrity checks. Never edit an already-applied migration.
 
 Protobuf compatibility and deterministic generation:
 
@@ -359,10 +396,12 @@ go run ./cmd/agentos-slo -sample measured-slo.json
 The official release workflow runs the GA gates and generates:
 
 - complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64;
-- the `agentos-runtime` Python wheel;
-- a CycloneDX 1.6 SBOM;
+- the `agentos-runtime` Python wheel and `@agentos/sdk` TypeScript package;
+- the Wasmtime runtime binary in the Linux AMD64 archive;
+- CycloneDX SBOMs for Go, Rust, Python, and TypeScript;
 - `checksums.txt`;
-- a keyless `checksums.txt.sigstore.json` Sigstore bundle.
+- a keyless `checksums.txt.sigstore.json` Sigstore bundle;
+- GitHub/Sigstore SLSA build provenance attestations for release assets.
 
 Download and verify all release assets:
 
@@ -383,6 +422,7 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | `internal/gateway/` | Tool, Model, Memory, Capability, and Secret Broker implementations |
 | `sdk/agent/` | Go Runtime Interface SDK |
 | `sdk/python/` | Python Runtime Interface SDK |
+| `sdk/typescript/` | TypeScript Control API and Runtime Interface SDK |
 | `adapters/` | LangGraph and A2A adapters |
 | `api/openapi/` | Stable and compatibility REST/HTTP contracts |
 | `proto/agentos/` | Runtime, Gateway, and Model Protobuf contracts |
@@ -391,12 +431,24 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | `deploy/ci/` | OCI/gVisor isolation and environment fingerprint tests |
 | `modelcheck/tla/` | TLA+ model of the kernel state machine |
 
+## Feature status
+
+| Capability | Status | Verification |
+| --- | --- | --- |
+| Task kernel, fencing, recovery, and budgets | Stable | Unit, race, PostgreSQL/NATS integration, fault injection |
+| Workflow DAG and dynamic multi-agent spawn | Stable | Workflow acceptance, multi-orchestrator claims, 10k-step scheduled scale |
+| Go/Python Runtime Interface SDKs | Stable | Conformance suite and language-specific unit tests |
+| TypeScript Control/Runtime client SDK | Stable client surface | Strict TypeScript build and HTTP contract tests |
+| Wasmtime and OCI/gVisor runtimes | Stable | Rust tests and real Linux isolation CI |
+| Firecracker runtime | Evaluation only | Dedicated real-KVM scheduled probe; no production provider yet |
+| Live model execution | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
+| 24-hour recovery soak | Scheduled evidence | Weekly dedicated self-hosted runner job |
+
 ## Current boundaries
 
 - v1.0 is an agent control and execution backend; it does not include a complete web administration console or managed cloud service.
 - The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
 - Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
-- The TypeScript directory is reserved for a future client SDK and is not part of the v1.0 stable SDK surface.
 - Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
 
 These boundaries are intentional. AgentOS v1.0 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.

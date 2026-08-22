@@ -19,6 +19,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -532,7 +533,7 @@ func validAgentManifest() agentversion.Manifest {
 				Memory: []string{"memory.session"}, Secrets: []string{},
 			},
 			Resources:  &agentversion.ResourceLimits{CPUMillis: 500, MemoryMiB: 256, WorkspaceBytes: 0},
-			Budget:     &agentversion.Budget{Tokens: 1000, CostUSD: 1, ToolCalls: 10, WallSeconds: 60},
+			Budget:     &agentversion.Budget{Tokens: 1000, CostMicroUSD: money.MustFromUSD(1), ToolCalls: 10, WallSeconds: 60},
 			Checkpoint: &agentversion.CheckpointPolicy{Mode: agentversion.CheckpointLogical, SchemaVersion: "checkpoint/v1"},
 		},
 	}
@@ -581,8 +582,8 @@ func TestGetTaskReportsBudgetUsage(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	backend.setBudget(created.Task.ID, store.TaskBudgetStatus{
 		TaskID: created.Task.ID, TenantID: "tenant-a",
-		Reserved:  store.TaskBudget{Tokens: 100, CostUSD: 1, ToolCalls: 10, WallSeconds: 60},
-		Consumed:  store.TaskBudget{Tokens: 60, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 30},
+		Reserved:  store.TaskBudget{Tokens: 100, CostMicroUSD: money.MustFromUSD(1), ToolCalls: 10, WallSeconds: 60},
+		Consumed:  store.TaskBudget{Tokens: 60, CostMicroUSD: money.MustFromUSD(0.5), ToolCalls: 4, WallSeconds: 30},
 		Exhausted: true, ResourceVersion: 2, UpdatedAt: now,
 	})
 	handler := auth.StaticMiddleware(auth.Principal{Subject: "owner", TenantID: "tenant-a"}, controlapi.NewHandler(backend, backend, backend, backend))
@@ -599,7 +600,7 @@ func TestGetTaskReportsBudgetUsage(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.Usage.Tokens != 60 || body.Usage.CostUSD != 0.5 || body.Usage.ToolCalls != 4 || body.Usage.WallSeconds != 30 {
+	if body.Usage.Tokens != 60 || body.Usage.CostMicroUSD != money.MustFromUSD(0.5) || body.Usage.ToolCalls != 4 || body.Usage.WallSeconds != 30 {
 		t.Fatalf("unexpected usage: %+v", body.Usage)
 	}
 	if !body.BudgetExhausted {
@@ -608,10 +609,10 @@ func TestGetTaskReportsBudgetUsage(t *testing.T) {
 }
 
 type usageResponse struct {
-	Tokens      int64   `json:"tokens"`
-	CostUSD     float64 `json:"costUsd"`
-	ToolCalls   int64   `json:"toolCalls"`
-	WallSeconds int64   `json:"wallSeconds"`
+	Tokens       int64          `json:"tokens"`
+	CostMicroUSD money.MicroUSD `json:"costUsd"`
+	ToolCalls    int64          `json:"toolCalls"`
+	WallSeconds  int64          `json:"wallSeconds"`
 }
 
 func TestRoutingFailuresRemainStructured(t *testing.T) {

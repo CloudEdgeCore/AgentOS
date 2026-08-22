@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 )
 
 func validManifest() Manifest {
@@ -24,7 +26,7 @@ func validManifest() Manifest {
 				Memory: []string{"project/*"}, Secrets: []string{},
 			},
 			Resources:  &ResourceLimits{CPUMillis: 500, MemoryMiB: 512, WorkspaceBytes: 64 << 20},
-			Budget:     &Budget{Tokens: 100_000, CostUSD: 10, ToolCalls: 100, WallSeconds: 3600},
+			Budget:     &Budget{Tokens: 100_000, CostMicroUSD: money.MustFromUSD(10), ToolCalls: 100, WallSeconds: 3600},
 			Checkpoint: &CheckpointPolicy{Mode: CheckpointLogical, SchemaVersion: "research-state/v1", IntervalSeconds: 30},
 			Lifecycle:  Lifecycle{MaxAttempts: 3},
 			Image: &Image{

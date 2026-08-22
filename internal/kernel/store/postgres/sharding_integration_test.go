@@ -9,6 +9,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -114,7 +115,7 @@ func TestShardedControllerInstancesOwnDisjointTenants(t *testing.T) {
 		t.Fatalf("prepare policy engine: %v", err)
 	}
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostMicroUSD: money.MustFromUSD(10),
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
 

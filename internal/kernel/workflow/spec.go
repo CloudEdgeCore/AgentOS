@@ -1,4 +1,4 @@
-// Package workflow implements the v1.3 orchestrator: WorkflowRun and Step
+// Package workflow implements the durable orchestrator: WorkflowRun and Step
 // state, dependency dispatch with conditions and joins, single-step retry,
 // human approval, cancellation propagation and restart recovery. The
 // orchestrator decides who executes when and creates ordinary Tasks; it
@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 const (
@@ -24,13 +26,13 @@ const (
 	maxConditionBytes  = 1024
 	maxDefaultAttempts = 1
 	maxRetryAttempts   = 10
-	// v1.3 budgets bound one workflow run (tasks, tokens, USD); each is
+	// Budgets bound one workflow run (tasks, tokens, USD); each is
 	// optional and independently enforced. maxWorkflowSteps also bounds the
 	// runtime dynamic-spawn guards.
-	maxWorkflowTasks   = 100000
-	maxWorkflowTokens  = 1 << 40
-	maxWorkflowCostUSD = 100000
-	maxWorkflowSteps   = 100000
+	maxWorkflowTasks        = 100000
+	maxWorkflowTokens       = 1 << 40
+	maxWorkflowCostMicroUSD = money.MicroUSD(100000 * money.MicroPerUSD)
+	maxWorkflowSteps        = 100000
 )
 
 // StepCondition is the structured condition of one step: evaluated against
@@ -40,6 +42,19 @@ type StepCondition struct {
 	Step           string `json:"step"`
 	OutputContains string `json:"outputContains,omitempty"`
 	OutputEquals   string `json:"outputEquals,omitempty"`
+	// JSONPointer selects a typed value from the upstream output using RFC
+	// 6901. EqualsJSON compares JSON values structurally (not textually).
+	JSONPointer string          `json:"jsonPointer,omitempty"`
+	EqualsJSON  json.RawMessage `json:"equalsJson,omitempty"`
+}
+
+// StepOutputContract defines the durable Agent A -> Agent B data contract.
+// Schema is JSON Schema 2020-12 and validates the result document's output
+// value before the step may become SUCCEEDED.
+type StepOutputContract struct {
+	ContentType   string          `json:"contentType,omitempty"`
+	SchemaVersion string          `json:"schemaVersion"`
+	Schema        json.RawMessage `json:"schema"`
 }
 
 // StepRetry bounds the single-step retry budget (total task attempts).
@@ -49,40 +64,41 @@ type StepRetry struct {
 
 // StepSpec is one declared DAG node of the workflow document.
 type StepSpec struct {
-	Name             string          `json:"name"`
-	AgentVersionRef  string          `json:"agentVersionRef"`
-	Goal             string          `json:"goal"`
-	Spec             json.RawMessage `json:"spec,omitempty"`
-	DependsOn        []string        `json:"dependsOn,omitempty"`
-	Condition        *StepCondition  `json:"condition,omitempty"`
-	Retry            *StepRetry      `json:"retry,omitempty"`
-	RequiresApproval bool            `json:"requiresApproval"`
+	Name             string              `json:"name"`
+	AgentVersionRef  string              `json:"agentVersionRef"`
+	Goal             string              `json:"goal"`
+	Spec             json.RawMessage     `json:"spec,omitempty"`
+	DependsOn        []string            `json:"dependsOn,omitempty"`
+	Condition        *StepCondition      `json:"condition,omitempty"`
+	Retry            *StepRetry          `json:"retry,omitempty"`
+	RequiresApproval bool                `json:"requiresApproval"`
+	Output           *StepOutputContract `json:"output,omitempty"`
 }
 
 // WorkflowBudget is the workflow-level ceiling set of the workflow document
-// (v1.3). Every dimension is optional; zero leaves it unbounded.
+// Every dimension is optional; zero leaves it unbounded.
 type WorkflowBudget struct {
-	MaxTasks   int64   `json:"maxTasks,omitempty"`
-	MaxTokens  int64   `json:"maxTokens,omitempty"`
-	MaxCostUSD float64 `json:"maxCostUsd,omitempty"`
+	MaxTasks        int64          `json:"maxTasks,omitempty"`
+	MaxTokens       int64          `json:"maxTokens,omitempty"`
+	MaxCostMicroUSD money.MicroUSD `json:"maxCostUsd,omitempty"`
 }
 
 // WorkflowRuntimePolicy is the dynamic-orchestration policy of the workflow
-// document (v1.3): the guards the spawning path enforces at runtime.
+// document: the guards the spawning path enforces at runtime.
 type WorkflowRuntimePolicy struct {
 	Dynamic WorkflowDynamicPolicy `json:"dynamic,omitempty"`
 }
 
 // WorkflowDynamicPolicy bounds dynamic spawning.
 type WorkflowDynamicPolicy struct {
-	Enabled            bool    `json:"enabled,omitempty"`
-	MaxDynamicSteps    int64   `json:"maxDynamicSteps,omitempty"`
-	MaxChildrenPerStep int64   `json:"maxChildrenPerStep,omitempty"`
-	MaxSpawnDepth      int     `json:"maxSpawnDepth,omitempty"`
-	MaxWorkflowSteps   int64   `json:"maxWorkflowSteps,omitempty"`
-	MaxSpawnTasks      int64   `json:"maxSpawnTasks,omitempty"`
-	MaxSpawnTokens     int64   `json:"maxSpawnTokens,omitempty"`
-	MaxSpawnCostUSD    float64 `json:"maxSpawnCostUsd,omitempty"`
+	Enabled              bool           `json:"enabled,omitempty"`
+	MaxDynamicSteps      int64          `json:"maxDynamicSteps,omitempty"`
+	MaxChildrenPerStep   int64          `json:"maxChildrenPerStep,omitempty"`
+	MaxSpawnDepth        int            `json:"maxSpawnDepth,omitempty"`
+	MaxWorkflowSteps     int64          `json:"maxWorkflowSteps,omitempty"`
+	MaxSpawnTasks        int64          `json:"maxSpawnTasks,omitempty"`
+	MaxSpawnTokens       int64          `json:"maxSpawnTokens,omitempty"`
+	MaxSpawnCostMicroUSD money.MicroUSD `json:"maxSpawnCostUsd,omitempty"`
 }
 
 // WorkflowSpec is the user-facing workflow document.
@@ -233,8 +249,40 @@ func DecodeWorkflowSpec(raw []byte) (WorkflowSpec, error) {
 					return spec, fmt.Errorf("steps[%d].condition.outputEquals exceeds %d bytes", index, maxConditionBytes)
 				}
 			}
+			if step.Condition.JSONPointer != "" || len(step.Condition.EqualsJSON) != 0 {
+				if step.Condition.JSONPointer == "" || (step.Condition.JSONPointer[0] != '/' && step.Condition.JSONPointer != "") {
+					return spec, fmt.Errorf("steps[%d].condition.jsonPointer must be an RFC 6901 pointer", index)
+				}
+				if len(step.Condition.EqualsJSON) == 0 || !json.Valid(step.Condition.EqualsJSON) {
+					return spec, fmt.Errorf("steps[%d].condition.equalsJson must be valid JSON", index)
+				}
+				predicates++
+			}
 			if predicates != 1 {
 				return spec, fmt.Errorf("steps[%d].condition must set exactly one predicate", index)
+			}
+		}
+		if step.Output != nil {
+			if strings.TrimSpace(step.Output.SchemaVersion) == "" || len(step.Output.SchemaVersion) > 64 {
+				return spec, fmt.Errorf("steps[%d].output.schemaVersion is required and bounded", index)
+			}
+			if step.Output.ContentType != "" && step.Output.ContentType != "application/json" {
+				return spec, fmt.Errorf("steps[%d].output.contentType currently supports application/json only", index)
+			}
+			if len(step.Output.Schema) == 0 || len(step.Output.Schema) > 64<<10 {
+				return spec, fmt.Errorf("steps[%d].output.schema must be 1..65536 bytes", index)
+			}
+			var schemaDocument any
+			if err := json.Unmarshal(step.Output.Schema, &schemaDocument); err != nil {
+				return spec, fmt.Errorf("steps[%d].output.schema: %w", index, err)
+			}
+			compiler := jsonschema.NewCompiler()
+			resource := fmt.Sprintf("workflow-step-%d-output.json", index)
+			if err := compiler.AddResource(resource, schemaDocument); err != nil {
+				return spec, fmt.Errorf("steps[%d].output.schema: %w", index, err)
+			}
+			if _, err := compiler.Compile(resource); err != nil {
+				return spec, fmt.Errorf("steps[%d].output.schema: %w", index, err)
 			}
 		}
 	}
@@ -257,8 +305,8 @@ func validateBudget(budget *WorkflowBudget) error {
 	if budget.MaxTokens < 0 || budget.MaxTokens > maxWorkflowTokens {
 		return fmt.Errorf("budget.maxTokens must be 0..%d", maxWorkflowTokens)
 	}
-	if budget.MaxCostUSD < 0 || budget.MaxCostUSD > maxWorkflowCostUSD {
-		return fmt.Errorf("budget.maxCostUsd must be 0..%d", maxWorkflowCostUSD)
+	if budget.MaxCostMicroUSD < 0 || budget.MaxCostMicroUSD > maxWorkflowCostMicroUSD {
+		return fmt.Errorf("budget.maxCostUsd must be 0..%d", int64(maxWorkflowCostMicroUSD)/money.MicroPerUSD)
 	}
 	return nil
 }
@@ -270,7 +318,7 @@ func validateRuntimePolicy(runtime *WorkflowRuntimePolicy) error {
 	dynamic := runtime.Dynamic
 	if !dynamic.Enabled {
 		if dynamic.MaxDynamicSteps != 0 || dynamic.MaxChildrenPerStep != 0 || dynamic.MaxSpawnDepth != 0 ||
-			dynamic.MaxWorkflowSteps != 0 || dynamic.MaxSpawnTasks != 0 || dynamic.MaxSpawnTokens != 0 || dynamic.MaxSpawnCostUSD != 0 {
+			dynamic.MaxWorkflowSteps != 0 || dynamic.MaxSpawnTasks != 0 || dynamic.MaxSpawnTokens != 0 || dynamic.MaxSpawnCostMicroUSD != 0 {
 			return fmt.Errorf("runtime.dynamic.enabled must be true when dynamic limits are declared")
 		}
 		return nil
@@ -296,18 +344,18 @@ func validateRuntimePolicy(runtime *WorkflowRuntimePolicy) error {
 	if dynamic.MaxSpawnTokens < 0 || dynamic.MaxSpawnTokens > maxWorkflowTokens {
 		return fmt.Errorf("runtime.dynamic.maxSpawnTokens must be 0..%d", maxWorkflowTokens)
 	}
-	if dynamic.MaxSpawnCostUSD < 0 || dynamic.MaxSpawnCostUSD > maxWorkflowCostUSD {
-		return fmt.Errorf("runtime.dynamic.maxSpawnCostUsd must be 0..%d", maxWorkflowCostUSD)
+	if dynamic.MaxSpawnCostMicroUSD < 0 || dynamic.MaxSpawnCostMicroUSD > maxWorkflowCostMicroUSD {
+		return fmt.Errorf("runtime.dynamic.maxSpawnCostUsd must be 0..%d", int64(maxWorkflowCostMicroUSD)/money.MicroPerUSD)
 	}
 	return nil
 }
 
 // Budgets returns the validated workflow budget ceilings.
-func (s WorkflowSpec) Budgets() (tasks, tokens int64, costUSD float64) {
+func (s WorkflowSpec) Budgets() (tasks, tokens int64, costMicroUSD money.MicroUSD) {
 	if s.Budget == nil {
 		return 0, 0, 0
 	}
-	return s.Budget.MaxTasks, s.Budget.MaxTokens, s.Budget.MaxCostUSD
+	return s.Budget.MaxTasks, s.Budget.MaxTokens, s.Budget.MaxCostMicroUSD
 }
 
 // StepInputs renders the durable step inputs of a validated spec (with the

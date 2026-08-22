@@ -5,10 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"math"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 )
 
 const (
@@ -58,12 +59,13 @@ type RuntimeTarget struct {
 // Capabilities contains symbolic permission identifiers. Empty arrays are an
 // explicit default-deny declaration and are different from an omitted block.
 type Capabilities struct {
-	Tools       []string `json:"tools"`
-	Models      []string `json:"models"`
-	Memory      []string `json:"memory"`
-	Secrets     []string `json:"secrets"`
-	SpawnTasks  bool     `json:"spawnTasks,omitempty"`
-	ChildAgents []string `json:"childAgents,omitempty"`
+	Tools               []string `json:"tools"`
+	Models              []string `json:"models"`
+	Memory              []string `json:"memory"`
+	MemorySensitivities []string `json:"memorySensitivities,omitempty"`
+	Secrets             []string `json:"secrets"`
+	SpawnTasks          bool     `json:"spawnTasks,omitempty"`
+	ChildAgents         []string `json:"childAgents,omitempty"`
 }
 
 type ResourceLimits struct {
@@ -73,10 +75,10 @@ type ResourceLimits struct {
 }
 
 type Budget struct {
-	Tokens      int64   `json:"tokens"`
-	CostUSD     float64 `json:"costUsd"`
-	ToolCalls   int64   `json:"toolCalls"`
-	WallSeconds int64   `json:"wallSeconds"`
+	Tokens       int64          `json:"tokens"`
+	CostMicroUSD money.MicroUSD `json:"costUsd"`
+	ToolCalls    int64          `json:"toolCalls"`
+	WallSeconds  int64          `json:"wallSeconds"`
 }
 
 type CheckpointPolicy struct {
@@ -182,10 +184,6 @@ func (m Manifest) PromoteToV1() (Manifest, error) {
 	return m, nil
 }
 
-func validatePlatformSpec(spec Spec) error {
-	return validatePlatformSpecForInterface(spec, RuntimeInterfaceV1)
-}
-
 func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error {
 	if len(spec.Runtimes) > 16 {
 		return fmt.Errorf("runtimes must contain at most 16 targets")
@@ -234,9 +232,24 @@ func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error 
 				return fmt.Errorf("capabilities.%s: %w", set.name, err)
 			}
 		}
+		for _, tool := range spec.Capabilities.Tools {
+			if strings.HasPrefix(strings.ToLower(tool), "agentos.") {
+				return fmt.Errorf("capabilities.tools cannot claim reserved agentos.* system tools")
+			}
+		}
 		if spec.Capabilities.ChildAgents != nil {
 			if err := validateCapabilitySet(spec.Capabilities.ChildAgents); err != nil {
 				return fmt.Errorf("capabilities.childAgents: %w", err)
+			}
+		}
+		if len(spec.Capabilities.MemorySensitivities) == 0 {
+			// Backward-compatible least privilege: old manifests can only
+			// access internal memory.
+			spec.Capabilities.MemorySensitivities = []string{"internal"}
+		}
+		for _, sensitivity := range spec.Capabilities.MemorySensitivities {
+			if sensitivity != "internal" && sensitivity != "confidential" && sensitivity != "restricted" {
+				return fmt.Errorf("capabilities.memorySensitivities contains invalid tier %q", sensitivity)
 			}
 		}
 		if spec.Capabilities.SpawnTasks && len(spec.Capabilities.ChildAgents) == 0 {
@@ -255,7 +268,7 @@ func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error 
 	}
 	if spec.Budget != nil {
 		if spec.Budget.Tokens < 0 || spec.Budget.ToolCalls < 0 || spec.Budget.WallSeconds <= 0 ||
-			spec.Budget.CostUSD < 0 || math.IsNaN(spec.Budget.CostUSD) || math.IsInf(spec.Budget.CostUSD, 0) {
+			spec.Budget.CostMicroUSD < 0 {
 			return fmt.Errorf("budget requires non-negative ceilings and positive wallSeconds")
 		}
 	}
@@ -313,6 +326,13 @@ func validateCapabilitySet(values []string) error {
 	for _, value := range values {
 		if !capabilityRefPattern.MatchString(value) {
 			return fmt.Errorf("identifier %q is invalid", value)
+		}
+		if strings.Contains(value, "*") && value != "*" &&
+			!(strings.HasSuffix(value, ".*") || strings.HasSuffix(value, "/*")) {
+			return fmt.Errorf("identifier %q uses an unsupported wildcard; use exact, *, .*, or /*", value)
+		}
+		if strings.Count(value, "*") > 1 {
+			return fmt.Errorf("identifier %q contains more than one wildcard", value)
 		}
 		if _, exists := seen[value]; exists {
 			return fmt.Errorf("contains duplicate identifier %q", value)

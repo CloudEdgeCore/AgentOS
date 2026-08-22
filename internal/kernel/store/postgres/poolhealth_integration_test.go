@@ -34,7 +34,7 @@ func TestPoolInstanceHealthFromLeaseHeartbeats(t *testing.T) {
 	// A worker holding a fresh lease is healthy.
 	_, run := createAdmittedRun(t, ctx, repository, "pool-health")
 	owned, err := repository.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: "tenant-a", AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci",
 		RuntimeInstanceID: "worker-busy", TTL: time.Minute,
 	})
@@ -49,7 +49,7 @@ func TestPoolInstanceHealthFromLeaseHeartbeats(t *testing.T) {
 	// Renewals within the TTL keep the worker alive across lease windows.
 	clock.Advance(30 * time.Second)
 	renewed, err := repository.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
-		AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
+		TenantID: "tenant-a", AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
 		ExpectedLeaseVersion: owned.Lease.ResourceVersion, TTL: time.Minute,
 	})
 	if err != nil {
@@ -57,7 +57,7 @@ func TestPoolInstanceHealthFromLeaseHeartbeats(t *testing.T) {
 	}
 	clock.Advance(30 * time.Second)
 	if _, err := repository.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
-		AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
+		TenantID: "tenant-a", AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
 		ExpectedLeaseVersion: renewed.ResourceVersion, TTL: time.Minute,
 	}); err != nil {
 		t.Fatalf("renew lease again: %v", err)
@@ -80,7 +80,7 @@ func TestPoolInstanceHealthFromLeaseHeartbeats(t *testing.T) {
 	// Recovery takeover (the same path recovery uses) releases the stale
 	// lease and fences the old owner: the instance is healed.
 	takenOver, err := repository.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: "tenant-a", AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: owned.Run.ResourceVersion, RuntimeClass: "oci",
 		RuntimeInstanceID: "worker-busy", TTL: time.Minute,
 	})
@@ -111,7 +111,7 @@ func TestPoolInstanceHealthHeartbeatFreshnessWindow(t *testing.T) {
 	ctx := context.Background()
 	_, run := createAdmittedRun(t, ctx, repository, "pool-health-fresh")
 	owned, err := repository.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: "tenant-a", AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci",
 		RuntimeInstanceID: "worker-slow", TTL: 10 * time.Minute,
 	})
@@ -145,7 +145,7 @@ func TestPoolInstanceHealthIgnoresReleasedLeases(t *testing.T) {
 	ctx := context.Background()
 	_, run := createAdmittedRun(t, ctx, repository, "pool-health-done")
 	owned, err := repository.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: "tenant-a", AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci",
 		RuntimeInstanceID: "worker-done", TTL: time.Minute,
 	})
@@ -153,21 +153,21 @@ func TestPoolInstanceHealthIgnoresReleasedLeases(t *testing.T) {
 		t.Fatalf("acquire attempt: %v", err)
 	}
 	starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
+		TenantID: "tenant-a", AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
 		ExpectedAttemptVersion: owned.Attempt.ResourceVersion, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatalf("start attempt: %v", err)
 	}
 	running, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: starting.ID, FencingToken: starting.FencingToken,
+		TenantID: "tenant-a", AttemptID: starting.ID, FencingToken: starting.FencingToken,
 		ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
 	})
 	if err != nil {
 		t.Fatalf("run attempt: %v", err)
 	}
 	completed, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: running.ID, FencingToken: running.FencingToken,
+		TenantID: "tenant-a", AttemptID: running.ID, FencingToken: running.FencingToken,
 		ExpectedAttemptVersion: running.ResourceVersion, To: domain.AttemptCompleted,
 	})
 	if err != nil {
@@ -177,7 +177,7 @@ func TestPoolInstanceHealthIgnoresReleasedLeases(t *testing.T) {
 	// must make the instance healthy regardless of lease age.
 	clock.Advance(10 * time.Minute)
 	if _, _, err := repository.CompleteRun(ctx, kernelstore.CompleteRunInput{
-		RunID: run.ID, AttemptID: completed.ID, FencingToken: completed.FencingToken,
+		TenantID: "tenant-a", RunID: run.ID, AttemptID: completed.ID, FencingToken: completed.FencingToken,
 		ExpectedRunVersion: owned.Run.ResourceVersion, ResultRef: "cas://sha256/result-done",
 	}); err != nil {
 		t.Fatalf("commit run: %v", err)

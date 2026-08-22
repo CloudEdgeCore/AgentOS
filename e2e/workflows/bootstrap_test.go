@@ -34,6 +34,7 @@ import (
 	kernelmemory "github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/recovery"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
@@ -307,7 +308,10 @@ func newE2EEnv(t *testing.T, schema string, providerLatency time.Duration, lease
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers,
+		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts, memory_records,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
 		runtime_leases, attempts, runs, tasks, workflows, workflow_steps RESTART IDENTITY CASCADE`); err != nil {
@@ -357,7 +361,7 @@ func newE2EEnv(t *testing.T, schema string, providerLatency time.Duration, lease
 		}
 	} else if err := registry.Register(provider.Config{
 		Name: "fake", BaseURL: "http://" + providerListener.Addr().String(),
-		APIKey: e2eProviderKey, TimeoutMs: 20000, MaxAttempts: 2,
+		APIKey: e2eProviderKey, TimeoutMs: 20000, MaxAttempts: 2, SupportsIdempotency: true,
 	}); err != nil {
 		t.Fatalf("register provider: %v", err)
 	}
@@ -407,7 +411,7 @@ func newE2EEnv(t *testing.T, schema string, providerLatency time.Duration, lease
 	}
 	if _, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: e2eTenant, Provider: descriptorProvider, ModelName: descriptorName, SupportsStreaming: true,
-		InputPricePerMillion: descriptorInput, OutputPricePerMillion: descriptorOutput, PriceRevision: "p1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(descriptorInput), OutputPriceMicroUSDPerMillion: money.MustFromUSD(descriptorOutput), PriceRevision: "p1",
 	}); err != nil {
 		t.Fatalf("register model descriptor: %v", err)
 	}
@@ -659,7 +663,7 @@ func poolsFor(instances ...string) staticPools {
 func reconcile(ctx context.Context, t *testing.T, env *e2eEnv, pools staticPools, withRecovery bool) {
 	t.Helper()
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"adapter"}, MaxTokens: 100000, MaxCostUSD: 1000,
+		RuntimeClasses: []string{"adapter"}, MaxTokens: 100000, MaxCostMicroUSD: money.MustFromUSD(1000),
 		MaxToolCalls: 10000, MaxWallSeconds: 36000, MaxCPU: 4000, MaxMemory: 8192, MaxLLMConcurrency: 16,
 	})
 	admissionController := admission.NewController(env.store, engine, env.policyEngine, "e2e-admission", 100, time.Minute)
@@ -680,7 +684,7 @@ func reconcile(ctx context.Context, t *testing.T, env *e2eEnv, pools staticPools
 // reconcileQuiet is the background loop variant.
 func reconcileQuiet(ctx context.Context, env *e2eEnv, pools staticPools) {
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"adapter"}, MaxTokens: 1000000, MaxCostUSD: 100000,
+		RuntimeClasses: []string{"adapter"}, MaxTokens: 1000000, MaxCostMicroUSD: money.MustFromUSD(100000),
 		MaxToolCalls: 100000, MaxWallSeconds: 360000, MaxCPU: 4000, MaxMemory: 8192, MaxLLMConcurrency: 64,
 	})
 	admissionController := admission.NewController(env.store, engine, env.policyEngine, "e2e-admission", 100, time.Minute)

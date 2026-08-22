@@ -26,6 +26,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
@@ -62,7 +63,7 @@ func TestControlPlanePipelineCapacityBaseline(t *testing.T) {
 
 	// Phase 2: admission controller drains the queue to ADMITTED.
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1_000_000, MaxCostUSD: 1_000,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1_000_000, MaxCostMicroUSD: money.MustFromUSD(1_000),
 		MaxToolCalls: 100_000, MaxWallSeconds: 86_400, MaxCPU: 64_000,
 		MaxMemory: 262_144, MaxLLMConcurrency: 128,
 	})
@@ -80,7 +81,7 @@ func TestControlPlanePipelineCapacityBaseline(t *testing.T) {
 	pools := staticPools{{
 		ID: "capacity-pool", TenantIDs: []string{tenant}, RuntimeClass: "oci", RuntimeInstanceID: "capacity-worker-1",
 		Region: "cn-east", DataResidency: "cn", Ready: true,
-		AvailableCPU: 64_000, AvailableMemory: 262_144, AvailableLLMSlots: 128,
+		AvailableCPU: int64(taskCount * 100), AvailableMemory: int64(taskCount * 128), AvailableLLMSlots: taskCount,
 	}}
 	schedulerController := scheduler.NewController(store, pools, "capacity/scheduler", 50, time.Minute, 30*time.Minute)
 	scheduleWall := time.Now()
@@ -181,11 +182,12 @@ func completeRuns(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store *
 	t.Helper()
 	type runRef struct {
 		runID, attemptID uuid.UUID
+		tenantID         string
 		fencingToken     int64
 		runVersion       int64
 	}
-	rows, err := pool.Query(ctx, `SELECT r.id, a.id, a.fencing_token, r.resource_version
-		FROM runs r JOIN attempts a ON a.run_id = r.id
+	rows, err := pool.Query(ctx, `SELECT r.id, a.id, r.tenant_id, a.fencing_token, r.resource_version
+		FROM runs r JOIN attempts a ON a.tenant_id = r.tenant_id AND a.run_id = r.id
 		WHERE r.phase = 'RUNNING' AND a.phase = 'PLACED'`)
 	if err != nil {
 		t.Fatalf("list runs: %v", err)
@@ -194,7 +196,7 @@ func completeRuns(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store *
 	for rows.Next() {
 		var ref runRef
 		var runID, attemptID string
-		if err := rows.Scan(&runID, &attemptID, &ref.fencingToken, &ref.runVersion); err != nil {
+		if err := rows.Scan(&runID, &attemptID, &ref.tenantID, &ref.fencingToken, &ref.runVersion); err != nil {
 			rows.Close()
 			t.Fatalf("scan run: %v", err)
 		}
@@ -228,7 +230,7 @@ func completeRuns(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store *
 			attemptVersion := int64(1)
 			for _, to := range []domain.AttemptPhase{domain.AttemptStarting, domain.AttemptRunning, domain.AttemptCompleted} {
 				attempt, err := store.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-					AttemptID: ref.attemptID, FencingToken: ref.fencingToken,
+					TenantID: ref.tenantID, AttemptID: ref.attemptID, FencingToken: ref.fencingToken,
 					ExpectedAttemptVersion: attemptVersion, To: to,
 				})
 				if err != nil {
@@ -239,7 +241,7 @@ func completeRuns(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store *
 				attemptVersion = attempt.ResourceVersion
 			}
 			if _, _, err := store.CompleteRun(ctx, kernelstore.CompleteRunInput{
-				RunID: ref.runID, AttemptID: ref.attemptID, FencingToken: ref.fencingToken,
+				TenantID: ref.tenantID, RunID: ref.runID, AttemptID: ref.attemptID, FencingToken: ref.fencingToken,
 				ExpectedRunVersion: ref.runVersion, ResultRef: "cas://sha256/capacity-result",
 			}); err != nil {
 				failures.Add(1)
@@ -425,7 +427,10 @@ func newCapacityDatabase(t *testing.T) (*pgxpool.Pool, *postgresstore.Store) {
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
+		model_calls, model_descriptors,
 		tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
