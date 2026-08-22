@@ -53,6 +53,10 @@ message Assignment {
   string phase = 14;
   string approval_id = 15;
   bytes agent_version_spec_json = 16;
+  // workflow lineage of a workflow-originated task (v1.3): "workflow_id/
+  // step_name/version", empty for standalone tasks. The adapter injects it
+  // into the fenced MCP identity so agentos.task.spawn can extend the run.
+  string workflow_lineage = 17;
 }
 enum AttemptPhase {
   ATTEMPT_PHASE_UNSPECIFIED = 0;

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,12 +131,16 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if w.window != nil {
+		lineage := parseWorkflowLineage(assignment.GetWorkflowLineage())
 		closeWindow := w.window.Open(mcp.AttemptContext{
 			TenantID: identity.GetTenantId(), TaskID: parseAssignmentUUID(assignment.GetTaskId()),
 			RunID: parseAssignmentUUID(assignment.GetRunId()), AttemptID: parseAssignmentUUID(identity.GetAttemptId()),
 			FencingToken: identity.GetFencingToken(), AgentVersionRef: assignment.GetAgentVersionRef(),
+			WorkflowID: lineage.workflowID, WorkflowVersion: lineage.workflowVersion, ParentStepName: lineage.stepName,
 			AllowedModels:           cloneExplicit(capabilities.Models),
 			AllowedMemoryNamespaces: cloneExplicit(capabilities.Memory),
+			CanSpawnTasks:           capabilities.SpawnTasks,
+			AllowedChildAgents:      cloneExplicit(capabilities.ChildAgents),
 		})
 		defer closeWindow()
 	}
@@ -257,6 +262,7 @@ func (w *Worker) target(assignment *runtimev1.Assignment) (agentversion.RuntimeT
 		return target, agent.CapabilityGrant{
 			Tools: cloneExplicit(spec.Capabilities.Tools), Models: cloneExplicit(spec.Capabilities.Models),
 			Memory: cloneExplicit(spec.Capabilities.Memory), Secrets: cloneExplicit(spec.Capabilities.Secrets),
+			SpawnTasks: spec.Capabilities.SpawnTasks, ChildAgents: cloneExplicit(spec.Capabilities.ChildAgents),
 		}, *spec.Checkpoint, nil
 	}
 	return agentversion.RuntimeTarget{}, agent.CapabilityGrant{}, agentversion.CheckpointPolicy{}, fmt.Errorf("no runtime target for class %q", assignment.GetRuntimeClass())
@@ -470,4 +476,32 @@ func artifactFromProto(reference *runtimev1.ArtifactReference) (store.ArtifactRe
 	copy(result.SHA256[:], digest)
 	result.URI, result.SizeBytes, result.MediaType = reference.GetUri(), reference.GetSizeBytes(), reference.GetMediaType()
 	return result, result.Validate()
+}
+
+// workflowLineage is the parsed workflow origin of one assignment
+// (workflow_id/step_name/version); workflowID is nil for standalone tasks.
+type workflowLineage struct {
+	workflowID      uuid.UUID
+	stepName        string
+	workflowVersion int64
+}
+
+// parseWorkflowLineage decodes the assignment's workflow lineage token.
+func parseWorkflowLineage(value string) workflowLineage {
+	if value == "" {
+		return workflowLineage{}
+	}
+	parts := strings.Split(value, "/")
+	if len(parts) != 3 {
+		return workflowLineage{}
+	}
+	id, err := uuid.Parse(parts[0])
+	if err != nil {
+		return workflowLineage{}
+	}
+	version, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return workflowLineage{}
+	}
+	return workflowLineage{workflowID: id, stepName: parts[1], workflowVersion: version}
 }

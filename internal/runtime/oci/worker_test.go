@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -446,4 +447,20 @@ func (f *fakeRuntimeStore) CompleteAttempt(_ context.Context, input store.Comple
 	f.run.Phase, f.run.ResourceVersion, f.run.ResultRef = domain.RunCompleted, f.run.ResourceVersion+1, input.Result.URI
 	f.task.Phase, f.task.ResourceVersion, f.task.ResultRef = domain.TaskSucceeded, f.task.ResourceVersion+1, input.Result.URI
 	return store.CompleteAttemptResult{Attempt: f.attempt, Run: f.run, Task: f.task}, nil
+}
+
+func (f *fakeRuntimeStore) WorkflowLineage(_ context.Context, _, taskKey string) (uuid.UUID, string, int64, bool, error) {
+	rest, ok := strings.CutPrefix(taskKey, "workflow/")
+	if !ok {
+		return uuid.Nil, "", 0, false, nil
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 {
+		return uuid.Nil, "", 0, false, nil
+	}
+	workflowID, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, "", 0, false, nil
+	}
+	return workflowID, parts[1], 1, true, nil
 }

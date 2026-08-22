@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -447,4 +448,20 @@ func newTestWorkerWithGatewayWithTTL(t *testing.T, repository store.RuntimeStore
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	return worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(connection))
+}
+
+func (f *fakeRuntimeStore) WorkflowLineage(_ context.Context, _, taskKey string) (uuid.UUID, string, int64, bool, error) {
+	rest, ok := strings.CutPrefix(taskKey, "workflow/")
+	if !ok {
+		return uuid.Nil, "", 0, false, nil
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 3 {
+		return uuid.Nil, "", 0, false, nil
+	}
+	workflowID, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, "", 0, false, nil
+	}
+	return workflowID, parts[1], 1, true, nil
 }

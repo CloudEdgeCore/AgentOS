@@ -292,6 +292,49 @@ cargo +1.97.1 test --workspace --locked
 
 CI runs the real Linux OCI/gVisor isolation suite in the `runtime-linux-leg` job. The pinned toolchain and acceptance mapping are defined in [`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md).
 
+v1.2 workflow acceptance (multi-agent orchestration: WorkflowRun with
+dependency/parallel/join/condition/retry/approval/cancel/recovery, the
+1,000-workflow dual-agent regression, and the Phase 3 scale gates — one
+1,000-step workflow, 100 concurrent workflows, orchestrator P95 < 500ms):
+
+```powershell
+go test -race -tags=integration -count=1 -timeout 60m ./e2e/workflows/
+```
+
+Counts are tunable (`AGENTOS_E2E_WORKFLOWS`, `AGENTOS_E2E_WF_STEPS`,
+`AGENTOS_E2E_CONCURRENT_WF`). The workflow orchestrator runs as its own
+process (`go run ./cmd/agentos-orchestrator -database-url $db
+-orchestrator-id dev-orchestrator -artifact-root tmp/artifacts`) and the
+Control API exposes `POST/GET /v1/workflows`, `POST /v1/workflows/{id}/cancel`
+and `POST /v1/workflows/{id}/steps/{name}/approval`.
+
+v1.3 dynamic and distributed orchestration adds fenced `agentos.task.spawn`,
+workflow-wide budgets and deadlines, recursion/fan-out/total-step guards,
+dynamic group joins (`spawn:<parent>`), and lease-based fair sharding across
+orchestrator instances. The normal integration leg covers capability denial,
+stale-attempt fencing, tenant isolation, concurrent spawn idempotency, 120
+tenant rotation, claim exclusivity, and expired-owner recovery:
+
+```powershell
+$env:AGENTOS_TEST_DATABASE_URL = "postgres://agentos:agentos-test-only@127.0.0.1:55433/agentos_test?sslmode=disable"
+go test -tags=integration -count=1 -run '^TestV13' ./internal/kernel/store/postgres
+```
+
+The opt-in lower-bound scale leg commits 10,000 dynamic steps as independent
+transactions and verifies the final 10,001-step workflow:
+
+```powershell
+$env:AGENTOS_V13_SCALE_TEST = "1"
+go test -tags=integration -count=1 -run '^TestV13DynamicSpawnScale10K$' -v ./internal/kernel/store/postgres
+go test -count=1 -run '^TestV13Orchestrates10KDynamicTasks$' -v ./internal/kernel/workflow
+```
+
+For local plaintext development, start the orchestrator with
+`-claim-lease 30s -listen 127.0.0.1:9094 -dev-mode` and give the adapter
+`-spawn-address 127.0.0.1:9094`. Production spawn transport requires the
+same worker X.509-SVID and trust bundle used by the Runtime and Gateway
+protocols; the server binds the verified SPIFFE tenant to the fenced request.
+
 v1.1 real-agent acceptance (a real Python agent, real OpenAI-compatible model
 execution, MCP tools and memory, lease-expiry recovery, 1,000-task pipeline
 and 100 fault injections):

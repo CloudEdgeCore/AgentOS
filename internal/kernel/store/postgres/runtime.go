@@ -767,21 +767,30 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 		}
 		return result, nil
 	}
+	// v1.2: an attempt that never left PLACED was claimed by no runtime —
+	// its expiry is a placement queue overflow, not an execution loss.
+	// Replacing it must not consume the task retry budget (a burst of
+	// dispatches over a small fleet would otherwise burn every task).
+	unclaimed := attempt.Phase == domain.AttemptPlaced
+	expiryCode := "LEASE_EXPIRED"
+	if unclaimed {
+		expiryCode = "LEASE_EXPIRED_UNCLAIMED"
+	}
 	failedAttempt, err := scanAttempt(tx.QueryRow(ctx, `UPDATE attempts SET phase = 'ATTEMPT_FAILED',
-		failure_code = 'LEASE_EXPIRED', failure_message = 'runtime lease expired before completion',
+		failure_code = $5, failure_message = 'runtime lease expired before completion',
 		finished_at = $1, resource_version = resource_version + 1, updated_at = $1
 		WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+attemptColumns,
-		now, in.TenantID, attempt.ID.String(), attempt.ResourceVersion))
+		now, in.TenantID, attempt.ID.String(), attempt.ResourceVersion, expiryCode))
 	if err != nil {
 		return result, classifyCAS(err, "attempt", attempt.ID, attempt.ResourceVersion)
 	}
 	if err := insertEvent(ctx, tx, in.TenantID, "Attempt", attempt.ID, failedAttempt.ResourceVersion, "AttemptFailed", map[string]any{
-		"attemptId": attempt.ID, "runId": run.ID, "failureCode": "LEASE_EXPIRED", "fencingToken": in.FencingToken,
+		"attemptId": attempt.ID, "runId": run.ID, "failureCode": expiryCode, "fencingToken": in.FencingToken,
 	}, now, s.newID()); err != nil {
 		return result, err
 	}
 
-	if attempt.Ordinal >= in.MaxAttempts {
+	if !unclaimed && attempt.Ordinal >= in.MaxAttempts {
 		updatedRun, err := scanRun(tx.QueryRow(ctx, `UPDATE runs SET phase = 'FAILED', active_attempt_id = NULL,
 			resource_version = resource_version + 1, updated_at = $1, completed_at = $1
 			WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+runColumns,

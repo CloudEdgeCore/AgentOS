@@ -379,6 +379,34 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 			now, run.ID.String(), attempt.ID.String(), in.FencingToken); err != nil {
 			return zero, classify(err)
 		}
+		// v1.2: a cleanly failed attempt finalizes the task unless the
+		// workload declared a multi-attempt retryPolicy (those keep the
+		// recovery-driven requeue path). Without this, a task whose agent
+		// exits FAILED stays RUNNING forever with no active attempt.
+		task, taskErr := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1 FOR UPDATE`,
+			run.TaskID.String()))
+		if taskErr != nil {
+			return zero, classify(taskErr)
+		}
+		if finalizesTask(task.Spec) {
+			target := domain.TaskFailed
+			if in.To == domain.AttemptCancelled {
+				target = domain.TaskCancelled
+			}
+			if err := domain.ValidateTaskTransition(task.Phase, target); err == nil {
+				if _, err := tx.Exec(ctx, `UPDATE tasks SET phase = $1,
+					resource_version = resource_version + 1, updated_at = $2 WHERE id = $3`,
+					string(target), now, task.ID.String()); err != nil {
+					return zero, classify(err)
+				}
+				if err := insertEvent(ctx, tx, task.TenantID, "Task", task.ID, task.ResourceVersion+1,
+					"Task"+title(string(target)), map[string]any{
+						"taskId": task.ID, "attemptId": attempt.ID, "trigger": "attempt." + string(in.To),
+					}, now, s.newID()); err != nil {
+					return zero, err
+				}
+			}
+		}
 	}
 	if err := insertEvent(ctx, tx, attempt.TenantID, "Attempt", attempt.ID, updated.ResourceVersion, attemptEventType(in.To), map[string]any{
 		"attemptId": attempt.ID, "runId": attempt.RunID, "phase": in.To, "fencingToken": in.FencingToken,
@@ -821,4 +849,20 @@ func scanLease(row scanner) (kernelstore.Lease, error) {
 		return lease, fmt.Errorf("parse attempt id: %w", err)
 	}
 	return lease, nil
+}
+
+// finalizesTask reports whether a failed attempt should finalize the task:
+// workloads without an explicit multi-attempt retryPolicy run exactly one
+// attempt per task (the v1.2 default); retry budgets above one keep the
+// recovery-driven requeue semantics.
+func finalizesTask(spec []byte) bool {
+	var policy struct {
+		RetryPolicy struct {
+			MaxAttempts int `json:"maxAttempts"`
+		} `json:"retryPolicy"`
+	}
+	if json.Unmarshal(spec, &policy) != nil {
+		return true
+	}
+	return policy.RetryPolicy.MaxAttempts <= 1
 }

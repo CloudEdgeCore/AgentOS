@@ -114,6 +114,13 @@ func TestManifestRuntimeAndCapabilityValidation(t *testing.T) {
 		"omitted capability class": func(manifest *Manifest) {
 			manifest.Spec.Capabilities.Secrets = nil
 		},
+		"spawn without child allowlist": func(manifest *Manifest) {
+			manifest.Spec.Capabilities.SpawnTasks = true
+		},
+		"duplicate child allowlist": func(manifest *Manifest) {
+			manifest.Spec.Capabilities.SpawnTasks = true
+			manifest.Spec.Capabilities.ChildAgents = []string{"worker@1", "worker@1"}
+		},
 		"zero container workspace": func(manifest *Manifest) {
 			manifest.Spec.Resources.WorkspaceBytes = 0
 		},

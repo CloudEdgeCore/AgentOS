@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +62,9 @@ func (s *Service) PollAssignment(ctx context.Context, request *runtimev1.PollAss
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1.PollAssignmentResponse{Assignment: assignmentProto(assignment)}, nil
+	proto := assignmentProto(assignment)
+	proto.WorkflowLineage = s.workflowLineage(ctx, assignment)
+	return &runtimev1.PollAssignmentResponse{Assignment: proto}, nil
 }
 
 func (s *Service) GetAssignment(ctx context.Context, request *runtimev1.GetAssignmentRequest) (*runtimev1.GetAssignmentResponse, error) {
@@ -73,7 +76,9 @@ func (s *Service) GetAssignment(ctx context.Context, request *runtimev1.GetAssig
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	return &runtimev1.GetAssignmentResponse{Assignment: assignmentProto(assignment)}, nil
+	proto := assignmentProto(assignment)
+	proto.WorkflowLineage = s.workflowLineage(ctx, assignment)
+	return &runtimev1.GetAssignmentResponse{Assignment: proto}, nil
 }
 
 func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1.TransitionAttemptRequest) (*runtimev1.TransitionAttemptResponse, error) {
@@ -247,6 +252,16 @@ func (s *Service) authorizePeer(ctx context.Context, tenantID, runtimeInstanceID
 		}
 	}
 	return nil
+}
+
+// workflowLineage renders the task's workflow origin token
+// (workflow_id/step_name/version) when the idempotency key names one.
+func (s *Service) workflowLineage(ctx context.Context, assignment store.RuntimeAssignment) string {
+	workflowID, stepName, version, ok, err := s.store.WorkflowLineage(ctx, assignment.Task.TenantID, assignment.Task.IdempotencyKey)
+	if err != nil || !ok {
+		return ""
+	}
+	return workflowID.String() + "/" + stepName + "/" + strconv.FormatInt(version, 10)
 }
 
 func assignmentProto(assignment store.RuntimeAssignment) *runtimev1.Assignment {

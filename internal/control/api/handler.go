@@ -118,6 +118,9 @@ type Handler struct {
 	// quotas is the v0.6 tenant aggregate consumption quota surface; when
 	// nil the quota endpoints answer 404.
 	quotas TenantQuotaStore
+	// workflows is the v1.2 orchestration surface; when nil the workflow
+	// endpoints answer 404.
+	workflows WorkflowStore
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
@@ -145,6 +148,12 @@ func WithPackageAdmission(registry *agentpkg.Registry) Option {
 // it the audit endpoints are disabled.
 func WithAuditStore(audit AuditStore) Option {
 	return func(h *Handler) { h.audit = audit }
+}
+
+// WithWorkflowStore installs the v1.2 workflow orchestration surface;
+// without it the workflow endpoints are disabled.
+func WithWorkflowStore(workflows WorkflowStore) Option {
+	return func(h *Handler) { h.workflows = workflows }
 }
 
 // WithTenantQuotaStore installs the tenant aggregate consumption quota
@@ -219,9 +228,17 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("GET /v1/quota", handler.getTenantQuota)
 	mux.HandleFunc("PUT /v1/quota", handler.setTenantQuota)
 	mux.HandleFunc("DELETE /v1/quota", handler.deleteTenantQuota)
+	mux.HandleFunc("POST /v1/workflows", handler.createWorkflow)
+	mux.HandleFunc("GET /v1/workflows/{workflowID}", handler.getWorkflow)
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/cancel", handler.cancelWorkflow)
+	mux.HandleFunc("POST /v1/workflows/{workflowID}/steps/{stepName}/approval", handler.decideWorkflowStepApproval)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /readyz", handler.ready)
 	mux.HandleFunc("GET /versionz", handler.version)
+	mux.HandleFunc("/v1/workflows", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/workflows/{workflowID}", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/workflows/{workflowID}/cancel", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/workflows/{workflowID}/steps/{stepName}/approval", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}/events", handler.methodNotAllowed)

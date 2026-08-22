@@ -20,48 +20,50 @@ func TestPromotedProtobufsRemainAlphaWireCompatible(t *testing.T) {
 
 func assertWireCompatible(t *testing.T, stable, legacy protoreflect.FileDescriptor) {
 	t.Helper()
-	if stable.Messages().Len() != legacy.Messages().Len() || stable.Services().Len() != legacy.Services().Len() || stable.Enums().Len() != legacy.Enums().Len() {
+	if stable.Messages().Len() < legacy.Messages().Len() || stable.Services().Len() < legacy.Services().Len() || stable.Enums().Len() < legacy.Enums().Len() {
 		t.Fatalf("descriptor shape drift: stable=%s legacy=%s", stable.Path(), legacy.Path())
 	}
-	for index := 0; index < stable.Messages().Len(); index++ {
-		current := stable.Messages().Get(index)
-		previous := legacy.Messages().ByName(current.Name())
-		if previous == nil || current.Fields().Len() != previous.Fields().Len() {
-			t.Fatalf("message %s shape drift", current.Name())
+	// Stable contracts may add new field numbers without breaking legacy wire
+	// readers. Every legacy shape must remain present and unchanged.
+	for index := 0; index < legacy.Messages().Len(); index++ {
+		previous := legacy.Messages().Get(index)
+		current := stable.Messages().ByName(previous.Name())
+		if current == nil || current.Fields().Len() < previous.Fields().Len() {
+			t.Fatalf("message %s shape drift", previous.Name())
 		}
-		for fieldIndex := 0; fieldIndex < current.Fields().Len(); fieldIndex++ {
-			field := current.Fields().Get(fieldIndex)
-			old := previous.Fields().ByNumber(field.Number())
-			if old == nil || field.Name() != old.Name() || field.Kind() != old.Kind() || field.Cardinality() != old.Cardinality() {
-				t.Fatalf("message %s field %d wire drift", current.Name(), field.Number())
+		for fieldIndex := 0; fieldIndex < previous.Fields().Len(); fieldIndex++ {
+			old := previous.Fields().Get(fieldIndex)
+			field := current.Fields().ByNumber(old.Number())
+			if field == nil || field.Name() != old.Name() || field.Kind() != old.Kind() || field.Cardinality() != old.Cardinality() {
+				t.Fatalf("message %s field %d wire drift", previous.Name(), old.Number())
 			}
 		}
 	}
-	for index := 0; index < stable.Services().Len(); index++ {
-		service := stable.Services().Get(index)
-		old := legacy.Services().ByName(service.Name())
-		if old == nil || service.Methods().Len() != old.Methods().Len() {
-			t.Fatalf("service %s drift", service.Name())
+	for index := 0; index < legacy.Services().Len(); index++ {
+		old := legacy.Services().Get(index)
+		service := stable.Services().ByName(old.Name())
+		if service == nil || service.Methods().Len() < old.Methods().Len() {
+			t.Fatalf("service %s drift", old.Name())
 		}
-		for methodIndex := 0; methodIndex < service.Methods().Len(); methodIndex++ {
-			method := service.Methods().Get(methodIndex)
-			previous := old.Methods().ByName(method.Name())
-			if previous == nil || method.Input().Name() != previous.Input().Name() || method.Output().Name() != previous.Output().Name() {
-				t.Fatalf("service %s method %s drift", service.Name(), method.Name())
+		for methodIndex := 0; methodIndex < old.Methods().Len(); methodIndex++ {
+			previous := old.Methods().Get(methodIndex)
+			method := service.Methods().ByName(previous.Name())
+			if method == nil || method.Input().Name() != previous.Input().Name() || method.Output().Name() != previous.Output().Name() {
+				t.Fatalf("service %s method %s drift", old.Name(), previous.Name())
 			}
 		}
 	}
-	for index := 0; index < stable.Enums().Len(); index++ {
-		enum := stable.Enums().Get(index)
-		old := legacy.Enums().ByName(enum.Name())
-		if old == nil || enum.Values().Len() != old.Values().Len() {
-			t.Fatalf("enum %s drift", enum.Name())
+	for index := 0; index < legacy.Enums().Len(); index++ {
+		old := legacy.Enums().Get(index)
+		enum := stable.Enums().ByName(old.Name())
+		if enum == nil || enum.Values().Len() < old.Values().Len() {
+			t.Fatalf("enum %s drift", old.Name())
 		}
-		for valueIndex := 0; valueIndex < enum.Values().Len(); valueIndex++ {
-			value := enum.Values().Get(valueIndex)
-			previous := old.Values().ByNumber(value.Number())
-			if previous == nil || value.Name() != previous.Name() {
-				t.Fatalf("enum %s value %d drift", enum.Name(), value.Number())
+		for valueIndex := 0; valueIndex < old.Values().Len(); valueIndex++ {
+			previous := old.Values().Get(valueIndex)
+			value := enum.Values().ByNumber(previous.Number())
+			if value == nil || value.Name() != previous.Name() {
+				t.Fatalf("enum %s value %d drift", old.Name(), previous.Number())
 			}
 		}
 	}
