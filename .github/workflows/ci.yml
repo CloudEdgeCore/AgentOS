@@ -38,6 +38,9 @@ jobs:
       AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
       AGENTOS_WASMTIME_RUNTIME: ${{ github.workspace }}/target/debug/agentos-runtime-wasm
       AGENTOS_WASMTIME_PACKAGE_ROOT: ${{ github.workspace }}/target/conformance
+      # v1.1 acceptance evidence: the e2e/single-agent suite launches the
+      # real Python agent from the repository tree.
+      AGENTOS_E2E_PYTHON: python3
 
     steps:
       - name: Check out source

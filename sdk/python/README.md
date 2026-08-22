@@ -5,7 +5,7 @@ Status: **planned** — part of the v0.9 Platform slice, not yet implemented.
 Purpose: Agent development, Evals, data processing and test tooling for the
 Agent OS control plane.
 
-Boundary rules (per the [tech baseline](../docs/Agent_OS_技术选型与工程基线.md)):
+Boundary rules (per the tech baseline):
 
 - Python never enters the Kernel trusted computing base.
 - Python Agents must run inside a `RuntimeClass`; they are never loaded as

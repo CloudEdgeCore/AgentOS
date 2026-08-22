@@ -1,0 +1,197 @@
+"""The real AgentOS reference agent (v1.1 Phase 1.1).
+
+A model-driven agent loop that runs entirely under AgentOS governance: model
+calls go through the brokered Model Gateway MCP tool (policy, budget, exact
+token/cost settlement, audit), tool calls through the tenant tool registry on
+the same MCP endpoint, and memory recall/write through the brokered memory
+tools. The provider credential never reaches this process. Checkpoints carry
+the conversation; restore resumes the loop from the recorded turns.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import threading
+import time
+from typing import Any, Callable
+
+from .mcp_client import MCPClient, MCPError, MCPToolError
+
+SCHEMA_VERSION = "agentos.real-agent/v1"
+
+
+class RealAgent:
+    """AgentRuntime implementation wiring model, tools and memory via MCP."""
+
+    def __init__(
+        self,
+        mcp_url: str | None = None,
+        model_ref: str | None = None,
+        memory_namespace: str | None = None,
+        max_turns: int = 8,
+    ) -> None:
+        self.mcp_url = (mcp_url or os.environ.get("AGENTOS_MCP_URL") or "").strip()
+        self.model_ref = (model_ref or os.environ.get("AGENTOS_MODEL_REF") or "").strip()
+        self.memory_namespace = (memory_namespace or os.environ.get("AGENTOS_MEMORY_NAMESPACE") or "runs").strip()
+        self.max_turns = max_turns or int(os.environ.get("AGENTOS_MAX_TURNS", "8"))
+        if not self.mcp_url:
+            raise ValueError("AGENTOS_MCP_URL is required (the runtime injects the loopback MCP endpoint)")
+        if not self.model_ref:
+            raise ValueError("a model reference is required (AGENTOS_MODEL_REF)")
+        # Restored conversations keyed by execution id; cleared after use.
+        self._restored: dict[str, dict[str, Any]] = {}
+        # Live conversation snapshots for concurrent checkpoint requests.
+        self._lock = threading.Lock()
+        self._live: dict[str, dict[str, Any]] = {}
+
+    # -- AgentRuntime protocol -------------------------------------------------
+
+    def run(self, request: dict[str, Any], emit: Callable[[str, Any], None], stop_event: threading.Event) -> Any:
+        execution_id = request["executionId"]
+        goal = request["goal"]
+        mcp = MCPClient(self.mcp_url, execution_id=execution_id)
+        mcp.initialize()
+
+        state = self._restored.pop(execution_id, None)
+        resumed = state is not None and state.get("messages")
+        messages: list[dict[str, Any]] = (
+            list(state["messages"]) if resumed else [{"role": "system", "content": _system_prompt()}]
+        )
+        if not resumed:
+            recalled = self._recall(mcp, goal)
+            emit("memory.recalled", {"records": len(recalled)})
+            context = goal
+            if recalled:
+                facts = "; ".join(record["content"] for record in recalled[:3])
+                context = f"{goal}\n\nRelevant memory:\n{facts}"
+            messages.append({"role": "user", "content": context})
+
+        tool_calls_made: list[dict[str, Any]] = []
+        usage_totals = {"inputTokens": 0, "outputTokens": 0, "costUsd": 0.0}
+        final = None
+        turns = 0
+        while turns < self.max_turns:
+            _check_cancel(stop_event)
+            turns += 1
+            response = self._invoke_model(mcp, messages)
+            usage_totals["inputTokens"] += response.get("usage", {}).get("inputTokens", 0)
+            usage_totals["outputTokens"] += response.get("usage", {}).get("outputTokens", 0)
+            usage_totals["costUsd"] += response.get("costUsd", 0.0)
+            emit("model.invoked", {
+                "turn": turns, "modelRef": response.get("modelRef", self.model_ref),
+                "usage": response.get("usage", {}), "costUsd": response.get("costUsd", 0.0),
+                "providerRequestId": response.get("providerRequestId", ""),
+            })
+            requested = response.get("toolCalls") or []
+            if not requested:
+                final = response.get("content", "")
+                self._snapshot(execution_id, messages, final)
+                break
+            messages.append({
+                "role": "assistant", "content": response.get("content", ""),
+                "toolCalls": requested,
+            })
+            for call in requested:
+                _check_cancel(stop_event)
+                result = self._call_tool(mcp, call)
+                tool_calls_made.append({"id": call.get("id"), "name": call.get("name")})
+                emit("tool.called", {"name": call.get("name"), "turn": turns})
+                messages.append({
+                    "role": "tool", "toolCallId": call.get("id", ""),
+                    "content": json.dumps(result)[:65536],
+                })
+        if final is None:
+            raise RuntimeError(f"no final answer within {self.max_turns} turns")
+
+        memory_id = self._remember(mcp, execution_id, goal, final)
+        emit("memory.written", {"id": memory_id, "namespace": self.memory_namespace})
+        with self._lock:
+            self._live.pop(execution_id, None)
+        return {
+            "answer": final,
+            "turns": turns,
+            "resumed": resumed,
+            "toolCalls": tool_calls_made,
+            "modelUsage": usage_totals,
+            "memoryRecordId": memory_id,
+        }
+
+    def checkpoint(self, execution_id: str) -> dict[str, Any]:
+        with self._lock:
+            state = dict(self._live.get(execution_id, {}))
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "state": state,
+            "createdAt": _timestamp(),
+        }
+
+    def _snapshot(self, execution_id: str, messages: list[dict[str, Any]], final: str | None) -> None:
+        with self._lock:
+            self._live[execution_id] = {"messages": copy.deepcopy(messages), "final": final}
+
+    def restore(self, execution_id: str, checkpoint: dict[str, Any]) -> None:
+        if checkpoint.get("schemaVersion") != SCHEMA_VERSION:
+            raise ValueError("incompatible checkpoint schema")
+        self._restored[execution_id] = dict(checkpoint.get("state") or {})
+
+    # -- internals ---------------------------------------------------------------
+
+    def _invoke_model(self, mcp: MCPClient, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return mcp.call_tool("agentos.model.invoke", {
+                "modelRef": self.model_ref,
+                "messages": messages,
+                "stream": True,
+            })
+        except MCPToolError as error:
+            # Structured gateway outcomes (budget stop, provider failure) end
+            # the run with the code as the failure reason.
+            raise RuntimeError(f"model invocation failed: {error.payload.get('error', str(error))}") from error
+
+    def _call_tool(self, mcp: MCPClient, call: dict[str, Any]) -> Any:
+        name = call.get("name", "")
+        try:
+            arguments = json.loads(call.get("arguments") or "{}")
+        except ValueError as error:
+            raise RuntimeError(f"tool {name} returned malformed arguments") from error
+        try:
+            return mcp.call_tool(name, arguments)
+        except MCPToolError as error:
+            return {"toolError": error.payload}
+
+    def _recall(self, mcp: MCPClient, goal: str) -> list[dict[str, Any]]:
+        try:
+            result = mcp.call_tool("agentos.memory.search", {"query": goal[:200], "limit": 3})
+        except (MCPToolError, MCPError):
+            return []
+        return list(result.get("records", []))
+
+    def _remember(self, mcp: MCPClient, execution_id: str, goal: str, final: str) -> str:
+        try:
+            result = mcp.call_tool("agentos.memory.put", {
+                "namespace": self.memory_namespace,
+                "key": f"run/{execution_id}",
+                "contentType": "application/json",
+                "content": json.dumps({"goal": goal, "answer": final}),
+            })
+            return str(result.get("id", ""))
+        except (MCPToolError, MCPError):
+            return ""
+
+
+def _system_prompt() -> str:
+    return (
+        "You are an AgentOS-governed agent. Answer the user's goal. "
+        "When a tool would help, request it via tool calls; otherwise answer directly."
+    )
+
+
+def _check_cancel(stop_event: threading.Event) -> None:
+    if stop_event.is_set():
+        raise RuntimeError("execution cancelled")
+
+
+def _timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

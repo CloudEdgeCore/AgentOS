@@ -22,7 +22,8 @@ func TestIdentitySlotPublishesAndClearsFencedIdentity(t *testing.T) {
 	}
 	slot.Set(ctx)
 	resolved, err := slot.Resolve(context.Background())
-	if err != nil || resolved != ctx {
+	if err != nil || resolved.TenantID != ctx.TenantID || resolved.AttemptID != ctx.AttemptID ||
+		resolved.FencingToken != ctx.FencingToken || len(resolved.AllowedModels) != 0 {
 		t.Fatalf("resolved = %+v err=%v, want the published context", resolved, err)
 	}
 	slot.Clear()

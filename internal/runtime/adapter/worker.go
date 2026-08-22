@@ -17,6 +17,7 @@ import (
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 	"github.com/CloudEdgeCore/AgentOS/internal/runtime/leasekeeper"
 	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 	"github.com/google/uuid"
@@ -37,6 +38,16 @@ type ArtifactStore interface {
 	Open(context.Context, string, store.ArtifactReference) (io.ReadCloser, error)
 }
 
+// ExecutionWindow receives the fenced execution context for the duration of
+// one assignment: the runtime opens the sandbox Agent's brokered access
+// (MCP) when the attempt is RUNNING and closes it on every exit path
+// (default deny outside execution windows). Open returns the closer the
+// worker defers, so concurrent workers sharing one Agent endpoint bind
+// their identities per attempt.
+type ExecutionWindow interface {
+	Open(mcp.AttemptContext) func()
+}
+
 type Worker struct {
 	control           runtimev1.RuntimeControlServiceClient
 	artifacts         ArtifactStore
@@ -46,6 +57,15 @@ type Worker struct {
 	runtimeInstanceID string
 	heartbeatTTL      time.Duration
 	pollInterval      time.Duration
+	window            ExecutionWindow
+}
+
+// WithExecutionWindow attaches the sandbox brokered-access window (the
+// loopback MCP identity slot). The worker publishes the fenced identity and
+// the AgentVersion capability grants for the duration of each assignment.
+func (w *Worker) WithExecutionWindow(window ExecutionWindow) *Worker {
+	w.window = window
+	return w
 }
 
 func NewWorker(
@@ -108,6 +128,16 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING, "", "")
 	if err != nil {
 		return false, err
+	}
+	if w.window != nil {
+		closeWindow := w.window.Open(mcp.AttemptContext{
+			TenantID: identity.GetTenantId(), TaskID: parseAssignmentUUID(assignment.GetTaskId()),
+			RunID: parseAssignmentUUID(assignment.GetRunId()), AttemptID: parseAssignmentUUID(identity.GetAttemptId()),
+			FencingToken: identity.GetFencingToken(), AgentVersionRef: assignment.GetAgentVersionRef(),
+			AllowedModels:           cloneExplicit(capabilities.Models),
+			AllowedMemoryNamespaces: cloneExplicit(capabilities.Memory),
+		})
+		defer closeWindow()
 	}
 	heartbeat, err := w.heartbeat(ctx, assignment)
 	if err != nil {
@@ -236,6 +266,16 @@ func cloneExplicit(values []string) []string {
 	cloned := make([]string, len(values))
 	copy(cloned, values)
 	return cloned
+}
+
+// parseAssignmentUUID converts proto string ids; a malformed id resolves to
+// the zero UUID and the brokered tools deny closed on it.
+func parseAssignmentUUID(value string) uuid.UUID {
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return uuid.Nil
+	}
+	return parsed
 }
 
 func (w *Worker) wait(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error) (agent.Result, []agent.Event, error) {

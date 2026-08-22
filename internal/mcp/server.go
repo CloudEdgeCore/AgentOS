@@ -12,6 +12,20 @@ import (
 	"sync/atomic"
 )
 
+// ExecutionHeader carries the agent's execution id (the Runtime Interface
+// executionId, i.e. the attempt id) so a shared endpoint can scope brokered
+// calls to one open execution window.
+const ExecutionHeader = "X-Agentos-Execution"
+
+type executionContextKey struct{}
+
+// ExecutionID returns the execution id of the inbound call, empty when the
+// agent did not report one.
+func ExecutionID(ctx context.Context) string {
+	value, _ := ctx.Value(executionContextKey{}).(string)
+	return value
+}
+
 // Handler implements the MCP methods beyond the core lifecycle. Params are
 // raw JSON for the method; implementations parse them strictly.
 type Handler interface {
@@ -88,6 +102,9 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if int64(len(body)) > s.maxBodyBytes {
 		writeError(writer, wantsSSE, nil, &Error{Code: codeInvalidRequest, Message: "request body too large"})
 		return
+	}
+	if execution := strings.TrimSpace(request.Header.Get(ExecutionHeader)); execution != "" {
+		request = request.WithContext(context.WithValue(request.Context(), executionContextKey{}, execution))
 	}
 	parsed, rpcErr := ParseRequest(body)
 	if rpcErr != nil {

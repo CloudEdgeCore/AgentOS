@@ -8,7 +8,7 @@ Purpose: the executable compatibility contract of Agent OS. The kit runs the
 same published `AgentVersion` across providers (Go reference, Wasmtime,
 future OCI/gVisor) and verifies protocol, schema, state-machine and
 compatibility behavior. Any P0 middleware replacement must pass the same suite
-before it is accepted (per the [tech baseline](docs/Agent_OS_技术选型与工程基线.md) §18).
+before it is accepted (per the tech baseline §18).
 
 Planned contents:
 
