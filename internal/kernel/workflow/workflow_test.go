@@ -1,0 +1,698 @@
+package workflow
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/google/uuid"
+)
+
+func mustSpec(t *testing.T, document string) []kernelstore.CreateWorkflowStepInput {
+	t.Helper()
+	steps, err := DecodeSpec([]byte(document))
+	if err != nil {
+		t.Fatalf("decode spec: %v", err)
+	}
+	return steps
+}
+
+const validTwoStepSpec = `{
+  "defaultTaskSpec": {"budget":{"tokens":500,"costUsd":1,"toolCalls":10,"wallSeconds":60},"placement":{"runtimeClasses":["adapter"]}},
+  "steps": [
+    {"name":"research","agentVersionRef":"research-agent@1","goal":"research the topic"},
+    {"name":"review","agentVersionRef":"review-agent@1","goal":"review the findings","dependsOn":["research"]}
+  ]
+}`
+
+func TestDecodeSpecAcceptsValidDAG(t *testing.T) {
+	steps := mustSpec(t, validTwoStepSpec)
+	if len(steps) != 2 || steps[0].Name != "research" || steps[1].DependsOn[0] != "research" {
+		t.Fatalf("steps = %+v", steps)
+	}
+	merged := objectMap(steps[0].Spec)
+	if merged["budget"] == nil || merged["placement"] == nil {
+		t.Fatalf("default task spec not merged: %s", steps[0].Spec)
+	}
+	overlay := mustSpec(t, `{
+	  "defaultTaskSpec": {"placement":{"runtimeClasses":["adapter"]}},
+	  "steps": [{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{"priority":70,"placement":{"runtimeClasses":["oci"]}}}]
+	}`)[0]
+	overlayMap := objectMap(overlay.Spec)
+	if string(overlayMap["placement"]) != `{"runtimeClasses":["oci"]}` {
+		t.Fatalf("step overlay must win: %s", overlayMap["placement"])
+	}
+	if overlayMap["priority"] == nil {
+		t.Fatalf("default keys retained under overlay: %s", overlay.Spec)
+	}
+}
+
+func TestDecodeSpecRejectsInvalidGraphs(t *testing.T) {
+	cases := map[string]string{
+		"cycle":              `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","dependsOn":["b"]},{"name":"b","agentVersionRef":"x@1","goal":"g","dependsOn":["a"]}]}`,
+		"self dependency":    `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","dependsOn":["a"]}]}`,
+		"unknown dependency": `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","dependsOn":["ghost"]}]}`,
+		"duplicate names":    `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g"},{"name":"a","agentVersionRef":"x@1","goal":"g"}]}`,
+		"no spec anywhere":   `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g"}]}`,
+		"bad name":           `{"steps":[{"name":"A!","agentVersionRef":"x@1","goal":"g","spec":{}}]}`,
+		"no steps":           `{"steps":[]}`,
+		"condition without dep": `{"steps":[
+			{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{}},
+			{"name":"b","agentVersionRef":"x@1","goal":"g","spec":{},"condition":{"step":"a","outputEquals":"x"}}]}`,
+		"condition two predicates": `{"steps":[
+			{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{}},
+			{"name":"b","agentVersionRef":"x@1","goal":"g","spec":{},"dependsOn":["a"],"condition":{"step":"a","outputEquals":"x","outputContains":"y"}}]}`,
+		"retry out of bounds": `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{},"retry":{"maxAttempts":11}}]}`,
+		"unknown field":       `{"steps":[{"name":"a","agentVersionRef":"x@1","goal":"g","spec":{},"bogus":true}]}`,
+	}
+	for name, document := range cases {
+		if _, err := DecodeSpec([]byte(document)); err == nil {
+			t.Errorf("%s: expected rejection", name)
+		} else {
+			t.Logf("%s rejected: %v", name, err)
+		}
+	}
+}
+
+// ---- engine fakes -----------------------------------------------------------
+
+type fakeWorkflowStore struct {
+	mu        sync.Mutex
+	workflows map[uuid.UUID]*kernelstore.Workflow
+	steps     map[uuid.UUID]map[string]*kernelstore.WorkflowStep
+	artifacts map[string]kernelstore.ArtifactReference
+}
+
+func newFakeWorkflowStore() *fakeWorkflowStore {
+	return &fakeWorkflowStore{
+		workflows: map[uuid.UUID]*kernelstore.Workflow{},
+		steps:     map[uuid.UUID]map[string]*kernelstore.WorkflowStep{},
+		artifacts: map[string]kernelstore.ArtifactReference{},
+	}
+}
+
+func (f *fakeWorkflowStore) CreateWorkflow(_ context.Context, in kernelstore.CreateWorkflowInput) (kernelstore.CreateWorkflowResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, existing := range f.workflows {
+		if existing.TenantID == in.TenantID && existing.IdempotencyKey == in.IdempotencyKey {
+			return kernelstore.CreateWorkflowResult{Workflow: *existing, Existing: true}, nil
+		}
+	}
+	workflow := kernelstore.Workflow{
+		ID: in.ID, TenantID: in.TenantID, Namespace: in.Namespace, IdempotencyKey: in.IdempotencyKey,
+		Goal: in.Goal, Spec: in.Spec, Status: kernelstore.WorkflowPending, ResourceVersion: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	f.workflows[workflow.ID] = &workflow
+	f.steps[workflow.ID] = map[string]*kernelstore.WorkflowStep{}
+	for ordinal, step := range in.Steps {
+		stored := kernelstore.WorkflowStep{
+			ID: uuid.New(), TenantID: in.TenantID, WorkflowID: workflow.ID, Name: step.Name,
+			Ordinal: ordinal, Status: kernelstore.StepPending, ResourceVersion: 1,
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+		f.steps[workflow.ID][step.Name] = &stored
+	}
+	return kernelstore.CreateWorkflowResult{Workflow: workflow}, nil
+}
+
+func (f *fakeWorkflowStore) GetWorkflow(_ context.Context, tenantID string, id uuid.UUID) (kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[id]
+	if !ok || workflow.TenantID != tenantID {
+		return kernelstore.Workflow{}, kernelstore.ErrWorkflowNotFound
+	}
+	return *workflow, nil
+}
+
+func (f *fakeWorkflowStore) ListActiveWorkflows(context.Context, int) ([]kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	active := []kernelstore.Workflow{}
+	for _, workflow := range f.workflows {
+		if !workflow.Status.Terminal() {
+			active = append(active, *workflow)
+		}
+	}
+	return active, nil
+}
+
+func (f *fakeWorkflowStore) ListWorkflowSteps(_ context.Context, _ string, workflowID uuid.UUID) ([]kernelstore.WorkflowStep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	steps := []kernelstore.WorkflowStep{}
+	for _, step := range f.steps[workflowID] {
+		steps = append(steps, *step)
+	}
+	for i := 1; i < len(steps); i++ {
+		for j := i; j > 0 && steps[j].Ordinal < steps[j-1].Ordinal; j-- {
+			steps[j], steps[j-1] = steps[j-1], steps[j]
+		}
+	}
+	return steps, nil
+}
+
+func (f *fakeWorkflowStore) TransitionWorkflow(_ context.Context, in kernelstore.TransitionWorkflowInput) (kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[in.WorkflowID]
+	if !ok || workflow.TenantID != in.TenantID {
+		return kernelstore.Workflow{}, kernelstore.ErrWorkflowNotFound
+	}
+	if workflow.ResourceVersion != in.ExpectedVersion {
+		return kernelstore.Workflow{}, fmt.Errorf("%w: workflow", kernelstore.ErrVersionConflict)
+	}
+	if !kernelstore.CanTransitionWorkflow(workflow.Status, in.To) {
+		return kernelstore.Workflow{}, fmt.Errorf("%w: %s -> %s", kernelstore.ErrInvalidTransition, workflow.Status, in.To)
+	}
+	workflow.Status = in.To
+	workflow.FailureCode = in.FailureCode
+	workflow.ResourceVersion++
+	workflow.UpdatedAt = time.Now()
+	return *workflow, nil
+}
+
+func (f *fakeWorkflowStore) TransitionWorkflowStep(_ context.Context, in kernelstore.TransitionWorkflowStepInput) (kernelstore.WorkflowStep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	step, ok := f.steps[in.WorkflowID][in.StepName]
+	if !ok {
+		return kernelstore.WorkflowStep{}, kernelstore.ErrStepNotFound
+	}
+	if step.ResourceVersion != in.ExpectedVersion {
+		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: step", kernelstore.ErrVersionConflict)
+	}
+	if !kernelstore.CanTransitionStep(step.Status, in.To) {
+		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: %s -> %s", kernelstore.ErrInvalidTransition, step.Status, in.To)
+	}
+	step.Status = in.To
+	if in.TaskID != nil {
+		step.TaskID = in.TaskID
+	}
+	if in.AttemptCount != nil {
+		step.AttemptCount = *in.AttemptCount
+	}
+	if in.ResultSummary != nil {
+		step.ResultSummary = in.ResultSummary
+	}
+	step.FailureCode = in.FailureCode
+	step.ResourceVersion++
+	step.UpdatedAt = time.Now()
+	return *step, nil
+}
+
+func (f *fakeWorkflowStore) DecideWorkflowStepApproval(_ context.Context, in kernelstore.DecideWorkflowStepApprovalInput) (kernelstore.WorkflowStep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	step, ok := f.steps[in.WorkflowID][in.StepName]
+	if !ok {
+		return kernelstore.WorkflowStep{}, kernelstore.ErrStepNotFound
+	}
+	if step.ResourceVersion != in.ExpectedVersion || step.Status != kernelstore.StepWaitingApproval || step.DecidedBy != "" {
+		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: approval state", kernelstore.ErrInvalidTransition)
+	}
+	if in.Approved {
+		step.DecidedBy = "approved"
+	} else {
+		step.DecidedBy = "rejected"
+	}
+	step.DecidedAt = &[]time.Time{time.Now()}[0]
+	step.ResourceVersion++
+	return *step, nil
+}
+
+func (f *fakeWorkflowStore) RequestWorkflowCancellation(_ context.Context, tenantID string, workflowID uuid.UUID, expectedVersion int64) (kernelstore.Workflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	workflow, ok := f.workflows[workflowID]
+	if !ok || workflow.TenantID != tenantID {
+		return kernelstore.Workflow{}, kernelstore.ErrWorkflowNotFound
+	}
+	if workflow.ResourceVersion != expectedVersion || workflow.Status.Terminal() {
+		return kernelstore.Workflow{}, fmt.Errorf("%w: cancellation state", kernelstore.ErrInvalidTransition)
+	}
+	if workflow.CancelRequestedAt == nil {
+		now := time.Now()
+		workflow.CancelRequestedAt = &now
+		workflow.ResourceVersion++
+	}
+	return *workflow, nil
+}
+
+func (f *fakeWorkflowStore) ArtifactMetadata(_ context.Context, _, _ string) ([]byte, int64, string, error) {
+	return make([]byte, 32), 0, "application/json", nil
+}
+
+type fakeTaskPipeline struct {
+	mu    sync.Mutex
+	tasks map[uuid.UUID]*kernelstore.Task
+	byKey map[string]uuid.UUID
+	goals map[uuid.UUID]string
+	// failFirstAttempt marks idempotency keys whose first task fails.
+	failFirstAttempt map[string]bool
+	attemptsByKey    map[string]int
+}
+
+func newFakeTaskPipeline() *fakeTaskPipeline {
+	return &fakeTaskPipeline{
+		tasks: map[uuid.UUID]*kernelstore.Task{}, byKey: map[string]uuid.UUID{},
+		goals: map[uuid.UUID]string{}, failFirstAttempt: map[string]bool{}, attemptsByKey: map[string]int{},
+	}
+}
+
+func (f *fakeTaskPipeline) CreateTask(_ context.Context, in kernelstore.CreateTaskInput) (kernelstore.CreateTaskResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, replay := f.byKey[in.IdempotencyKey]; replay {
+		return kernelstore.CreateTaskResult{Task: *f.tasks[id], Existing: true}, nil
+	}
+	phase := domain.TaskQueued
+	f.attemptsByKey[in.IdempotencyKey]++
+	if f.failFirstAttempt[in.IdempotencyKey] && f.attemptsByKey[in.IdempotencyKey] == 1 {
+		phase = domain.TaskQueued // the harness flips phases explicitly
+	}
+	task := kernelstore.Task{
+		ID: in.ID, TenantID: in.TenantID, AgentVersionRef: in.AgentVersionRef, Goal: in.Goal,
+		Phase: phase, ResourceVersion: 1,
+	}
+	if phase == domain.TaskQueued {
+		// Default script: succeed once observed.
+		task.Phase = domain.TaskSucceeded
+		task.ResultRef = "file://results/" + in.ID.String()
+	}
+	f.tasks[task.ID] = &task
+	f.byKey[in.IdempotencyKey] = task.ID
+	f.goals[task.ID] = in.Goal
+	return kernelstore.CreateTaskResult{Task: task}, nil
+}
+
+func (f *fakeTaskPipeline) GetTask(_ context.Context, _ string, id uuid.UUID) (kernelstore.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	task, ok := f.tasks[id]
+	if !ok {
+		return kernelstore.Task{}, kernelstore.ErrNotFound
+	}
+	return *task, nil
+}
+
+func (f *fakeTaskPipeline) RequestTaskCancellation(_ context.Context, _ string, id uuid.UUID, expectedVersion int64) (kernelstore.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	task, ok := f.tasks[id]
+	if !ok || task.ResourceVersion != expectedVersion {
+		return kernelstore.Task{}, fmt.Errorf("%w: task", kernelstore.ErrVersionConflict)
+	}
+	if !task.Phase.Terminal() {
+		task.Phase = domain.TaskCancelled
+		task.ResourceVersion++
+	}
+	return *task, nil
+}
+
+// complete flips a task terminal-succeeded (the harness drives outcomes).
+func (f *fakeTaskPipeline) complete(id uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tasks[id].Phase = domain.TaskSucceeded
+	f.tasks[id].ResultRef = "file://results/" + id.String()
+}
+
+func (f *fakeTaskPipeline) fail(id uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tasks[id].Phase = domain.TaskFailed
+	f.tasks[id].ResourceVersion++
+}
+
+func (f *fakeTaskPipeline) pause(id uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tasks[id].Phase = domain.TaskRunning
+}
+
+type fakeResultReader struct{}
+
+func (fakeResultReader) Open(_ context.Context, _ string, _ kernelstore.ArtifactReference) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader(`{"output":{"answer":"research says 42"}}`)), nil
+}
+
+func newEngine(workflows *fakeWorkflowStore, tasks *fakeTaskPipeline) *Controller {
+	return NewController(workflows, tasks, fakeResultReader{}, "test-orchestrator", 16)
+}
+
+func createWorkflowForTest(t *testing.T, store *fakeWorkflowStore, spec string) kernelstore.Workflow {
+	t.Helper()
+	steps := mustSpec(t, spec)
+	created, err := store.CreateWorkflow(context.Background(), kernelstore.CreateWorkflowInput{
+		ID: uuid.New(), TenantID: "tenant-1", Namespace: "default", IdempotencyKey: "wf-" + uuid.NewString(),
+		Goal: "workflow goal", Spec: []byte(spec), Steps: steps,
+	})
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	return created.Workflow
+}
+
+func reconcileUntil(t *testing.T, engine *Controller, predicate func() bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := engine.Reconcile(context.Background()); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if predicate() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition not reached within %s", timeout)
+}
+
+func TestEngineRunsSequentialDependencyChain(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, validTwoStepSpec)
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowSucceeded {
+		t.Fatalf("workflow status = %s", final.Status)
+	}
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if len(steps) != 2 || steps[0].Status != kernelstore.StepSucceeded || steps[1].Status != kernelstore.StepSucceeded {
+		t.Fatalf("steps = %+v", steps)
+	}
+	// A's result reached B's goal through AgentOS.
+	if !strings.Contains(tasks.goals[*steps[1].TaskID], "research says 42") {
+		t.Fatalf("downstream goal missing upstream output: %q", tasks.goals[*steps[1].TaskID])
+	}
+	if !strings.Contains(tasks.goals[*steps[1].TaskID], "Upstream result [research]") {
+		t.Fatalf("downstream goal not annotated: %q", tasks.goals[*steps[1].TaskID])
+	}
+	// Exactly one task per step.
+	if len(tasks.byKey) != 2 {
+		t.Fatalf("tasks created = %d, want 2", len(tasks.byKey))
+	}
+}
+
+func TestEngineSkipsDependentsOfFailedStep(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, validTwoStepSpec)
+
+	// research's task fails; review must never execute.
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[0].Status == kernelstore.StepRunning
+	}, 5*time.Second)
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	tasks.fail(*steps[0].TaskID)
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	steps, _ = store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if steps[0].Status != kernelstore.StepFailed || steps[1].Status != kernelstore.StepSkipped {
+		t.Fatalf("steps = %s/%s", steps[0].Status, steps[1].Status)
+	}
+	if steps[1].FailureCode != "UPSTREAM_NOT_SUCCEEDED" {
+		t.Fatalf("skip code = %s", steps[1].FailureCode)
+	}
+	if steps[1].TaskID != nil {
+		t.Fatal("skipped step must not have a task")
+	}
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowFailed {
+		t.Fatalf("workflow = %s", final.Status)
+	}
+}
+
+func TestEngineRetriesSingleStepWithoutTouchingSiblings(t *testing.T) {
+	spec := `{
+	  "defaultTaskSpec": {"budget":{"tokens":100}},
+	  "steps": [
+	    {"name":"a","agentVersionRef":"x@1","goal":"stable"},
+	    {"name":"flaky","agentVersionRef":"x@1","goal":"flaky step","dependsOn":["a"],"retry":{"maxAttempts":2}}
+	  ]
+	}`
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[1].Status == kernelstore.StepRunning
+	}, 5*time.Second)
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	siblingTask := *steps[0].TaskID
+	flakyTask := *steps[1].TaskID
+	tasks.fail(flakyTask)
+
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[1].Status == kernelstore.StepRunning && steps[1].AttemptCount == 2
+	}, 5*time.Second)
+	steps, _ = store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if steps[0].Status != kernelstore.StepSucceeded || *steps[0].TaskID != siblingTask {
+		t.Fatalf("completed sibling disturbed: %+v", steps[0])
+	}
+	if *steps[1].TaskID == flakyTask {
+		t.Fatal("retry must create a fresh task")
+	}
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowSucceeded {
+		t.Fatalf("workflow = %s", final.Status)
+	}
+}
+
+func TestEngineParallelJoinAndCondition(t *testing.T) {
+	spec := `{
+	  "defaultTaskSpec": {"budget":{"tokens":100}},
+	  "steps": [
+	    {"name":"left","agentVersionRef":"x@1","goal":"left"},
+	    {"name":"right","agentVersionRef":"x@1","goal":"right"},
+	    {"name":"join","agentVersionRef":"x@1","goal":"join both","dependsOn":["left","right"]},
+	    {"name":"conditional","agentVersionRef":"x@1","goal":"only when left says 42","dependsOn":["left"],"condition":{"step":"left","outputContains":"42"}},
+	    {"name":"never","agentVersionRef":"x@1","goal":"only when left says 99","dependsOn":["left"],"condition":{"step":"left","outputEquals":"research says 99"}}
+	  ]
+	}`
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	byName := map[string]kernelstore.WorkflowStep{}
+	for _, step := range steps {
+		byName[step.Name] = step
+	}
+	for _, name := range []string{"left", "right", "join", "conditional"} {
+		if byName[name].Status != kernelstore.StepSucceeded {
+			t.Fatalf("%s = %s", name, byName[name].Status)
+		}
+	}
+	if byName["never"].Status != kernelstore.StepSkipped || byName["never"].FailureCode != "CONDITION_NOT_MET" {
+		t.Fatalf("never = %s (%s)", byName["never"].Status, byName["never"].FailureCode)
+	}
+	// The join step received both upstream outputs.
+	joinGoal := tasks.goals[*byName["join"].TaskID]
+	if !strings.Contains(joinGoal, "Upstream result [left]") || !strings.Contains(joinGoal, "Upstream result [right]") {
+		t.Fatalf("join goal = %q", joinGoal)
+	}
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowSucceeded {
+		t.Fatalf("workflow = %s (skips count as success)", final.Status)
+	}
+}
+
+func TestEngineHumanApprovalParkAndDecisions(t *testing.T) {
+	spec := `{
+	  "defaultTaskSpec": {"budget":{"tokens":100}},
+	  "steps": [
+	    {"name":"risky","agentVersionRef":"x@1","goal":"needs a human","requiresApproval":true}
+	  ]
+	}`
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[0].Status == kernelstore.StepWaitingApproval
+	}, 5*time.Second)
+	if steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID); steps[0].TaskID != nil {
+		t.Fatal("parked step must not have a task")
+	}
+
+	// Approve: the step dispatches.
+	approved, err := store.DecideWorkflowStepApproval(context.Background(), kernelstore.DecideWorkflowStepApprovalInput{
+		TenantID: "tenant-1", WorkflowID: workflow.ID, StepName: "risky",
+		ExpectedVersion: func() int64 {
+			s, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+			return s[0].ResourceVersion
+		}(),
+		Approved: true, DecidedBy: "human-1",
+	})
+	if err != nil || approved.DecidedBy != "approved" {
+		t.Fatalf("approve: %+v err=%v", approved, err)
+	}
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	if final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID); final.Status != kernelstore.WorkflowSucceeded {
+		t.Fatalf("workflow = %s", final.Status)
+	}
+}
+
+func TestEngineApprovalRejectionSkips(t *testing.T) {
+	spec := `{
+	  "defaultTaskSpec": {"budget":{"tokens":100}},
+	  "steps": [{"name":"risky","agentVersionRef":"x@1","goal":"needs a human","requiresApproval":true}]
+	}`
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[0].Status == kernelstore.StepWaitingApproval
+	}, 5*time.Second)
+	version := func() int64 {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[0].ResourceVersion
+	}
+	if _, err := store.DecideWorkflowStepApproval(context.Background(), kernelstore.DecideWorkflowStepApprovalInput{
+		TenantID: "tenant-1", WorkflowID: workflow.ID, StepName: "risky",
+		ExpectedVersion: version(), Approved: false, DecidedBy: "human-1",
+	}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if steps[0].Status != kernelstore.StepSkipped || steps[0].FailureCode != "APPROVAL_REJECTED" {
+		t.Fatalf("step = %s (%s)", steps[0].Status, steps[0].FailureCode)
+	}
+}
+
+func TestEngineCancelPropagatesToActiveSteps(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, validTwoStepSpec)
+
+	// research dispatches, and its task is paused mid-flight (not
+	// terminal) when the cancellation request lands.
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		if steps[0].Status == kernelstore.StepRunning && steps[0].TaskID != nil {
+			tasks.pause(*steps[0].TaskID)
+			return true
+		}
+		return false
+	}, 5*time.Second)
+	current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	cancelled, err := store.RequestWorkflowCancellation(context.Background(), "tenant-1", workflow.ID, current.ResourceVersion)
+	if err != nil || cancelled.CancelRequestedAt == nil {
+		t.Fatalf("request cancellation: %+v err=%v", cancelled, err)
+	}
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowCancelled {
+		t.Fatalf("workflow = %s", final.Status)
+	}
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if steps[0].Status != kernelstore.StepCancelled || steps[1].Status != kernelstore.StepSkipped {
+		taskPhase := "none"
+		if steps[0].TaskID != nil {
+			task, _ := tasks.GetTask(context.Background(), "tenant-1", *steps[0].TaskID)
+			taskPhase = string(task.Phase)
+		}
+		t.Fatalf("steps = %s/%s (step0 task phase=%s failure=%s)", steps[0].Status, steps[1].Status, taskPhase, steps[0].FailureCode)
+	}
+}
+
+func TestEngineConcurrentInstancesNeverDoubleDispatch(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engineA := newEngine(store, tasks)
+	engineB := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, validTwoStepSpec)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for _, engine := range []*Controller{engineA, engineB} {
+		go func(engine *Controller) {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				if _, err := engine.Reconcile(context.Background()); err != nil {
+					t.Errorf("reconcile: %v", err)
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		}(engine)
+	}
+	wg.Wait()
+	reconcileUntil(t, engineA, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+
+	if created := len(tasks.byKey); created != 2 {
+		t.Fatalf("tasks created = %d, want exactly one per step", created)
+	}
+}
+
+func TestEngineRecoversAfterRestart(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	workflow := createWorkflowForTest(t, store, validTwoStepSpec)
+
+	// No orchestrator runs for a while (simulated restart window); state is
+	// durable. A fresh instance resumes and completes.
+	time.Sleep(10 * time.Millisecond)
+	engine := newEngine(store, tasks)
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	if final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID); final.Status != kernelstore.WorkflowSucceeded {
+		t.Fatalf("workflow = %s", final.Status)
+	}
+}

@@ -1,16 +1,10 @@
 //go:build integration
 
-// Package e2e_test is the v1.1 acceptance evidence: a real Python agent,
-// executing real model calls through the OpenAI-compatible provider layer,
-// real MCP-mediated tools and memory, checkpoint/lease-expiry recovery with
-// fault injection, and the 1,000-task pipeline with ≥99% success — the
-// numbers the development plan's Phase 1 / v1.1 gates require.
-//
-// Requirements: AGENTOS_TEST_DATABASE_URL (PostgreSQL), a Python 3
-// interpreter (AGENTOS_E2E_PYTHON, default "python"), and the repository
-// checked out (the agent example and SDK are launched from their source
-// tree). Counts are tunable: AGENTOS_E2E_TASKS (default 1000) and
-// AGENTOS_E2E_FAULTS (default 100).
+// Package e2e_test is the v1.2 acceptance evidence: multi-agent workflows
+// (WorkflowRun, dependency, sequential/parallel, join, condition, retry,
+// approval, cancel, recovery) running real Python agents through the same
+// governed loop as v1.1, plus the 1,000-workflow regression and the Phase 3
+// scale gates.
 package e2e_test
 
 import (
@@ -62,8 +56,8 @@ import (
 )
 
 const (
-	e2eTenant         = "tenant-e2e"
-	e2eVersionRef     = "real-agent@1"
+	e2eTenant         = "tenant-wf"
+	e2eVersionRef     = "wf-agent@1"
 	e2eProviderKey    = "e2e-provider-secret-key"
 	e2eCheckpointKind = "agentos.real-agent/v1"
 )
@@ -110,6 +104,9 @@ type fakeOpenAI struct {
 	authorized []string
 	requests   int
 	latency    time.Duration
+	// failCities fails the first request per marked city (drives the
+	// single-step retry semantics deterministically).
+	failCities map[string]int
 }
 
 func (f *fakeOpenAI) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -127,6 +124,10 @@ func (f *fakeOpenAI) ServeHTTP(writer http.ResponseWriter, request *http.Request
 	f.mu.Unlock()
 	if f.latency > 0 {
 		time.Sleep(f.latency)
+	}
+	if f.shouldFail(city0(body.Messages)) {
+		http.Error(writer, `{"error":"scripted transient failure"}`, http.StatusServiceUnavailable)
+		return
 	}
 	hasToolResult := false
 	goal := ""
@@ -181,6 +182,40 @@ func (f *fakeOpenAI) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		}
 	}
 	fmt.Fprint(writer, "data: [DONE]\n\n")
+}
+
+func (f *fakeOpenAI) shouldFail(city string) bool {
+	if len(f.failCities) == 0 {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	remaining, marked := f.failCities[city]
+	if !marked || remaining <= 0 {
+		return false
+	}
+	f.failCities[city] = remaining - 1
+	return true
+}
+
+func city0(messages []struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}) string {
+	goal := ""
+	for _, message := range messages {
+		if message.Role == "user" {
+			goal = message.Content
+		}
+	}
+	if match := strings.Index(goal, "city:"); match >= 0 {
+		rest := goal[match+len("city:"):]
+		if end := strings.IndexAny(rest, " \n"); end > 0 {
+			rest = rest[:end]
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
 }
 
 func (f *fakeOpenAI) requestCount() int {
@@ -420,7 +455,7 @@ func startStack(t *testing.T, env *e2eEnv) *e2eStack {
 	if err != nil {
 		t.Fatalf("working directory: %v", err)
 	}
-	root = filepath.Dir(filepath.Dir(root)) // e2e/single-agent -> repository root
+	root = filepath.Dir(filepath.Dir(root)) // e2e/workflows -> repository root
 
 	gatewayConnection, err := grpc.NewClient(env.gatewayAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -568,7 +603,7 @@ func publishVersion(ctx context.Context, t *testing.T, env *e2eEnv, entrypoint s
 	}
 	published, err := env.store.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
 		ID: uuid.New(), TenantID: e2eTenant, Namespace: "default",
-		Name: "real-agent", Version: "1", Spec: encoded,
+		Name: "wf-agent", Version: "1", Spec: encoded,
 	})
 	if err != nil {
 		t.Fatalf("publish agent version: %v", err)
@@ -686,64 +721,4 @@ func queryInt(ctx context.Context, t *testing.T, env *e2eEnv, sql string, args .
 		t.Fatalf("query %q: %v", sql, err)
 	}
 	return value
-}
-
-// executingInstance reports which runtime instance currently holds the
-// task's active attempt.
-func executingInstance(ctx context.Context, t *testing.T, env *e2eEnv, taskID uuid.UUID) string {
-	t.Helper()
-	var instance string
-	err := env.pool.QueryRow(ctx, `SELECT a.runtime_instance_id FROM attempts a
-		JOIN runs r ON r.id = a.run_id WHERE r.task_id = $1 AND a.phase IN ('PLACED','STARTING','RUNNING')
-		ORDER BY a.created_at DESC LIMIT 1`, taskID).Scan(&instance)
-	if err != nil {
-		return ""
-	}
-	return instance
-}
-
-// confirmedToolCheckpoint reports whether the task's newest checkpoint state
-// contains a tool-role message (the tool side effect is confirmed progress).
-func confirmedToolCheckpoint(ctx context.Context, t *testing.T, env *e2eEnv, taskID uuid.UUID) bool {
-	t.Helper()
-	rows, err := env.pool.Query(ctx, `SELECT a.uri, a.sha256, a.size_bytes, a.media_type FROM checkpoints c
-		JOIN artifacts a ON a.id = c.state_artifact_id
-		JOIN runs r ON r.id = c.run_id
-		WHERE r.task_id = $1 ORDER BY c.created_at DESC LIMIT 1`, taskID)
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var uri, media string
-		var digest []byte
-		var size int64
-		if err := rows.Scan(&uri, &digest, &size, &media); err != nil {
-			return false
-		}
-		artifactRef := kernelstore.ArtifactReference{URI: uri, MediaType: media, SizeBytes: size}
-		copy(artifactRef.SHA256[:], digest)
-		reader, err := env.artifacts.Open(ctx, e2eTenant, artifactRef)
-		if err != nil {
-			return false
-		}
-		raw, _ := io.ReadAll(io.LimitReader(reader, 2<<20))
-		reader.Close()
-		var checkpoint struct {
-			State struct {
-				Messages []struct {
-					Role string `json:"role"`
-				} `json:"messages"`
-			} `json:"state"`
-		}
-		if json.Unmarshal(raw, &checkpoint) != nil {
-			return false
-		}
-		for _, message := range checkpoint.State.Messages {
-			if message.Role == "tool" {
-				return true
-			}
-		}
-	}
-	return false
 }

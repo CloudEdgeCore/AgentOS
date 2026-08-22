@@ -292,6 +292,22 @@ cargo +1.97.1 test --workspace --locked
 
 CI runs the real Linux OCI/gVisor isolation suite in the `runtime-linux-leg` job. The pinned toolchain and acceptance mapping are defined in [`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md).
 
+v1.2 workflow acceptance (multi-agent orchestration: WorkflowRun with
+dependency/parallel/join/condition/retry/approval/cancel/recovery, the
+1,000-workflow dual-agent regression, and the Phase 3 scale gates — one
+1,000-step workflow, 100 concurrent workflows, orchestrator P95 < 500ms):
+
+```powershell
+go test -race -tags=integration -count=1 -timeout 60m ./e2e/workflows/
+```
+
+Counts are tunable (`AGENTOS_E2E_WORKFLOWS`, `AGENTOS_E2E_WF_STEPS`,
+`AGENTOS_E2E_CONCURRENT_WF`). The workflow orchestrator runs as its own
+process (`go run ./cmd/agentos-orchestrator -database-url $db
+-orchestrator-id dev-orchestrator -artifact-root tmp/artifacts`) and the
+Control API exposes `POST/GET /v1/workflows`, `POST /v1/workflows/{id}/cancel`
+and `POST /v1/workflows/{id}/steps/{name}/approval`.
+
 v1.1 real-agent acceptance (a real Python agent, real OpenAI-compatible model
 execution, MCP tools and memory, lease-expiry recovery, 1,000-task pipeline
 and 100 fault injections):

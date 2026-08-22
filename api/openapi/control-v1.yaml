@@ -54,6 +54,109 @@ paths:
                   modelProtocol: { const: agentos.model.v1 }
                   controlApi: { const: v1 }
                   legacyRemovalBefore: { type: string, format: date }
+  /v1/workflows:
+    post:
+      operationId: createWorkflow
+      summary: Publish a durable multi-agent workflow run (v1.2)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+      responses:
+        '202':
+          description: A new workflow was accepted.
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '200':
+          description: An idempotency-key replay returned the existing workflow.
+        '404': { description: Workflow orchestration is not configured. }
+        '422': { description: The workflow document is not a valid DAG. }
+  /v1/workflows/{workflowId}:
+    get:
+      operationId: getWorkflow
+      summary: Read one workflow with its steps
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: workflowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The workflow document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '404': { description: The workflow was not found. }
+  /v1/workflows/{workflowId}/cancel:
+    post:
+      operationId: cancelWorkflow
+      summary: Record the durable cancellation intent; the orchestrator propagates it
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: workflowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: The cancellation intent was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '404': { description: The workflow was not found. }
+  /v1/workflows/{workflowId}/steps/{stepName}/approval:
+    post:
+      operationId: decideWorkflowStepApproval
+      summary: Decide a parked human-approval step (approve or reject)
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+        - name: workflowId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: stepName
+          in: path
+          required: true
+          schema: { type: string }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approve, reject] }
+      responses:
+        '202':
+          description: The decision was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '404': { description: The workflow or step was not found. }
   /v1/tasks:
     post:
       operationId: createTask
@@ -541,6 +644,45 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    CreateWorkflowRequest:
+      type: object
+      additionalProperties: false
+      required: [goal, workflow]
+      properties:
+        namespace: { type: string, minLength: 1, maxLength: 64 }
+        goal: { type: string, minLength: 1, maxLength: 8192 }
+        workflow:
+          type: object
+          description: The workflow document (steps form a DAG; validated by the kernel).
+    Workflow:
+      type: object
+      additionalProperties: false
+      required: [id, namespace, goal, status, resourceVersion, steps, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        namespace: { type: string }
+        goal: { type: string }
+        status: { type: string, enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        failureCode: { type: string }
+        cancelRequestedAt: { type: string, format: date-time }
+        resourceVersion: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        steps:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, ordinal, status, attemptCount, resourceVersion]
+            properties:
+              name: { type: string }
+              ordinal: { type: integer }
+              status: { type: string, enum: [PENDING, WAITING_APPROVAL, RUNNING, SUCCEEDED, FAILED, SKIPPED, CANCELLED] }
+              attemptCount: { type: integer }
+              taskId: { type: string, format: uuid }
+              failureCode: { type: string }
+              decidedBy: { type: string }
+              resourceVersion: { type: integer, format: int64 }
     CreateTaskRequest:
       type: object
       additionalProperties: false
