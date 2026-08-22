@@ -102,7 +102,13 @@ func TestThousandConcurrentTasksStableUnderLoad(t *testing.T) {
 		AvailableCPU: int64(taskCount) * 100, AvailableMemory: int64(taskCount) * 128, AvailableLLMSlots: taskCount,
 	}}
 	admissionController := admission.NewController(store, limits, testPolicyEngine(t), "load/admission", 50, time.Minute)
-	schedulerController := scheduler.NewController(store, pools, "load/scheduler", 50, time.Minute, 3*time.Minute)
+	// Every assignment is deliberately placed before any worker starts so the
+	// test can prove a 1,000-task RUNNING peak. Under the race detector and
+	// shared CI CPU, eight worker goroutines can take well over three minutes
+	// to consume that artificial backlog. Keep the unclaimed assignment lease
+	// beyond the test's ten-minute convergence window; once a worker claims an
+	// assignment its normal 30-second heartbeat TTL takes over.
+	schedulerController := scheduler.NewController(store, pools, "load/scheduler", 50, time.Minute, 15*time.Minute)
 
 	var peakRunning atomic.Int64
 	stop := make(chan struct{})

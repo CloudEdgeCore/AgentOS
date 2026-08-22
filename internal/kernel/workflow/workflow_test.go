@@ -516,6 +516,13 @@ func (f *fakeTaskPipeline) pause(id uuid.UUID) {
 	f.tasks[id].Phase = domain.TaskRunning
 }
 
+func (f *fakeTaskPipeline) setPhase(id uuid.UUID, phase domain.TaskPhase) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tasks[id].Phase = phase
+	f.tasks[id].ResourceVersion++
+}
+
 type fakeResultReader struct{}
 
 func (fakeResultReader) Open(_ context.Context, _ string, _ kernelstore.ArtifactReference) (io.ReadCloser, error) {
@@ -951,6 +958,35 @@ func TestEngineCancelPropagatesToActiveSteps(t *testing.T) {
 			taskPhase = string(task.Phase)
 		}
 		t.Fatalf("steps = %s/%s (step0 task phase=%s failure=%s)", steps[0].Status, steps[1].Status, taskPhase, steps[0].FailureCode)
+	}
+}
+
+func TestEngineReportsRejectedTaskAsFailureNotCancellation(t *testing.T) {
+	store := newFakeWorkflowStore()
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, `{
+	  "defaultTaskSpec":{"budget":{"tokens":10}},
+	  "steps":[{"name":"root","agentVersionRef":"agent@1","goal":"run"}]
+	}`)
+
+	if _, err := engine.Reconcile(context.Background()); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if steps[0].TaskID == nil {
+		t.Fatal("root task was not dispatched")
+	}
+	tasks.setPhase(*steps[0].TaskID, domain.TaskRejected)
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	steps, _ = store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowFailed || steps[0].Status != kernelstore.StepFailed || steps[0].FailureCode != "TASK_REJECTED" {
+		t.Fatalf("workflow=%s step=%s code=%s", final.Status, steps[0].Status, steps[0].FailureCode)
 	}
 }
 

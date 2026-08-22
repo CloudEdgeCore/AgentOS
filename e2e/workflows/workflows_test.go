@@ -441,26 +441,30 @@ func TestV12WorkflowScale(t *testing.T) {
 	wideFinal := waitForWorkflowTerminal(ctx, t, env, wideID, 30*time.Minute)
 	if wideFinal.Status != kernelstore.WorkflowSucceeded {
 		t.Logf("python runtime diagnostics: %s", stack.pythonOut.String())
+		t.Logf("wide workflow diagnostics: status=%s code=%s cancel=%v budgetStop=%v deadline=%v deadlineStop=%v version=%d",
+			wideFinal.Status, wideFinal.FailureCode, wideFinal.CancelRequestedAt, wideFinal.BudgetExhaustedAt,
+			wideFinal.DeadlineAt, wideFinal.DeadlineExceededAt, wideFinal.ResourceVersion)
 		rows, queryErr := env.pool.Query(ctx, `SELECT s.name, s.status, COALESCE(s.failure_code, ''),
 			COALESCE(t.phase, ''), COALESCE(r.phase, ''), COALESCE(a.phase, ''),
 			COALESCE(a.failure_code, ''), COALESCE(a.failure_message, ''),
 			COALESCE(b.reserved_tokens, 0), COALESCE(b.consumed_tokens, 0),
-			(SELECT count(*) FROM model_calls m WHERE m.task_id = s.task_id)
+			(SELECT count(*) FROM model_calls m WHERE m.task_id = s.task_id), t.cancel_requested_at
 			FROM workflow_steps s
 			LEFT JOIN tasks t ON t.id = s.task_id
 			LEFT JOIN task_budget_ledgers b ON b.task_id = s.task_id
 			LEFT JOIN runs r ON r.task_id = s.task_id
 			LEFT JOIN attempts a ON a.run_id = r.id
-			WHERE s.workflow_id = $1 AND s.status IN ('FAILED', 'SKIPPED')
+			WHERE s.workflow_id = $1 AND s.status <> 'SUCCEEDED'
 			ORDER BY s.ordinal LIMIT 20`, wideID)
 		if queryErr == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var name, status, stepCode, taskPhase, runPhase, attemptPhase, attemptCode, attemptMessage string
+				var cancelRequestedAt *time.Time
 				var reservedTokens, consumedTokens, modelCalls int64
-				if scanErr := rows.Scan(&name, &status, &stepCode, &taskPhase, &runPhase, &attemptPhase, &attemptCode, &attemptMessage, &reservedTokens, &consumedTokens, &modelCalls); scanErr == nil {
-					t.Logf("failed step diagnostic: name=%s status=%s stepCode=%s task=%s run=%s attempt=%s attemptCode=%s message=%s budget=%d consumed=%d modelCalls=%d",
-						name, status, stepCode, taskPhase, runPhase, attemptPhase, attemptCode, attemptMessage, reservedTokens, consumedTokens, modelCalls)
+				if scanErr := rows.Scan(&name, &status, &stepCode, &taskPhase, &runPhase, &attemptPhase, &attemptCode, &attemptMessage, &reservedTokens, &consumedTokens, &modelCalls, &cancelRequestedAt); scanErr == nil {
+					t.Logf("failed step diagnostic: name=%s status=%s stepCode=%s task=%s run=%s attempt=%s attemptCode=%s message=%s budget=%d consumed=%d modelCalls=%d cancel=%v",
+						name, status, stepCode, taskPhase, runPhase, attemptPhase, attemptCode, attemptMessage, reservedTokens, consumedTokens, modelCalls, cancelRequestedAt)
 				}
 			}
 		}

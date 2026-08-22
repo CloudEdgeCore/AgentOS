@@ -684,7 +684,11 @@ func reconcile(ctx context.Context, t *testing.T, env *e2eEnv, pools staticPools
 // reconcileQuiet is the background loop variant.
 func reconcileQuiet(ctx context.Context, env *e2eEnv, pools staticPools) {
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"adapter"}, MaxTokens: 1000000, MaxCostMicroUSD: money.MustFromUSD(100000),
+		// The 1,000-way fan-in fixture gives its join task a two-million-token
+		// reservation ceiling. The admission envelope must be above that
+		// generated workload or the scale test measures policy rejection rather
+		// than orchestration capacity.
+		RuntimeClasses: []string{"adapter"}, MaxTokens: 10_000_000, MaxCostMicroUSD: money.MustFromUSD(100000),
 		MaxToolCalls: 100000, MaxWallSeconds: 360000, MaxCPU: 4000, MaxMemory: 8192, MaxLLMConcurrency: 64,
 	})
 	admissionController := admission.NewController(env.store, engine, env.policyEngine, "e2e-admission", 100, time.Minute)

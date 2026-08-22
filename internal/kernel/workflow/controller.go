@@ -150,6 +150,10 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 		for _, workflow := range active {
 			ok, err := c.processClaimedWorkflow(ctx, workflow)
 			if err != nil {
+				if isConvergenceConflict(err) {
+					agentmetrics.WorkflowOutcome(ctx, "cas_conflict")
+					continue
+				}
 				return processed, err
 			}
 			if ok {
@@ -180,6 +184,10 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
+				if isConvergenceConflict(err) {
+					agentmetrics.WorkflowOutcome(ctx, "cas_conflict")
+					return
+				}
 				agentmetrics.WorkflowOutcome(ctx, "reconcile_error")
 				if batchErr == nil {
 					batchErr = err
@@ -194,6 +202,16 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 	}
 	wg.Wait()
 	return processed, batchErr
+}
+
+// isConvergenceConflict identifies an expected optimistic-concurrency loss.
+// Another orchestrator has already advanced the same durable aggregate, so
+// the safe response is to re-read it on the next reconcile round. Surfacing
+// this as a controller failure would stop healthy peers under ordinary
+// multi-controller contention even though CAS prevented double dispatch.
+func isConvergenceConflict(err error) bool {
+	return errors.Is(err, kernelstore.ErrVersionConflict) ||
+		errors.Is(err, kernelstore.ErrRetryableTransaction)
 }
 
 func (c *Controller) processClaimedWorkflow(ctx context.Context, workflow kernelstore.Workflow) (bool, error) {
@@ -670,10 +688,23 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 			return false, nil
 		}
 		return true, err
-	case "CANCELLED", "TIMED_OUT", "REJECTED":
+	case "CANCELLED":
 		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepCancelled,
+			FailureCode: "TASK_" + string(task.Phase),
+		})
+		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
+			return false, nil
+		}
+		return true, err
+	case "TIMED_OUT", "REJECTED":
+		// A policy rejection or execution timeout is a failed step, not a
+		// user/system cancellation. Keeping the distinction prevents a rejected
+		// root task from falsely reporting the whole workflow as CANCELLED.
+		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
+			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
+			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
 			FailureCode: "TASK_" + string(task.Phase),
 		})
 		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
