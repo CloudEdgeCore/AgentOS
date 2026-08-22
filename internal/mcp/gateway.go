@@ -24,11 +24,24 @@ type AttemptContext struct {
 	AttemptID       uuid.UUID
 	FencingToken    int64
 	AgentVersionRef string
+	// AllowedModels is the AgentVersion's declared model capability grant;
+	// the brokered model tool denies everything outside it (default deny).
+	AllowedModels []string
+	// AllowedMemoryNamespaces is the declared memory capability grant; the
+	// brokered memory tools deny writes and reads outside it.
+	AllowedMemoryNamespaces []string
 }
 
 // IdentityResolver supplies the fenced identity for inbound MCP calls.
 type IdentityResolver interface {
 	Resolve(context.Context) (AttemptContext, error)
+}
+
+// ExecutionIdentityResolver resolves the identity of one open execution
+// window from the execution id the agent reports; shared Agent endpoints
+// use it to keep concurrent attempts correctly fenced.
+type ExecutionIdentityResolver interface {
+	ResolveExecution(context.Context, string) (AttemptContext, error)
 }
 
 // StaticIdentity is a fixed identity for deployments where the attempt

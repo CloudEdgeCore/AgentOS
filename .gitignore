@@ -6,12 +6,19 @@
 /dist/
 /coverage/
 /target/
+*.exe
 *.coverprofile
 *.test
 __pycache__/
 *.py[cod]
 *.egg-info/
 /sdk/python/build/
+
+# Local-only documentation (internal design docs, ADRs — never pushed)
+/docs/
+
+# Local-only model endpoints and tenant policy overrides (private infra)
+deploy/dev/*.local.json
 
 # Local configuration and credentials
 .env

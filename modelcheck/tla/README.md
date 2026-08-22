@@ -2,7 +2,7 @@
 
 Status: **done for v0.1 core invariants** (2026-08-16).
 
-`AgentOS.tla` models the kernel invariants the [tech baseline](docs/Agent_OS_技术选型与工程基线.md)
+`AgentOS.tla` models the kernel invariants the tech baseline
 §18.4 requires verifying before they are trusted in production:
 
 - **I1** Legal state machine: phases advance only along the allowed tables

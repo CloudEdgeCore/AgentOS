@@ -25,6 +25,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
@@ -42,6 +43,9 @@ func main() {
 	tenantPoliciesFile := flag.String("tenant-policies", "", "JSON tenant policy data (absent tenants are denied by default)")
 	tenantID := flag.String("tenant", "", "fixed development tenant")
 	seedDevTools := flag.Bool("seed-dev-tools", false, "idempotently register the development echo.dev tool")
+	seedDevModel := flag.String("seed-dev-model", "", "idempotently register a development model descriptor as provider/model (requires -dev-mode; prices default to 0)")
+	seedDevModelInputPrice := flag.Float64("seed-dev-model-input-price", 0, "input price per million tokens for -seed-dev-model")
+	seedDevModelOutputPrice := flag.Float64("seed-dev-model-output-price", 0, "output price per million tokens for -seed-dev-model")
 	devMode := flag.Bool("dev-mode", false, "acknowledge the development executor and fixed tenant")
 	toolEndpointsFile := flag.String("tool-endpoints", "", "production JSON mapping of immutable tool versions to HTTPS endpoints")
 	embeddingEndpoint := flag.String("embedding-endpoint", "", "production HTTPS embedding service")
@@ -56,6 +60,7 @@ func main() {
 	baoNamespace := flag.String("bao-namespace", "", "optional OpenBao namespace header")
 	baoCacheTTL := flag.Duration("bao-cache-ttl", 30*time.Second, "issued secret handle cache TTL")
 	baoDynamicRole := flag.String("bao-dynamic-role", "", "OpenBao database role for dynamic credentials (database/creds/<role>); takes precedence over KV reads")
+	modelProvidersFile := flag.String("model-providers", "", "JSON OpenAI-compatible provider endpoints ({\"providers\":[{\"name\",\"baseUrl\",\"apiKeyEnv\",...}]}); absent providers fail closed")
 	flag.Parse()
 	if *databaseURL == "" {
 		slog.Error("database URL is required")
@@ -118,6 +123,27 @@ func main() {
 	if *seedDevTools && !*devMode {
 		slog.Error("-seed-dev-tools is forbidden in production mode")
 		os.Exit(2)
+	}
+	if *seedDevModel != "" {
+		if !*devMode {
+			slog.Error("-seed-dev-model is forbidden in production mode")
+			os.Exit(2)
+		}
+		providerName, modelName, found := strings.Cut(*seedDevModel, "/")
+		if !found || kernelstore.ValidateModelRef(*seedDevModel) != nil {
+			slog.Error("-seed-dev-model must be provider/model", "ref", *seedDevModel)
+			os.Exit(2)
+		}
+		seedModel, seedModelErr := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
+			TenantID: *tenantID, Provider: providerName, ModelName: modelName, SupportsStreaming: true,
+			InputPricePerMillion: *seedDevModelInputPrice, OutputPricePerMillion: *seedDevModelOutputPrice,
+			PriceRevision: "dev",
+		})
+		if seedModelErr != nil {
+			slog.Error("seed development model descriptor", "error", seedModelErr)
+			os.Exit(1)
+		}
+		slog.Info("development model registered", "model", seedModel.Ref(), "streaming", seedModel.SupportsStreaming)
 	}
 	if *seedDevTools {
 		seed, seedErr := repository.RegisterToolDescriptor(ctx, kernelstore.RegisterToolDescriptorInput{
@@ -221,6 +247,17 @@ func main() {
 	}
 	decisionGateway := tool.NewGateway(policyEngine, repository, repository, repository, executor, secrets)
 	modelGateway := model.NewGateway(policyEngine, repository, repository, repository)
+	modelProviders, err := provider.LoadRegistryFile(*modelProvidersFile)
+	if err != nil {
+		slog.Error("load model providers", "error", err)
+		os.Exit(2)
+	}
+	if names := modelProviders.Names(); len(names) > 0 {
+		slog.Info("model provider execution layer active", "providers", names)
+	} else {
+		slog.Warn("no model providers configured: model invocations fail closed (governance only)")
+	}
+	modelInvoker := model.NewInvoker(modelGateway, modelProviders)
 	capabilityAuthorizer, err := capability.NewAuthorizer(repository)
 	if err != nil {
 		slog.Error("configure AgentVersion capability authorizer", "error", err)
@@ -267,9 +304,11 @@ func main() {
 		memory.NewGateway(embedder, repository), repository, allowedTenant, capabilityAuthorizer,
 	)
 	modelService := gateway.NewModelService(modelGateway, allowedTenant, capabilityAuthorizer)
+	modelInvocationService := gateway.NewModelInvocationService(modelInvoker, allowedTenant, capabilityAuthorizer)
 	gatewayv1.RegisterToolGatewayServiceServer(server, toolService)
 	gatewayv1.RegisterMemoryGatewayServiceServer(server, memoryService)
 	modelv1.RegisterModelGatewayServiceServer(server, modelService)
+	modelv1.RegisterModelInvocationServiceServer(server, modelInvocationService)
 	legacyAliases := []struct {
 		descriptor grpc.ServiceDesc
 		service    any

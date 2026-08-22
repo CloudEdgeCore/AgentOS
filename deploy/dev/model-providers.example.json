@@ -1,0 +1,23 @@
+{
+  "providers": [
+    {
+      "name": "deepseek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "timeoutMs": 120000,
+      "maxAttempts": 3,
+      "breakerOpens": 5,
+      "breakerCooldownMs": 30000
+    },
+    {
+      "name": "qwen",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "apiKeyEnv": "QWEN_API_KEY"
+    },
+    {
+      "name": "vllm",
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "apiKeyEnv": "VLLM_API_KEY"
+    }
+  ]
+}

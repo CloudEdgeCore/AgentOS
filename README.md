@@ -159,7 +159,10 @@ go run ./cmd/agentos-runtime-control `
   -dev-tenant dev `
   -dev-mode
 
-# Tool, Model, and Memory Gateway
+# Tool, Model, and Memory Gateway; add -model-providers to activate the
+# OpenAI-compatible execution layer (vLLM/Qwen/DeepSeek/GLM endpoints).
+# deploy/dev/*.local.json is gitignored for private endpoint configurations:
+#   -model-providers deploy/dev/model-providers.example.json
 go run ./cmd/agentos-gateway `
   -database-url $env:DATABASE_URL `
   -listen 127.0.0.1:9091 `
@@ -179,6 +182,14 @@ go run ./cmd/agentos-runtime-reference `
   -artifact-root tmp/artifacts `
   -dev-mode
 ```
+
+The adapter runtime additionally exposes a loopback MCP endpoint for its
+sandboxed agents (`-mcp-listen 127.0.0.1:9093 -gateway-address 127.0.0.1:9091`):
+tenant tools plus the brokered system tools `agentos.model.invoke`,
+`agentos.memory.put`, and `agentos.memory.search`, fenced to the open attempt
+via the `X-Agentos-Execution` identity the worker injects (default deny
+outside execution windows). A real model-backed Python agent lives at
+`examples/agents/python_remote/real_agent.py`.
 
 These commands use a fixed development tenant, loopback plaintext connections, and development executors. They are only safe for local development. Production mode rejects these downgraded settings.
 
@@ -280,6 +291,19 @@ cargo +1.97.1 test --workspace --locked
 ```
 
 CI runs the real Linux OCI/gVisor isolation suite in the `runtime-linux-leg` job. The pinned toolchain and acceptance mapping are defined in [`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md).
+
+v1.1 real-agent acceptance (a real Python agent, real OpenAI-compatible model
+execution, MCP tools and memory, lease-expiry recovery, 1,000-task pipeline
+and 100 fault injections):
+
+```powershell
+$env:AGENTOS_E2E_PYTHON = "python"
+go test -race -tags=integration -count=1 -timeout 30m ./e2e/single-agent/
+```
+
+See [`e2e/single-agent/README.md`](e2e/single-agent/README.md) for what each
+test proves and how to tune the counts (`AGENTOS_E2E_TASKS`,
+`AGENTOS_E2E_FAULTS`).
 
 Evaluate a measured SLO sample:
 
