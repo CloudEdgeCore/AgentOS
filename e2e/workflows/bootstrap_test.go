@@ -469,7 +469,7 @@ func startStack(t *testing.T, env *e2eEnv) *e2eStack {
 	broker := mcp.NewBroker(tools,
 		runtimeadapter.NewGrpcModelBroker(modelv1.NewModelInvocationServiceClient(gatewayConnection)),
 		runtimeadapter.NewGrpcMemoryBroker(gatewayv1.NewMemoryGatewayServiceClient(gatewayConnection)),
-		registry)
+		nil, registry)
 	mcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for MCP: %v", err)
