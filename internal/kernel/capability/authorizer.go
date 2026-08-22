@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
@@ -80,7 +79,7 @@ func (a *Authorizer) Authorize(
 	}
 	for _, grant := range grants {
 		for _, candidate := range candidates {
-			if matches(grant, candidate) {
+			if MatchGrant(grant, candidate) {
 				return nil
 			}
 		}
@@ -88,15 +87,22 @@ func (a *Authorizer) Authorize(
 	return fmt.Errorf("%w: %s candidates %q are not granted to %s", ErrDenied, kind, candidates, agentVersionRef)
 }
 
-func matches(pattern, value string) bool {
+// MatchGrant is the single wildcard contract shared by every gateway:
+// exact identifiers, global "*", or a suffix wildcard after a namespace
+// separator ("search.*", "project/*"). Embedded wildcards never match.
+func MatchGrant(pattern, value string) bool {
 	if pattern == value {
 		return true
 	}
-	if !strings.Contains(pattern, "*") {
+	if pattern == "*" {
+		return value != ""
+	}
+	if strings.Count(pattern, "*") != 1 || !strings.HasSuffix(pattern, "*") {
 		return false
 	}
-	quoted := regexp.QuoteMeta(pattern)
-	expression := "^" + strings.ReplaceAll(quoted, "\\*", ".*") + "$"
-	matched, err := regexp.MatchString(expression, value)
-	return err == nil && matched
+	prefix := strings.TrimSuffix(pattern, "*")
+	if !strings.HasSuffix(prefix, ".") && !strings.HasSuffix(prefix, "/") {
+		return false
+	}
+	return strings.HasPrefix(value, prefix) && len(value) > len(prefix)
 }

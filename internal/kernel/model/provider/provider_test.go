@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -132,6 +133,7 @@ func testExecutor(server *httptest.Server, breakerOpens int) *Executor {
 	executor := NewExecutor(Config{
 		Name: "fake", BaseURL: server.URL, APIKey: "secret-test-key",
 		TimeoutMs: 5000, MaxAttempts: 3, BreakerOpens: breakerOpens, BreakerCoolMs: 60000,
+		MaxConcurrent: 128, SupportsIdempotency: true,
 	}, server.Client())
 	executor.jitter = func(d time.Duration) time.Duration { return 0 }
 	return executor
@@ -232,6 +234,37 @@ func TestExecutorStreamAssemblesFragmentedToolCalls(t *testing.T) {
 	}
 }
 
+func TestExecutorMetersToolOnlyStreamAsDelivered(t *testing.T) {
+	chunk, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{
+			{
+				"index": 0,
+				"delta": map[string]any{
+					"tool_calls": []map[string]any{
+						{"index": 0, "id": "call-1", "function": map[string]any{
+							"name": "expensive_tool", "arguments": `{"value":42}`,
+						}},
+					},
+				},
+			},
+		},
+	})
+	server := &fakeOpenAI{script: []fakeResponse{{stream: []string{string(chunk)}}}}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	executor := testExecutor(httpServer, 5)
+	var generated strings.Builder
+	result, err := executor.StreamObserved(context.Background(), Invocation{ModelName: "m", Stream: true}, StreamObserver{
+		OnGenerated: func(delta string) { generated.WriteString(delta) },
+	})
+	if err != nil {
+		t.Fatalf("tool-only stream: %v", err)
+	}
+	if generated.String() != `expensive_tool{"value":42}` || len(result.ToolCalls) != 1 {
+		t.Fatalf("generated=%q calls=%+v", generated.String(), result.ToolCalls)
+	}
+}
+
 func TestExecutorRetriesServerErrorsThenSucceeds(t *testing.T) {
 	server := &fakeOpenAI{script: []fakeResponse{
 		{status: http.StatusInternalServerError, body: "boom"},
@@ -248,6 +281,47 @@ func TestExecutorRetriesServerErrorsThenSucceeds(t *testing.T) {
 	}
 	if count := server.requestCount(); count != 3 {
 		t.Fatalf("requests = %d, want 3 (initial + two retries)", count)
+	}
+}
+
+func TestExecutorDoesNotRetryAmbiguousOutcomeWithoutIdempotency(t *testing.T) {
+	server := &fakeOpenAI{script: []fakeResponse{
+		{status: http.StatusInternalServerError, body: "possibly committed"},
+		{body: completionBody("duplicate")},
+	}}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	executor := NewExecutor(Config{Name: "unsafe", BaseURL: httpServer.URL, MaxAttempts: 3,
+		TimeoutMs: 1000, MaxConcurrent: 8}, httpServer.Client())
+	executor.jitter = func(time.Duration) time.Duration { return 0 }
+	_, err := executor.Complete(context.Background(), Invocation{ModelName: "m", IdempotencyKey: "logical-call"})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("ambiguous error = %v", err)
+	}
+	if count := server.requestCount(); count != 1 {
+		t.Fatalf("ambiguous call requests=%d, want 1", count)
+	}
+}
+
+func TestExecutorToolDeltaMakesAbortedStreamNonRetryable(t *testing.T) {
+	var requests atomic.Int64
+	broken := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"charge\",\"arguments\":\"{\"}}]}}]}\n\n")
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	defer broken.Close()
+	executor := testExecutor(broken, 50)
+	_, err := executor.Stream(context.Background(), Invocation{ModelName: "m"}, nil)
+	if !errors.Is(err, ErrStreamAborted) {
+		t.Fatalf("tool stream error = %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("tool stream retried %d times", requests.Load())
 	}
 }
 
@@ -526,6 +600,23 @@ func TestExecutorTimeoutFailsFast(t *testing.T) {
 	// Two attempts x 200ms timeout plus slack — well under the 2s handler.
 	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
 		t.Fatalf("timeout did not fail fast: %v", elapsed)
+	}
+}
+
+func TestEncodeInvocationHonorsCapabilityProfile(t *testing.T) {
+	disabled := false
+	body, err := encodeInvocation(Invocation{ModelName: "reasoner", Stream: true, MaxOutputTokens: 64}, CapabilityProfile{
+		StreamUsage: &disabled, MaxTokensField: "max_completion_tokens",
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	text := string(body)
+	if strings.Contains(text, "stream_options") || strings.Contains(text, `"max_tokens"`) || !strings.Contains(text, `"max_completion_tokens":64`) {
+		t.Fatalf("capability profile not honored: %s", text)
+	}
+	if _, err := encodeInvocation(Invocation{ModelName: "no-tools", Tools: []ToolDefinition{{Name: "x"}}}, CapabilityProfile{ToolCalling: &disabled}); err == nil {
+		t.Fatal("tool call was accepted by a provider that disables it")
 	}
 }
 

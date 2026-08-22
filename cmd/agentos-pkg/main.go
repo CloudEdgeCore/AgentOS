@@ -60,7 +60,7 @@ func main() {
 	}
 }
 
-// runPackageManifest bridges the v0.9 portable Agent Manifest to the existing
+// runPackageManifest bridges the portable Agent Manifest to the existing
 // signed Agent Package pipeline. Provenance time is an explicit input so the
 // same source declaration produces byte-identical unsigned package manifests.
 func runPackageManifest(args []string) error {

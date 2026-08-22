@@ -222,6 +222,77 @@ func TestHostRejectsInvalidAdapterResult(t *testing.T) {
 	}
 }
 
+func TestHostExecutionDeadlineAndErrorRedaction(t *testing.T) {
+	host, err := NewHost(&testRuntime{block: true}, HostOptions{
+		Adapter: "deadline", MaxConcurrent: 1, ExecutionTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Start(context.Background(), startFixture("exec-timeout")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.WaitResult(context.Background(), "exec-timeout", time.Millisecond)
+	if err != nil || result.ErrorCode != "EXECUTION_TIMEOUT" || strings.Contains(result.Error, "context") {
+		t.Fatalf("timeout result=%+v err=%v", result, err)
+	}
+
+	errorClient, _ := newTestClient(t, failingRuntime{})
+	if _, err := errorClient.Start(context.Background(), startFixture("exec-error")); err != nil {
+		t.Fatal(err)
+	}
+	result, err = errorClient.WaitResult(context.Background(), "exec-error", time.Millisecond)
+	if err != nil || result.ErrorCode != "ADAPTER_FAILED" || strings.Contains(result.Error, "secret") {
+		t.Fatalf("redacted result=%+v err=%v", result, err)
+	}
+}
+
+func TestHostEscalatesStuckExecutionToForceTerminator(t *testing.T) {
+	called := make(chan string, 1)
+	host, err := NewHost(stubbornRuntime{}, HostOptions{
+		Adapter: "isolated", MaxConcurrent: 1, ExecutionTimeout: 5 * time.Millisecond,
+		TerminationGrace: 5 * time.Millisecond,
+		ForceTerminate:   func(executionID string) error { called <- executionID; return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	client, _ := NewClient(server.URL, server.Client())
+	if _, err := client.Start(context.Background(), startFixture("exec-stuck")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-called:
+		if id != "exec-stuck" {
+			t.Fatalf("force termination id = %q", id)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("stuck execution was not escalated")
+	}
+}
+
+func TestHostPaginatesEventResponses(t *testing.T) {
+	client, _ := newTestClient(t, manyEventsRuntime{})
+	if _, err := client.Start(context.Background(), startFixture("exec-events")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WaitResult(context.Background(), "exec-events", time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.Events(context.Background(), "exec-events", 0)
+	if err != nil || len(page.Events) != maxEventsPerPage || !page.Truncated {
+		t.Fatalf("event page=%+v err=%v", page, err)
+	}
+}
+
 type invalidRuntime struct{}
 
 func (invalidRuntime) Run(context.Context, StartRequest, Emitter) (json.RawMessage, error) {
@@ -232,4 +303,28 @@ func (invalidRuntime) Checkpoint(context.Context, string) (Checkpoint, error) {
 }
 func (invalidRuntime) Restore(context.Context, RestoreRequest) error {
 	return errors.New("unsupported")
+}
+
+type failingRuntime struct{ invalidRuntime }
+
+func (failingRuntime) Run(context.Context, StartRequest, Emitter) (json.RawMessage, error) {
+	return nil, errors.New("secret-provider-token")
+}
+
+type stubbornRuntime struct{ invalidRuntime }
+
+func (stubbornRuntime) Run(context.Context, StartRequest, Emitter) (json.RawMessage, error) {
+	time.Sleep(50 * time.Millisecond)
+	return json.RawMessage(`{"late":true}`), nil
+}
+
+type manyEventsRuntime struct{ invalidRuntime }
+
+func (manyEventsRuntime) Run(_ context.Context, _ StartRequest, emit Emitter) (json.RawMessage, error) {
+	for index := 0; index < 300; index++ {
+		if err := emit("progress", json.RawMessage(`{"ok":true}`)); err != nil {
+			return nil, err
+		}
+	}
+	return json.RawMessage(`{"ok":true}`), nil
 }

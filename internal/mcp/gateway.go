@@ -12,6 +12,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
+	"golang.org/x/mod/semver"
 )
 
 // AttemptContext is the fenced execution identity an MCP call is bound to.
@@ -40,6 +41,9 @@ type AttemptContext struct {
 	// AllowedMemoryNamespaces is the declared memory capability grant; the
 	// brokered memory tools deny writes and reads outside it.
 	AllowedMemoryNamespaces []string
+	// AllowedMemorySensitivities is independent of namespace access; absent
+	// grants default to internal only.
+	AllowedMemorySensitivities []string
 	// CanSpawnTasks is the explicit AgentVersion capability for dynamic
 	// workflow expansion. It defaults to false.
 	CanSpawnTasks bool
@@ -103,7 +107,7 @@ func (a *ToolAdapter) ListTools(ctx context.Context, params json.RawMessage) (an
 	if err := rejectUnknownFields(params, new(any), true); err != nil {
 		return nil, invalidParams("unknown cursor field")
 	}
-	identity, err := a.identity.Resolve(ctx)
+	identity, err := resolveAttemptIdentity(ctx, a.identity)
 	if err != nil {
 		return nil, unauthorizedError(err)
 	}
@@ -142,7 +146,7 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 	if len(call.Arguments) > 0 && !json.Valid(call.Arguments) {
 		return nil, invalidParams("arguments must be a JSON object")
 	}
-	identity, err := a.identity.Resolve(ctx)
+	identity, err := resolveAttemptIdentity(ctx, a.identity)
 	if err != nil {
 		// Default deny: without a fenced attempt identity the call is
 		// refused as a tool outcome, not a protocol failure.
@@ -171,7 +175,7 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 		Args: args, IdempotencyKey: mcpIdempotencyKey(identity, descriptor.Name, args),
 	})
 	if err != nil {
-		return toolErrorResult("invocation failed: " + err.Error()), nil
+		return toolErrorResult("TOOL_INVOCATION_FAILED"), nil
 	}
 	switch result.Outcome {
 	case tool.OutcomeExecuted, tool.OutcomeReplayed:
@@ -223,18 +227,26 @@ func mcpIdempotencyKey(identity AttemptContext, toolName string, args json.RawMe
 		canonical = args
 	}
 	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("mcp/%s/%s/%s", identity.AttemptID, toolName, hex.EncodeToString(digest[:8]))
+	return fmt.Sprintf("mcp/%s/%s/%s", identity.AttemptID, toolName, hex.EncodeToString(digest[:]))
 }
 
 func latestDescriptor(descriptors []store.ToolDescriptor, name string) (store.ToolDescriptor, bool) {
 	var latest store.ToolDescriptor
 	found := false
 	for _, descriptor := range descriptors {
-		if descriptor.Name == name && (!found || descriptor.Version > latest.Version) {
+		if descriptor.Name == name && (!found || compareToolVersions(descriptor.Version, latest.Version) > 0) {
 			latest, found = descriptor, true
 		}
 	}
 	return latest, found
+}
+
+func compareToolVersions(left, right string) int {
+	canonicalLeft, canonicalRight := "v"+left, "v"+right
+	if semver.IsValid(canonicalLeft) && semver.IsValid(canonicalRight) {
+		return semver.Compare(canonicalLeft, canonicalRight)
+	}
+	return strings.Compare(left, right)
 }
 
 func firstOr(values []string, fallback string) string {

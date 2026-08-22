@@ -6,19 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	kernelmoney "github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/errorcode"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 const workflowColumns = `id, tenant_id, namespace, idempotency_key, goal, spec, status,
 	COALESCE(failure_code, ''), cancel_requested_at,
-	COALESCE(budget_max_tasks, 0), COALESCE(budget_max_tokens, 0), COALESCE(budget_max_cost_usd, 0),
+	COALESCE(budget_max_tasks, 0), COALESCE(budget_max_tokens, 0), COALESCE(budget_max_cost_micro_usd, 0),
 	budget_exhausted_at, deadline_at, deadline_exceeded_at, resource_version, created_at, updated_at`
 
 const workflowStepColumns = `id, tenant_id, workflow_id, name, ordinal, status, attempt_count, task_id,
-	result_summary, COALESCE(failure_code, ''), COALESCE(decided_by, ''), decided_at,
+	result_summary, COALESCE(failure_code, ''), COALESCE(decided_by, ''), COALESCE(approval_decision, ''), decided_at,
 	COALESCE(parent_step_name, ''), spawn_depth, is_dynamic, COALESCE(spawn_key, ''),
 	COALESCE(goal, ''), COALESCE(agent_version_ref, ''), spec, COALESCE(max_attempts, 0),
 	resource_version, created_at, updated_at`
@@ -27,7 +30,7 @@ func scanWorkflow(row pgx.Row) (kernelstore.Workflow, error) {
 	var workflow kernelstore.Workflow
 	err := row.Scan(&workflow.ID, &workflow.TenantID, &workflow.Namespace, &workflow.IdempotencyKey,
 		&workflow.Goal, &workflow.Spec, &workflow.Status, &workflow.FailureCode, &workflow.CancelRequestedAt,
-		&workflow.BudgetMaxTasks, &workflow.BudgetMaxTokens, &workflow.BudgetMaxCostUSD,
+		&workflow.BudgetMaxTasks, &workflow.BudgetMaxTokens, &workflow.BudgetMaxCostMicroUSD,
 		&workflow.BudgetExhaustedAt, &workflow.DeadlineAt, &workflow.DeadlineExceededAt,
 		&workflow.ResourceVersion, &workflow.CreatedAt, &workflow.UpdatedAt)
 	if err != nil {
@@ -40,7 +43,7 @@ func scanWorkflowStep(row pgx.Row) (kernelstore.WorkflowStep, error) {
 	var step kernelstore.WorkflowStep
 	var summary []byte
 	err := row.Scan(&step.ID, &step.TenantID, &step.WorkflowID, &step.Name, &step.Ordinal, &step.Status,
-		&step.AttemptCount, &step.TaskID, &summary, &step.FailureCode, &step.DecidedBy, &step.DecidedAt,
+		&step.AttemptCount, &step.TaskID, &summary, &step.FailureCode, &step.DecidedBy, &step.ApprovalDecision, &step.DecidedAt,
 		&step.ParentStepName, &step.SpawnDepth, &step.IsDynamic, &step.SpawnKey,
 		&step.Goal, &step.AgentVersionRef, &step.Spec, &step.MaxAttempts,
 		&step.ResourceVersion, &step.CreatedAt, &step.UpdatedAt)
@@ -71,13 +74,13 @@ func (s *Store) CreateWorkflow(ctx context.Context, in kernelstore.CreateWorkflo
 	now := s.now()
 	created, err := scanWorkflow(tx.QueryRow(ctx, `
 		INSERT INTO workflows (id, tenant_id, namespace, idempotency_key, goal, spec, request_hash,
-			status, budget_max_tasks, budget_max_tokens, budget_max_cost_usd,
+			status, budget_max_tasks, budget_max_tokens, budget_max_cost_micro_usd,
 			deadline_at, step_count, resource_version, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, $10, $11, $12, 1, $13, $13)
 		ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET updated_at = workflows.updated_at
 		RETURNING `+workflowColumns,
 		in.ID, in.TenantID, in.Namespace, in.IdempotencyKey, in.Goal, in.Spec, hash[:],
-		nullableInt64(in.BudgetMaxTasks), nullableInt64(in.BudgetMaxTokens), nullableFloat(in.BudgetMaxCostUSD),
+		nullableInt64(in.BudgetMaxTasks), nullableInt64(in.BudgetMaxTokens), nullableInt64(int64(in.BudgetMaxCostMicroUSD)),
 		in.DeadlineAt, len(in.Steps), now))
 	if err != nil {
 		return kernelstore.CreateWorkflowResult{}, err
@@ -100,6 +103,16 @@ func (s *Store) CreateWorkflow(ctx context.Context, in kernelstore.CreateWorkflo
 			uuid.New(), in.TenantID, in.ID, step.Name, ordinal, now); err != nil {
 			return kernelstore.CreateWorkflowResult{}, classify(err)
 		}
+	}
+	if err := insertEvent(ctx, tx, in.TenantID, "Workflow", created.ID, created.ResourceVersion, "WorkflowCreated", map[string]any{
+		"workflowId": created.ID, "stepCount": len(in.Steps),
+	}, now, s.newID()); err != nil {
+		return kernelstore.CreateWorkflowResult{}, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "workflow.create", "Workflow", created.ID, map[string]any{
+		"stepCount": len(in.Steps), "namespace": in.Namespace,
+	}, now); err != nil {
+		return kernelstore.CreateWorkflowResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.CreateWorkflowResult{}, classify(err)
@@ -145,7 +158,7 @@ func scanWorkflowRow(rows pgx.Rows) (kernelstore.Workflow, error) {
 	var spec []byte
 	err := rows.Scan(&workflow.ID, &workflow.TenantID, &workflow.Namespace, &workflow.IdempotencyKey,
 		&workflow.Goal, &spec, &workflow.Status, &workflow.FailureCode, &workflow.CancelRequestedAt,
-		&workflow.BudgetMaxTasks, &workflow.BudgetMaxTokens, &workflow.BudgetMaxCostUSD,
+		&workflow.BudgetMaxTasks, &workflow.BudgetMaxTokens, &workflow.BudgetMaxCostMicroUSD,
 		&workflow.BudgetExhaustedAt, &workflow.DeadlineAt, &workflow.DeadlineExceededAt,
 		&workflow.ResourceVersion, &workflow.CreatedAt, &workflow.UpdatedAt)
 	workflow.Spec = spec
@@ -171,7 +184,7 @@ func (s *Store) ListWorkflowSteps(ctx context.Context, tenantID string, workflow
 		var spec []byte
 		if err := rows.Scan(&step.ID, &step.TenantID, &step.WorkflowID, &step.Name, &step.Ordinal,
 			&step.Status, &step.AttemptCount, &step.TaskID, &summary, &step.FailureCode, &step.DecidedBy,
-			&step.DecidedAt, &step.ParentStepName, &step.SpawnDepth, &step.IsDynamic, &step.SpawnKey,
+			&step.ApprovalDecision, &step.DecidedAt, &step.ParentStepName, &step.SpawnDepth, &step.IsDynamic, &step.SpawnKey,
 			&step.Goal, &step.AgentVersionRef, &spec, &step.MaxAttempts,
 			&step.ResourceVersion, &step.CreatedAt, &step.UpdatedAt); err != nil {
 			return nil, classify(err)
@@ -181,6 +194,15 @@ func (s *Store) ListWorkflowSteps(ctx context.Context, tenantID string, workflow
 		steps = append(steps, step)
 	}
 	return steps, rows.Err()
+}
+
+// GetWorkflowStep returns one tenant-scoped step without rescanning the
+// workflow. The orchestrator uses it to refresh its in-memory snapshot after
+// a CAS transition, keeping large DAG reconciliation linear.
+func (s *Store) GetWorkflowStep(ctx context.Context, tenantID string, workflowID uuid.UUID, name string) (kernelstore.WorkflowStep, error) {
+	return scanWorkflowStep(s.pool.QueryRow(ctx,
+		`SELECT `+workflowStepColumns+` FROM workflow_steps
+		 WHERE tenant_id = $1 AND workflow_id = $2 AND name = $3`, tenantID, workflowID, name))
 }
 
 // TransitionWorkflow CAS-transitions the workflow status.
@@ -206,12 +228,21 @@ func (s *Store) TransitionWorkflow(ctx context.Context, in kernelstore.Transitio
 		return kernelstore.Workflow{}, fmt.Errorf("%w: workflow %s -> %s",
 			kernelstore.ErrInvalidTransition, current.Status, in.To)
 	}
+	now := s.now()
 	updated, err := scanWorkflow(tx.QueryRow(ctx, `
-		UPDATE workflows SET status = $3, failure_code = NULLIF($4, ''), resource_version = resource_version + 1,
-			updated_at = $5 WHERE id = $1 AND resource_version = $2 RETURNING `+workflowColumns,
-		in.WorkflowID, in.ExpectedVersion, in.To, in.FailureCode, s.now()))
+		UPDATE workflows SET status = $4, failure_code = NULLIF($5, ''), resource_version = resource_version + 1,
+			updated_at = $6 WHERE tenant_id = $1 AND id = $2 AND resource_version = $3 RETURNING `+workflowColumns,
+		in.TenantID, in.WorkflowID, in.ExpectedVersion, in.To, in.FailureCode, now))
 	if err != nil {
 		return kernelstore.Workflow{}, classify(err)
+	}
+	if err := insertEvent(ctx, tx, in.TenantID, "Workflow", in.WorkflowID, updated.ResourceVersion,
+		"Workflow"+title(string(in.To)), map[string]any{"workflowId": in.WorkflowID, "status": in.To, "failureCode": in.FailureCode}, now, s.newID()); err != nil {
+		return kernelstore.Workflow{}, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "workflow.transition", "Workflow", in.WorkflowID,
+		map[string]any{"from": current.Status, "to": in.To, "failureCode": in.FailureCode}, now); err != nil {
+		return kernelstore.Workflow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.Workflow{}, classify(err)
@@ -261,13 +292,22 @@ func (s *Store) TransitionWorkflowStep(ctx context.Context, in kernelstore.Trans
 	} else if in.To == kernelstore.StepSucceeded || in.To == kernelstore.StepRunning {
 		failureCode = ""
 	}
+	now := s.now()
 	updated, err := scanWorkflowStep(tx.QueryRow(ctx, `
 		UPDATE workflow_steps SET status = $4, task_id = $5, attempt_count = $6, result_summary = $7,
 			failure_code = NULLIF($8, ''), resource_version = resource_version + 1, updated_at = $9
 		WHERE id = $1 AND resource_version = $2 AND tenant_id = $3 RETURNING `+workflowStepColumns,
-		current.ID, in.ExpectedVersion, in.TenantID, in.To, taskID, attemptCount, summary, failureCode, s.now()))
+		current.ID, in.ExpectedVersion, in.TenantID, in.To, taskID, attemptCount, summary, failureCode, now))
 	if err != nil {
 		return kernelstore.WorkflowStep{}, classify(err)
+	}
+	if err := insertEvent(ctx, tx, in.TenantID, "WorkflowStep", current.ID, updated.ResourceVersion,
+		"WorkflowStep"+title(string(in.To)), map[string]any{"workflowId": in.WorkflowID, "step": in.StepName, "status": in.To, "failureCode": failureCode}, now, s.newID()); err != nil {
+		return kernelstore.WorkflowStep{}, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "workflow.step.transition", "WorkflowStep", current.ID,
+		map[string]any{"workflowId": in.WorkflowID, "step": in.StepName, "from": current.Status, "to": in.To}, now); err != nil {
+		return kernelstore.WorkflowStep{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.WorkflowStep{}, classify(err)
@@ -302,18 +342,26 @@ func (s *Store) DecideWorkflowStepApproval(ctx context.Context, in kernelstore.D
 	if current.DecidedBy != "" {
 		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: step already decided", kernelstore.ErrInvalidTransition)
 	}
-	// decided_by carries the machine decision (approved|rejected); the
-	// deciding principal rides the control API audit surface.
 	decision := "approved"
 	if !in.Approved {
 		decision = "rejected"
 	}
+	now := s.now()
 	updated, err := scanWorkflowStep(tx.QueryRow(ctx, `
-		UPDATE workflow_steps SET decided_by = $4, decided_at = $5, resource_version = resource_version + 1, updated_at = $5
+		UPDATE workflow_steps SET decided_by = $4, approval_decision = $5, decided_at = $6,
+			resource_version = resource_version + 1, updated_at = $6
 		WHERE id = $1 AND resource_version = $2 AND tenant_id = $3 RETURNING `+workflowStepColumns,
-		current.ID, in.ExpectedVersion, in.TenantID, decision, s.now()))
+		current.ID, in.ExpectedVersion, in.TenantID, in.DecidedBy, decision, now))
 	if err != nil {
 		return kernelstore.WorkflowStep{}, classify(err)
+	}
+	if err := insertEvent(ctx, tx, in.TenantID, "WorkflowStep", current.ID, updated.ResourceVersion,
+		"WorkflowStepApprovalDecided", map[string]any{"workflowId": in.WorkflowID, "step": in.StepName, "decision": decision, "decidedBy": in.DecidedBy}, now, s.newID()); err != nil {
+		return kernelstore.WorkflowStep{}, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "workflow.step.approval", "WorkflowStep", current.ID,
+		map[string]any{"workflowId": in.WorkflowID, "step": in.StepName, "decision": decision, "decidedBy": in.DecidedBy}, now); err != nil {
+		return kernelstore.WorkflowStep{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.WorkflowStep{}, classify(err)
@@ -343,12 +391,20 @@ func (s *Store) RequestWorkflowCancellation(ctx context.Context, tenantID string
 		rollback(ctx, tx)
 		return current, nil
 	}
+	now := s.now()
 	updated, err := scanWorkflow(tx.QueryRow(ctx, `
-		UPDATE workflows SET cancel_requested_at = $3, resource_version = resource_version + 1, updated_at = $3
-		WHERE id = $1 AND resource_version = $2 RETURNING `+workflowColumns,
-		workflowID, expectedVersion, s.now()))
+		UPDATE workflows SET cancel_requested_at = $4, resource_version = resource_version + 1, updated_at = $4
+		WHERE tenant_id = $1 AND id = $2 AND resource_version = $3 RETURNING `+workflowColumns,
+		tenantID, workflowID, expectedVersion, now))
 	if err != nil {
 		return kernelstore.Workflow{}, classify(err)
+	}
+	if err := insertEvent(ctx, tx, tenantID, "Workflow", workflowID, updated.ResourceVersion,
+		"WorkflowCancellationRequested", map[string]any{"workflowId": workflowID}, now, s.newID()); err != nil {
+		return kernelstore.Workflow{}, err
+	}
+	if err := auditHook(ctx, tx, tenantID, "workflow.cancel.request", "Workflow", workflowID, nil, now); err != nil {
+		return kernelstore.Workflow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return kernelstore.Workflow{}, classify(err)
@@ -393,15 +449,8 @@ func nullableInt64(value int64) any {
 	return value
 }
 
-func nullableFloat(value float64) any {
-	if value == 0 {
-		return nil
-	}
-	return value
-}
-
 // ClaimWorkflows leases active workflows to one orchestrator instance
-// (v1.3): unclaimed or expired-claim workflows are taken round-robin across
+// Unclaimed or expired-claim workflows are taken round-robin across
 // tenants so one tenant's backlog cannot crowd out the others, and a dead
 // instance's claims expire for its peers to take over. The claim columns are
 // internal and never touch the client-observed resource_version.
@@ -452,11 +501,11 @@ func (s *Store) ClaimWorkflows(ctx context.Context, in kernelstore.ClaimWorkflow
 	claimed := make([]kernelstore.Workflow, 0, len(candidates))
 	for _, workflow := range candidates {
 		updated, err := scanWorkflow(tx.QueryRow(ctx, `
-			UPDATE workflows SET orchestrator_claim = $3, orchestrator_claim_until = $4
-			WHERE id = $1 AND resource_version = $2
-				AND (orchestrator_claim IS NULL OR orchestrator_claim = $3 OR orchestrator_claim_until <= $5)
+			UPDATE workflows SET orchestrator_claim = $4, orchestrator_claim_until = $5
+			WHERE tenant_id = $1 AND id = $2 AND resource_version = $3
+				AND (orchestrator_claim IS NULL OR orchestrator_claim = $4 OR orchestrator_claim_until <= $6)
 			RETURNING `+workflowColumns,
-			workflow.ID, workflow.ResourceVersion, in.Owner, now.Add(in.Lease), now))
+			workflow.TenantID, workflow.ID, workflow.ResourceVersion, in.Owner, now.Add(in.Lease), now))
 		if err != nil {
 			if errors.Is(err, kernelstore.ErrNotFound) {
 				continue // lost the claim race; a peer took it
@@ -471,21 +520,32 @@ func (s *Store) ClaimWorkflows(ctx context.Context, in kernelstore.ClaimWorkflow
 	return claimed, nil
 }
 
+// RenewWorkflowClaim extends one live orchestrator lease. A stale owner or an
+// already-expired claim is fenced instead of being resurrected.
+func (s *Store) RenewWorkflowClaim(ctx context.Context, tenantID string, workflowID uuid.UUID, owner string, lease time.Duration) error {
+	if strings.TrimSpace(tenantID) == "" || workflowID == uuid.Nil || strings.TrimSpace(owner) == "" || lease <= 0 {
+		return fmt.Errorf("tenant, workflow, owner and positive lease are required")
+	}
+	now := s.now()
+	command, err := s.pool.Exec(ctx, `UPDATE workflows SET orchestrator_claim_until = $1
+		WHERE tenant_id = $2 AND id = $3 AND orchestrator_claim = $4 AND orchestrator_claim_until > $5`,
+		now.Add(lease), tenantID, workflowID, owner, now)
+	if err != nil {
+		return classify(err)
+	}
+	if command.RowsAffected() != 1 {
+		return kernelstore.ErrFenced
+	}
+	return nil
+}
+
 // workflowTaskUsage aggregates the tasks carrying one workflow's idempotency
 // prefix: their count, settled usage, and any unsettled overage.
-func (s *Store) workflowTaskUsage(ctx context.Context, tx pgx.Tx, workflowID uuid.UUID) (kernelstore.WorkflowUsage, error) {
+func (s *Store) workflowTaskUsage(ctx context.Context, tx pgx.Tx, tenantID string, workflowID uuid.UUID) (kernelstore.WorkflowUsage, error) {
 	var usage kernelstore.WorkflowUsage
-	err := tx.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT t.id),
-			COALESCE(SUM(s.tokens), 0),
-			COALESCE(SUM(s.cost_usd), 0),
-			COALESCE(BOOL_OR(s.id IS NULL), false)
-		FROM tasks t
-		LEFT JOIN task_budget_settlements s ON s.tenant_id = t.tenant_id AND s.task_id = t.id
-		WHERE t.idempotency_key LIKE 'workflow/' || $1::uuid || '/%'
-			AND t.tenant_id IN (SELECT tenant_id FROM workflows WHERE id = $1)`,
-		workflowID).Scan(
-		&usage.Tasks, &usage.Tokens, &usage.CostUSD, &usage.PendingOverage)
+	err := tx.QueryRow(ctx, workflowUsageQuery,
+		tenantID, workflowID).Scan(
+		&usage.Tasks, &usage.Tokens, &usage.CostMicroUSD, &usage.ReservedTokens, &usage.ReservedCostMicroUSD, &usage.PendingOverage)
 	if err != nil {
 		return usage, classify(err)
 	}
@@ -496,27 +556,20 @@ func (s *Store) workflowTaskUsage(ctx context.Context, tx pgx.Tx, workflowID uui
 // usage. Callers without a transaction use this entry point.
 func (s *Store) WorkflowUsageSnapshot(ctx context.Context, tenantID string, workflowID uuid.UUID) (kernelstore.WorkflowUsage, error) {
 	var usage kernelstore.WorkflowUsage
-	err := s.pool.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT t.id),
-			COALESCE(SUM(s.tokens), 0),
-			COALESCE(SUM(s.cost_usd), 0),
-			COALESCE(BOOL_OR(s.id IS NULL), false)
-		FROM tasks t
-		LEFT JOIN task_budget_settlements s ON s.tenant_id = t.tenant_id AND s.task_id = t.id
-		WHERE t.tenant_id = $1 AND t.idempotency_key LIKE 'workflow/' || $2::uuid || '/%'`,
+	err := s.pool.QueryRow(ctx, workflowUsageQuery,
 		tenantID, workflowID).Scan(
-		&usage.Tasks, &usage.Tokens, &usage.CostUSD, &usage.PendingOverage)
+		&usage.Tasks, &usage.Tokens, &usage.CostMicroUSD, &usage.ReservedTokens, &usage.ReservedCostMicroUSD, &usage.PendingOverage)
 	if err != nil {
 		return usage, classify(err)
 	}
 	var budgets struct {
 		Tasks  *int64
 		Tokens *int64
-		Cost   *float64
+		Cost   *int64
 	}
 	if err := s.pool.QueryRow(ctx,
-		`SELECT budget_max_tasks, budget_max_tokens, budget_max_cost_usd FROM workflows WHERE id = $1`,
-		workflowID).Scan(&budgets.Tasks, &budgets.Tokens, &budgets.Cost); err != nil {
+		`SELECT budget_max_tasks, budget_max_tokens, budget_max_cost_micro_usd FROM workflows WHERE tenant_id = $1 AND id = $2`,
+		tenantID, workflowID).Scan(&budgets.Tasks, &budgets.Tokens, &budgets.Cost); err != nil {
 		return usage, classify(err)
 	}
 	if budgets.Tasks != nil {
@@ -526,14 +579,18 @@ func (s *Store) WorkflowUsageSnapshot(ctx context.Context, tenantID string, work
 		usage.BudgetMaxTokens = *budgets.Tokens
 	}
 	if budgets.Cost != nil {
-		usage.BudgetMaxCostUSD = *budgets.Cost
+		usage.BudgetMaxCostMicroUSD = kernelmoney.MicroUSD(*budgets.Cost)
 	}
 	return usage, nil
 }
 
+const workflowUsageQuery = `
+	SELECT task_count,settled_tokens,settled_cost_micro_usd,reserved_tokens,reserved_cost_micro_usd,pending_tasks>0
+	FROM workflow_usage_ledgers WHERE tenant_id=$1 AND workflow_id=$2`
+
 // SpawnWorkflowStep creates one dynamic step with every recursion, fan-out
 // and budget guard evaluated inside the same transaction as the insert
-// (v1.3), so two racing spawn calls can never both slip past a cap. A
+// so two racing spawn calls can never both slip past a cap. A
 // spawn_key replay returns the existing step unchanged.
 func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkflowStepInput) (kernelstore.SpawnWorkflowStepResult, error) {
 	result := kernelstore.SpawnWorkflowStepResult{}
@@ -569,7 +626,7 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 	}
 	result.Workflow = workflow
 	if !in.Guards.Enabled {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_DISABLED", Message: "dynamic spawning is not enabled for this workflow"}
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnDisabled, Message: "dynamic spawning is not enabled for this workflow"}
 	}
 	if workflow.ResourceVersion != in.WorkflowVersion {
 		return result, versionConflict("workflow", in.WorkflowID, in.WorkflowVersion, workflow.ResourceVersion)
@@ -578,21 +635,21 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 		return result, fmt.Errorf("%w: workflow is terminal", kernelstore.ErrInvalidTransition)
 	}
 	if workflow.CancelRequestedAt != nil {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_CANCELLED", Message: "workflow cancellation is in progress"}
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnCancelled, Message: "workflow cancellation is in progress"}
 	}
 	if workflow.BudgetExhaustedAt != nil {
 		result.WorkflowExhausted = true
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_BUDGET_EXHAUSTED", Message: "workflow budget is exhausted"}
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted, Message: "workflow budget is exhausted"}
 	}
 	if workflow.DeadlineExceededAt != nil || (workflow.DeadlineAt != nil && !s.now().Before(*workflow.DeadlineAt)) {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_DEADLINE_EXCEEDED", Message: "workflow deadline has been exceeded"}
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnDeadlineExceeded, Message: "workflow deadline has been exceeded"}
 	}
 
 	spawnKey := in.IdempotencyKey + "-" + kernelstore.SpawnKeyHash(in.Arguments)
 	// Replay: the unique partial index makes a racing duplicate impossible.
 	if existing, err := scanWorkflowStep(tx.QueryRow(ctx,
-		`SELECT `+workflowStepColumns+` FROM workflow_steps WHERE workflow_id = $1 AND spawn_key = $2`,
-		in.WorkflowID, spawnKey)); err == nil {
+		`SELECT `+workflowStepColumns+` FROM workflow_steps WHERE tenant_id = $1 AND workflow_id = $2 AND spawn_key = $3`,
+		in.TenantID, in.WorkflowID, spawnKey)); err == nil {
 		result.Step = existing
 		result.Usage = usageWithBudgets(workflow)
 		return result, tx.Commit(ctx)
@@ -600,9 +657,9 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 		return result, err
 	}
 	if _, err := scanWorkflowStep(tx.QueryRow(ctx,
-		`SELECT `+workflowStepColumns+` FROM workflow_steps WHERE workflow_id = $1 AND name = $2`,
-		in.WorkflowID, in.Name)); err == nil {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_NAME_CONFLICT", Message: "workflow step name already exists"}
+		`SELECT `+workflowStepColumns+` FROM workflow_steps WHERE tenant_id = $1 AND workflow_id = $2 AND name = $3`,
+		in.TenantID, in.WorkflowID, in.Name)); err == nil {
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnNameConflict, Message: "workflow step name already exists"}
 	} else if !errors.Is(err, kernelstore.ErrNotFound) {
 		return result, err
 	}
@@ -612,8 +669,8 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 	var children int64
 	if in.ParentStepName != "" {
 		parent, err = scanWorkflowStep(tx.QueryRow(ctx,
-			`SELECT `+workflowStepColumns+` FROM workflow_steps WHERE workflow_id = $1 AND name = $2 FOR UPDATE`,
-			in.WorkflowID, in.ParentStepName))
+			`SELECT `+workflowStepColumns+` FROM workflow_steps WHERE tenant_id = $1 AND workflow_id = $2 AND name = $3 FOR UPDATE`,
+			in.TenantID, in.WorkflowID, in.ParentStepName))
 		if err != nil {
 			if errors.Is(err, kernelstore.ErrNotFound) {
 				return result, kernelstore.ErrStepNotFound
@@ -621,73 +678,73 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 			return result, err
 		}
 		if err := tx.QueryRow(ctx,
-			`SELECT child_count FROM workflow_steps WHERE workflow_id = $1 AND name = $2`,
-			in.WorkflowID, in.ParentStepName).Scan(&children); err != nil {
+			`SELECT child_count FROM workflow_steps WHERE tenant_id = $1 AND workflow_id = $2 AND name = $3`,
+			in.TenantID, in.WorkflowID, in.ParentStepName).Scan(&children); err != nil {
 			return result, classify(err)
 		}
 	}
 	depth := parent.SpawnDepth + 1
 	if in.Guards.MaxSpawnDepth > 0 && depth > in.Guards.MaxSpawnDepth {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_DEPTH_EXCEEDED",
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnDepthExceeded,
 			Message: fmt.Sprintf("spawn depth %d exceeds maxSpawnDepth %d", depth, in.Guards.MaxSpawnDepth)}
 	}
 
 	// Workflow-level guards.
 	var stepCount, dynamicCount int64
 	if err := tx.QueryRow(ctx,
-		`SELECT step_count, dynamic_step_count FROM workflows WHERE id = $1`,
-		in.WorkflowID).Scan(&stepCount, &dynamicCount); err != nil {
+		`SELECT step_count, dynamic_step_count FROM workflows WHERE tenant_id = $1 AND id = $2`,
+		in.TenantID, in.WorkflowID).Scan(&stepCount, &dynamicCount); err != nil {
 		return result, classify(err)
 	}
 	if in.Guards.MaxWorkflowSteps > 0 && stepCount >= in.Guards.MaxWorkflowSteps {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_TOTAL_STEPS_EXCEEDED",
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnTotalStepsExceeded,
 			Message: fmt.Sprintf("workflow already has %d steps (maxWorkflowSteps %d)", stepCount, in.Guards.MaxWorkflowSteps)}
 	}
 	if in.Guards.MaxDynamicSteps > 0 && dynamicCount >= in.Guards.MaxDynamicSteps {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_DYNAMIC_LIMIT_EXCEEDED",
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnDynamicExceeded,
 			Message: fmt.Sprintf("workflow already has %d dynamic steps (maxDynamicSteps %d)", dynamicCount, in.Guards.MaxDynamicSteps)}
 	}
 
 	// Budget guards: tasks/tokens/cost ceilings across the whole run.
-	usage, err := s.workflowTaskUsage(ctx, tx, in.WorkflowID)
+	usage, err := s.workflowTaskUsage(ctx, tx, in.TenantID, in.WorkflowID)
 	if err != nil {
 		return result, err
 	}
-	usage.BudgetMaxTasks, usage.BudgetMaxTokens, usage.BudgetMaxCostUSD =
-		workflow.BudgetMaxTasks, workflow.BudgetMaxTokens, workflow.BudgetMaxCostUSD
+	usage.BudgetMaxTasks, usage.BudgetMaxTokens, usage.BudgetMaxCostMicroUSD =
+		workflow.BudgetMaxTasks, workflow.BudgetMaxTokens, workflow.BudgetMaxCostMicroUSD
 	result.Usage = usage
 	if workflow.BudgetMaxTasks > 0 && usage.Tasks >= workflow.BudgetMaxTasks {
 		result.WorkflowExhausted = true
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_BUDGET_EXHAUSTED",
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
 			Message: fmt.Sprintf("workflow budget exhausted: %d/%d tasks", usage.Tasks, workflow.BudgetMaxTasks)}
 	}
-	if workflow.BudgetMaxTokens > 0 && usage.Tokens >= workflow.BudgetMaxTokens {
+	if workflow.BudgetMaxTokens > 0 && usage.Tokens+usage.ReservedTokens >= workflow.BudgetMaxTokens {
 		result.WorkflowExhausted = true
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_BUDGET_EXHAUSTED",
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
 			Message: fmt.Sprintf("workflow budget exhausted: %d/%d tokens", usage.Tokens, workflow.BudgetMaxTokens)}
 	}
-	if workflow.BudgetMaxCostUSD > 0 && usage.CostUSD >= workflow.BudgetMaxCostUSD {
+	if workflow.BudgetMaxCostMicroUSD > 0 && usage.CostMicroUSD+usage.ReservedCostMicroUSD >= workflow.BudgetMaxCostMicroUSD {
 		result.WorkflowExhausted = true
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_BUDGET_EXHAUSTED",
-			Message: fmt.Sprintf("workflow budget exhausted: $%.6f/$%.6f", usage.CostUSD, workflow.BudgetMaxCostUSD)}
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
+			Message: fmt.Sprintf("workflow budget exhausted: $%.6f/$%.6f", usage.CostMicroUSD.USD(), workflow.BudgetMaxCostMicroUSD.USD())}
 	}
 	if in.Guards.MaxSpawnTasks > 0 && usage.Tasks >= in.Guards.MaxSpawnTasks {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_TASK_LIMIT_EXCEEDED",
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnTaskLimitExceeded,
 			Message: fmt.Sprintf("spawned task limit reached: %d/%d", usage.Tasks, in.Guards.MaxSpawnTasks)}
 	}
-	if in.Guards.MaxSpawnTokens > 0 && usage.Tokens >= in.Guards.MaxSpawnTokens {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_TOKEN_LIMIT_EXCEEDED",
+	if in.Guards.MaxSpawnTokens > 0 && usage.Tokens+usage.ReservedTokens >= in.Guards.MaxSpawnTokens {
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnTokenLimitExceeded,
 			Message: fmt.Sprintf("spawned token limit reached: %d/%d", usage.Tokens, in.Guards.MaxSpawnTokens)}
 	}
-	if in.Guards.MaxSpawnCostUSD > 0 && usage.CostUSD >= in.Guards.MaxSpawnCostUSD {
-		return result, kernelstore.SpawnDenial{Code: "SPAWN_COST_LIMIT_EXCEEDED",
-			Message: fmt.Sprintf("spawned cost limit reached: $%.6f/$%.6f", usage.CostUSD, in.Guards.MaxSpawnCostUSD)}
+	if in.Guards.MaxSpawnCostMicroUSD > 0 && usage.CostMicroUSD+usage.ReservedCostMicroUSD >= in.Guards.MaxSpawnCostMicroUSD {
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnCostLimitExceeded,
+			Message: fmt.Sprintf("spawned cost limit reached: $%.6f/$%.6f", usage.CostMicroUSD.USD(), in.Guards.MaxSpawnCostMicroUSD.USD())}
 	}
 
 	// Per-parent fan-out cap.
 	if in.ParentStepName != "" {
 		if in.Guards.MaxChildrenPerStep > 0 && children >= in.Guards.MaxChildrenPerStep {
-			return result, kernelstore.SpawnDenial{Code: "SPAWN_FANOUT_EXCEEDED",
+			return result, kernelstore.SpawnDenial{Code: errorcode.SpawnFanoutExceeded,
 				Message: fmt.Sprintf("parent %q already spawned %d children (maxChildrenPerStep %d)",
 					in.ParentStepName, children, in.Guards.MaxChildrenPerStep)}
 		}
@@ -708,12 +765,12 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE workflows SET step_count = step_count + 1, dynamic_step_count = dynamic_step_count + 1
-		WHERE id = $1`, in.WorkflowID); err != nil {
+		WHERE tenant_id = $1 AND id = $2`, in.TenantID, in.WorkflowID); err != nil {
 		return result, classify(err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE workflow_steps SET child_count = child_count + 1
-		WHERE workflow_id = $1 AND name = $2`, in.WorkflowID, in.ParentStepName); err != nil {
+		WHERE tenant_id = $1 AND workflow_id = $2 AND name = $3`, in.TenantID, in.WorkflowID, in.ParentStepName); err != nil {
 		return result, classify(err)
 	}
 	result.Step = created
@@ -722,6 +779,12 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 		"workflowId": in.WorkflowID, "step": created.Name, "parentStep": in.ParentStepName,
 		"spawnDepth": depth, "spawnKey": spawnKey,
 	}, s.now(), s.newID()); err != nil {
+		return result, err
+	}
+	if err := auditHook(ctx, tx, in.TenantID, "workflow.step.spawn", "WorkflowStep", created.ID, map[string]any{
+		"workflowId": in.WorkflowID, "step": created.Name, "parentStep": in.ParentStepName,
+		"spawnDepth": depth, "spawnKey": spawnKey,
+	}, s.now()); err != nil {
 		return result, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -754,15 +817,18 @@ func (s *Store) MarkWorkflowBudgetExhausted(ctx context.Context, tenantID string
 		return current, nil
 	}
 	updated, err := scanWorkflow(tx.QueryRow(ctx, `
-		UPDATE workflows SET budget_exhausted_at = $3, resource_version = resource_version + 1, updated_at = $3
-		WHERE id = $1 AND resource_version = $2 RETURNING `+workflowColumns,
-		workflowID, expectedVersion, s.now()))
+		UPDATE workflows SET budget_exhausted_at = $4, resource_version = resource_version + 1, updated_at = $4
+		WHERE tenant_id = $1 AND id = $2 AND resource_version = $3 RETURNING `+workflowColumns,
+		tenantID, workflowID, expectedVersion, s.now()))
 	if err != nil {
 		return kernelstore.Workflow{}, classify(err)
 	}
 	if err := insertEvent(ctx, tx, tenantID, "Workflow", workflowID, updated.ResourceVersion, "WorkflowBudgetExhausted", map[string]any{
 		"workflowId": workflowID,
 	}, s.now(), s.newID()); err != nil {
+		return kernelstore.Workflow{}, err
+	}
+	if err := auditHook(ctx, tx, tenantID, "workflow.budget.exhausted", "Workflow", workflowID, nil, s.now()); err != nil {
 		return kernelstore.Workflow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -795,15 +861,20 @@ func (s *Store) MarkWorkflowDeadlineExceeded(ctx context.Context, tenantID strin
 		return current, nil
 	}
 	updated, err := scanWorkflow(tx.QueryRow(ctx, `
-		UPDATE workflows SET deadline_exceeded_at = $3, resource_version = resource_version + 1, updated_at = $3
-		WHERE id = $1 AND resource_version = $2 RETURNING `+workflowColumns,
-		workflowID, expectedVersion, s.now()))
+		UPDATE workflows SET deadline_exceeded_at = $4, resource_version = resource_version + 1, updated_at = $4
+		WHERE tenant_id = $1 AND id = $2 AND resource_version = $3 RETURNING `+workflowColumns,
+		tenantID, workflowID, expectedVersion, s.now()))
 	if err != nil {
 		return kernelstore.Workflow{}, classify(err)
 	}
 	if err := insertEvent(ctx, tx, tenantID, "Workflow", workflowID, updated.ResourceVersion, "WorkflowDeadlineExceeded", map[string]any{
 		"workflowId": workflowID, "deadline": current.DeadlineAt,
 	}, s.now(), s.newID()); err != nil {
+		return kernelstore.Workflow{}, err
+	}
+	if err := auditHook(ctx, tx, tenantID, "workflow.deadline.exceeded", "Workflow", workflowID, map[string]any{
+		"deadline": current.DeadlineAt,
+	}, s.now()); err != nil {
 		return kernelstore.Workflow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -822,35 +893,29 @@ func nullableInt(value int) any {
 func usageWithBudgets(workflow kernelstore.Workflow) kernelstore.WorkflowUsage {
 	return kernelstore.WorkflowUsage{
 		BudgetMaxTasks: workflow.BudgetMaxTasks, BudgetMaxTokens: workflow.BudgetMaxTokens,
-		BudgetMaxCostUSD: workflow.BudgetMaxCostUSD,
+		BudgetMaxCostMicroUSD: workflow.BudgetMaxCostMicroUSD,
 	}
 }
 
-// WorkflowLineage resolves the workflow origin of one task from its
-// idempotency key ("workflow/<wf>/<step>/<attempt>", v1.3). Standalone tasks
-// report ok=false.
-func (s *Store) WorkflowLineage(ctx context.Context, tenantID, taskKey string) (uuid.UUID, string, int64, bool, error) {
-	rest, ok := strings.CutPrefix(taskKey, "workflow/")
-	if !ok {
-		return uuid.Nil, "", 0, false, nil
-	}
-	parts := strings.Split(rest, "/")
-	if len(parts) != 3 {
-		return uuid.Nil, "", 0, false, nil
-	}
-	workflowID, err := uuid.Parse(parts[0])
+// WorkflowLineage resolves workflow ownership exclusively from explicit task
+// lineage columns. Idempotency keys remain opaque and are never parsed.
+func (s *Store) WorkflowLineage(ctx context.Context, tenantID string, taskID uuid.UUID) (uuid.UUID, string, int64, bool, error) {
+	var workflowID *uuid.UUID
+	var stepName string
+	var version *int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT t.workflow_id, COALESCE(t.workflow_step_name, ''), w.resource_version
+		FROM tasks t
+		LEFT JOIN workflows w ON w.tenant_id = t.tenant_id AND w.id = t.workflow_id
+		WHERE t.tenant_id = $1 AND t.id = $2`, tenantID, taskID).Scan(&workflowID, &stepName, &version)
 	if err != nil {
-		return uuid.Nil, "", 0, false, nil
-	}
-	var version int64
-	err = s.pool.QueryRow(ctx,
-		`SELECT resource_version FROM workflows WHERE tenant_id = $1 AND id = $2`,
-		tenantID, workflowID).Scan(&version)
-	if err != nil {
-		if errors.Is(err, kernelstore.ErrNotFound) {
-			return uuid.Nil, "", 0, false, nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, "", 0, false, kernelstore.ErrNotFound
 		}
 		return uuid.Nil, "", 0, false, classify(err)
 	}
-	return workflowID, parts[1], version, true, nil
+	if workflowID == nil || version == nil || stepName == "" {
+		return uuid.Nil, "", 0, false, nil
+	}
+	return *workflowID, stepName, *version, true, nil
 }

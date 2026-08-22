@@ -15,6 +15,7 @@ import (
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 	"github.com/google/uuid"
@@ -79,12 +80,16 @@ func (b *GrpcModelBroker) InvokeStream(ctx context.Context, in model.InvokeInput
 			if parseErr != nil {
 				return output, fmt.Errorf("finish chunk call id: %w", parseErr)
 			}
+			cost, parseErr := money.FromUSD(finish.GetCostUsd())
+			if parseErr != nil {
+				return output, fmt.Errorf("finish chunk cost: %w", parseErr)
+			}
 			output.Content = finish.GetContent()
 			output.Call = store.ModelCall{
 				ID: callID, TenantID: in.TenantID, TaskID: in.TaskID, RunID: in.RunID, AttemptID: in.AttemptID,
 				ModelRef: finish.GetModelRef(), Status: store.ModelCallStatus(finish.GetStatus()),
 				InputTokens: finish.GetInputTokens(), OutputTokens: finish.GetOutputTokens(),
-				CostUSD: finish.GetCostUsd(), PriceRevision: finish.GetPriceRevision(),
+				CostMicroUSD: cost, PriceRevision: finish.GetPriceRevision(),
 				ProviderRequestID: finish.GetProviderRequestId(), FinishReason: finish.GetFinishReason(),
 			}
 		case chunk.GetFailure() != nil:

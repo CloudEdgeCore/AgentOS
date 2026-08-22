@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/google/uuid"
 )
 
@@ -27,6 +28,7 @@ var (
 
 // ModelCallStatus is the lifecycle of one model invocation.
 type ModelCallStatus string
+type ModelUsageCertainty string
 
 const (
 	ModelCallStarted   ModelCallStatus = "STARTED"
@@ -34,6 +36,16 @@ const (
 	ModelCallFailed    ModelCallStatus = "FAILED"
 	ModelCallStopped   ModelCallStatus = "STOPPED"
 )
+
+const (
+	ModelUsageKnownZero ModelUsageCertainty = "KNOWN_ZERO_USAGE"
+	ModelUsageKnown     ModelUsageCertainty = "KNOWN_USAGE"
+	ModelUsageUnknown   ModelUsageCertainty = "UNKNOWN_USAGE"
+)
+
+func (c ModelUsageCertainty) Valid() bool {
+	return c == ModelUsageKnownZero || c == ModelUsageKnown || c == ModelUsageUnknown
+}
 
 func (s ModelCallStatus) Terminal() bool {
 	switch s {
@@ -59,16 +71,16 @@ func ValidateModelRef(ref string) error {
 // price table. It is immutable per (tenant, provider, model): a price change
 // registers a new price revision under the same identity.
 type ModelDescriptor struct {
-	ID                    uuid.UUID
-	TenantID              string
-	Provider              string
-	ModelName             string
-	SupportsStreaming     bool
-	InputPricePerMillion  float64
-	OutputPricePerMillion float64
-	PriceRevision         string
-	SpecHash              [sha256.Size]byte
-	CreatedAt             time.Time
+	ID                            uuid.UUID
+	TenantID                      string
+	Provider                      string
+	ModelName                     string
+	SupportsStreaming             bool
+	InputPriceMicroUSDPerMillion  money.MicroUSD
+	OutputPriceMicroUSDPerMillion money.MicroUSD
+	PriceRevision                 string
+	SpecHash                      [sha256.Size]byte
+	CreatedAt                     time.Time
 }
 
 // Ref returns the canonical provider/model reference.
@@ -82,41 +94,42 @@ func (d ModelDescriptor) Validate() error {
 	if err := ValidateModelRef(d.Ref()); err != nil {
 		return err
 	}
-	if d.InputPricePerMillion < 0 || d.OutputPricePerMillion < 0 {
+	if d.InputPriceMicroUSDPerMillion < 0 || d.OutputPriceMicroUSDPerMillion < 0 {
 		return fmt.Errorf("prices must not be negative")
 	}
 	return nil
 }
 
 type RegisterModelDescriptorInput struct {
-	TenantID              string
-	Provider              string
-	ModelName             string
-	SupportsStreaming     bool
-	InputPricePerMillion  float64
-	OutputPricePerMillion float64
-	PriceRevision         string
+	TenantID                      string
+	Provider                      string
+	ModelName                     string
+	SupportsStreaming             bool
+	InputPriceMicroUSDPerMillion  money.MicroUSD
+	OutputPriceMicroUSDPerMillion money.MicroUSD
+	PriceRevision                 string
 }
 
 func (in RegisterModelDescriptorInput) ValidateAndHash() (ModelDescriptor, [sha256.Size]byte, error) {
 	descriptor := ModelDescriptor{
 		TenantID: in.TenantID, Provider: in.Provider, ModelName: in.ModelName,
-		SupportsStreaming:    in.SupportsStreaming,
-		InputPricePerMillion: in.InputPricePerMillion, OutputPricePerMillion: in.OutputPricePerMillion,
-		PriceRevision: in.PriceRevision,
+		SupportsStreaming:             in.SupportsStreaming,
+		InputPriceMicroUSDPerMillion:  in.InputPriceMicroUSDPerMillion,
+		OutputPriceMicroUSDPerMillion: in.OutputPriceMicroUSDPerMillion,
+		PriceRevision:                 in.PriceRevision,
 	}
 	if err := descriptor.Validate(); err != nil {
 		return descriptor, [sha256.Size]byte{}, err
 	}
 	encoded, err := json.Marshal(struct {
-		Provider              string  `json:"provider"`
-		ModelName             string  `json:"modelName"`
-		SupportsStreaming     bool    `json:"supportsStreaming"`
-		InputPricePerMillion  float64 `json:"inputPricePerMillion"`
-		OutputPricePerMillion float64 `json:"outputPricePerMillion"`
-		PriceRevision         string  `json:"priceRevision"`
+		Provider                      string         `json:"provider"`
+		ModelName                     string         `json:"modelName"`
+		SupportsStreaming             bool           `json:"supportsStreaming"`
+		InputPriceMicroUSDPerMillion  money.MicroUSD `json:"inputPriceMicroUsdPerMillion"`
+		OutputPriceMicroUSDPerMillion money.MicroUSD `json:"outputPriceMicroUsdPerMillion"`
+		PriceRevision                 string         `json:"priceRevision"`
 	}{descriptor.Provider, descriptor.ModelName, descriptor.SupportsStreaming,
-		descriptor.InputPricePerMillion, descriptor.OutputPricePerMillion, descriptor.PriceRevision})
+		descriptor.InputPriceMicroUSDPerMillion, descriptor.OutputPriceMicroUSDPerMillion, descriptor.PriceRevision})
 	if err != nil {
 		return descriptor, [sha256.Size]byte{}, fmt.Errorf("encode model descriptor: %w", err)
 	}
@@ -138,10 +151,11 @@ type ModelCall struct {
 	RequestHash       [sha256.Size]byte
 	InputTokens       int64
 	OutputTokens      int64
-	CostUSD           float64
+	CostMicroUSD      money.MicroUSD
 	PriceRevision     string
 	ProviderRequestID string
 	FinishReason      string
+	UsageCertainty    ModelUsageCertainty
 	ResourceVersion   int64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
@@ -189,10 +203,11 @@ type FinishModelCallInput struct {
 	Status            ModelCallStatus
 	InputTokens       int64
 	OutputTokens      int64
-	CostUSD           float64
+	CostMicroUSD      money.MicroUSD
 	PriceRevision     string
 	ProviderRequestID string
 	FinishReason      string
+	UsageCertainty    ModelUsageCertainty
 }
 
 // CanTransitionModelCall defines the model-call state machine.

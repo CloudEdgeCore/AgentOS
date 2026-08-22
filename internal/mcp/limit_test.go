@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -14,7 +13,6 @@ import (
 // blockingHandler parks every call until released, so the concurrency cap
 // can be exercised deterministically.
 type blockingHandler struct {
-	mu       sync.Mutex
 	blocked  bool
 	entered  chan struct{}
 	released chan struct{}

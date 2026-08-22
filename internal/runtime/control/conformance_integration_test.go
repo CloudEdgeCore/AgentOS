@@ -27,6 +27,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -152,7 +153,10 @@ func TestSameAgentVersionRunsOnBothProviders(t *testing.T) {
 func (env *conformanceEnv) prepareScenario(t *testing.T, scenario scenario) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := env.pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
+	if _, err := env.pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
+		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
 		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
@@ -177,7 +181,7 @@ func (env *conformanceEnv) prepareScenario(t *testing.T, scenario scenario) {
 	}
 	env.taskID = created.Task.ID
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci", "wasmtime"}, MaxTokens: 1000, MaxCostUSD: 10,
+		RuntimeClasses: []string{"oci", "wasmtime"}, MaxTokens: 1000, MaxCostMicroUSD: money.MustFromUSD(10),
 		MaxToolCalls: 100, MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
 	admissionController := admission.NewController(env.store, engine, testPolicyEngine(t), "admission-"+scenario.key, 10, time.Minute)
@@ -496,7 +500,10 @@ func newConformanceEnv(t *testing.T) *conformanceEnv {
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
+		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
 		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
@@ -855,7 +862,7 @@ func TestTaskModelCallFlowThroughGateway(t *testing.T) {
 
 	if _, err := env.store.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: env.tenant, Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 5, OutputPricePerMillion: 15, PriceRevision: "v1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(5), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v1",
 	}); err != nil {
 		t.Fatalf("register model descriptor: %v", err)
 	}
@@ -903,8 +910,8 @@ func TestTaskModelCallFlowThroughGateway(t *testing.T) {
 
 	var callStatus string
 	var callInput, callOutput int64
-	var callCost float64
-	if err := env.pool.QueryRow(ctx, `SELECT status, input_tokens, output_tokens, cost_usd FROM model_calls
+	var callCost int64
+	if err := env.pool.QueryRow(ctx, `SELECT status, input_tokens, output_tokens, cost_micro_usd FROM model_calls
 		WHERE tenant_id = $1 AND task_id = $2`, env.tenant, env.taskID.String()).
 		Scan(&callStatus, &callInput, &callOutput, &callCost); err != nil {
 		t.Fatalf("read model call: %v", err)
@@ -912,7 +919,7 @@ func TestTaskModelCallFlowThroughGateway(t *testing.T) {
 	if callStatus != string(kernelstore.ModelCallCompleted) || callInput != 150 || callOutput != 50 {
 		t.Fatalf("model call ledger: status=%s input=%d output=%d", callStatus, callInput, callOutput)
 	}
-	if want := 150.0/1e6*5 + 50.0/1e6*15; callCost != want {
+	if want := int64(money.MustFromUSD(150.0/1e6*5 + 50.0/1e6*15)); callCost != want {
 		t.Fatalf("model call cost = %v, want %v (computed from the pinned price table)", callCost, want)
 	}
 

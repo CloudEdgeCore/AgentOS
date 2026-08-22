@@ -1,4 +1,4 @@
-// Brokered system tools of the Agent Runtime MCP endpoint (v1.1): the
+// Brokered system tools of the Agent Runtime MCP endpoint: the
 // sandboxed Agent reaches the Model execution layer and the Memory store
 // through the same MCP surface it uses for tenant tools, with the fenced
 // attempt identity and capability grants injected by the runtime worker.
@@ -13,9 +13,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
@@ -120,7 +122,38 @@ func NewBroker(tools *ToolAdapter, models ModelBroker, memories MemoryBroker, sp
 type systemTool struct {
 	name        string
 	description string
-	schema      string
+	schema      json.RawMessage
+}
+
+type modelToolInput struct {
+	ModelRef        string          `json:"modelRef" required:"true"`
+	Messages        []brokerMessage `json:"messages" required:"true"`
+	MaxOutputTokens int32           `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+}
+
+type memoryPutToolInput struct {
+	Namespace   string `json:"namespace" required:"true"`
+	Key         string `json:"key" required:"true"`
+	ContentType string `json:"contentType,omitempty"`
+	Content     string `json:"content" required:"true"`
+	Sensitivity string `json:"sensitivity,omitempty" enum:"internal,confidential,restricted"`
+}
+
+type memorySearchToolInput struct {
+	Query       string `json:"query" required:"true"`
+	Namespace   string `json:"namespace,omitempty"`
+	Sensitivity string `json:"sensitivity,omitempty" enum:"internal,confidential,restricted"`
+	Limit       int32  `json:"limit,omitempty"`
+}
+
+type spawnToolInput struct {
+	Name            string          `json:"name" required:"true"`
+	Goal            string          `json:"goal" required:"true"`
+	AgentVersionRef string          `json:"agentVersionRef,omitempty"`
+	Spec            json.RawMessage `json:"spec,omitempty"`
+	MaxAttempts     int             `json:"maxAttempts,omitempty"`
 }
 
 func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner) []systemTool {
@@ -129,7 +162,7 @@ func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner W
 		declarations = append(declarations, systemTool{
 			name:        SystemModelInvoke,
 			description: "Invoke a model through the AgentOS Model Gateway (policy, budget and audit enforced; the provider credential never reaches the agent)",
-			schema:      `{"type":"object","properties":{"modelRef":{"type":"string","description":"provider/model reference declared by the AgentVersion"},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string"},"content":{"type":"string"},"toolCallId":{"type":"string"},"toolCalls":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"arguments":{"type":"string"}}}}},"required":["role","content"]}},"maxOutputTokens":{"type":"integer"},"temperature":{"type":"number"}},"required":["modelRef","messages"]}`,
+			schema:      schemaFor[modelToolInput](),
 		})
 	}
 	if memories != nil {
@@ -137,19 +170,19 @@ func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner W
 			systemTool{
 				name:        SystemMemoryPut,
 				description: "Write a memory record into the tenant store (namespaced, provenance-tracked, tombstone-deletable)",
-				schema:      `{"type":"object","properties":{"namespace":{"type":"string"},"key":{"type":"string"},"contentType":{"type":"string"},"content":{"type":"string"},"sensitivity":{"type":"string"}},"required":["namespace","key","content"]}`,
+				schema:      schemaFor[memoryPutToolInput](),
 			},
 			systemTool{
 				name:        SystemMemorySearch,
 				description: "Hybrid keyword/vector memory search scoped to the tenant and namespace allowlist",
-				schema:      `{"type":"object","properties":{"query":{"type":"string"},"namespace":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`,
+				schema:      schemaFor[memorySearchToolInput](),
 			})
 	}
 	if spawner != nil {
 		declarations = append(declarations, systemTool{
 			name:        SystemTaskSpawn,
 			description: "Spawn a new dynamic step into the running workflow (recursion, fan-out and budget guards enforced by the kernel; identical calls replay the same step)",
-			schema:      `{"type":"object","properties":{"name":{"type":"string","description":"step name, lowercase token"},"goal":{"type":"string"},"agentVersionRef":{"type":"string"},"spec":{"type":"object"},"maxAttempts":{"type":"integer"}},"required":["name","goal"]}`,
+			schema:      schemaFor[spawnToolInput](),
 		})
 	}
 	return declarations
@@ -176,7 +209,7 @@ func (b *Broker) ListTools(ctx context.Context, params json.RawMessage) (any, *E
 		tools = append(tools, map[string]any{
 			"name":        declaration.name,
 			"description": declaration.description + " (system tool " + systemToolsRevision + ")",
-			"inputSchema": json.RawMessage(declaration.schema),
+			"inputSchema": declaration.schema,
 		})
 	}
 	return map[string]any{"tools": tools}, nil
@@ -218,13 +251,7 @@ func (b *Broker) CallTool(ctx context.Context, params json.RawMessage) (any, *Er
 }
 
 func (b *Broker) callModel(ctx context.Context, params json.RawMessage) (any, *Error) {
-	var call struct {
-		ModelRef        string          `json:"modelRef"`
-		Messages        []brokerMessage `json:"messages"`
-		MaxOutputTokens int32           `json:"maxOutputTokens"`
-		Temperature     *float64        `json:"temperature"`
-		Stream          bool            `json:"stream"`
-	}
+	var call modelToolInput
 	if err := strictDecode(params, &call); err != nil {
 		return nil, invalidParams(err.Error())
 	}
@@ -282,16 +309,17 @@ func (b *Broker) callModel(ctx context.Context, params json.RawMessage) (any, *E
 		"callId": output.Call.ID.String(), "modelRef": output.Call.ModelRef, "status": string(output.Call.Status),
 		"content": output.Content, "toolCalls": toolCalls, "finishReason": output.Call.FinishReason,
 		"usage":   map[string]any{"inputTokens": output.Call.InputTokens, "outputTokens": output.Call.OutputTokens},
-		"costUsd": output.Call.CostUSD, "providerRequestId": output.Call.ProviderRequestID,
+		"costUsd": output.Call.CostMicroUSD.USD(), "costMicroUsd": output.Call.CostMicroUSD,
+		"providerRequestId": output.Call.ProviderRequestID,
 	})
 	return textResult(document, false), nil
 }
 
 type brokerMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content"`
-	ToolCallID string           `json:"toolCallId"`
-	ToolCalls  []brokerToolCall `json:"toolCalls"`
+	Role       string           `json:"role" required:"true"`
+	Content    string           `json:"content" required:"true"`
+	ToolCallID string           `json:"toolCallId,omitempty"`
+	ToolCalls  []brokerToolCall `json:"toolCalls,omitempty"`
 }
 
 type brokerToolCall struct {
@@ -301,21 +329,15 @@ type brokerToolCall struct {
 }
 
 func (b *Broker) putMemory(ctx context.Context, params json.RawMessage) (any, *Error) {
-	var call struct {
-		Namespace   string `json:"namespace"`
-		Key         string `json:"key"`
-		ContentType string `json:"contentType"`
-		Content     string `json:"content"`
-		Sensitivity string `json:"sensitivity"`
-	}
+	var call memoryPutToolInput
 	if err := strictDecode(params, &call); err != nil {
 		return nil, invalidParams(err.Error())
 	}
 	if strings.TrimSpace(call.Namespace) == "" || strings.TrimSpace(call.Key) == "" || call.Content == "" {
 		return nil, invalidParams("namespace, key and content are required")
 	}
-	if len(call.Content) > 1<<20 {
-		return nil, invalidParams("content exceeds 1 MiB")
+	if len(call.Content) > store.MemoryContentLimit {
+		return nil, invalidParams("content exceeds 256 KiB")
 	}
 	identity, err := b.resolveIdentity(ctx)
 	if err != nil {
@@ -329,6 +351,9 @@ func (b *Broker) putMemory(ctx context.Context, params json.RawMessage) (any, *E
 	}
 	if call.Sensitivity == "" {
 		call.Sensitivity = "internal"
+	}
+	if !granted(call.Sensitivity, effectiveMemorySensitivities(identity.AllowedMemorySensitivities)) {
+		return toolErrorResult("memory sensitivity is not granted: " + call.Sensitivity), nil
 	}
 	record, replayed, putErr := b.memory.Put(ctx, identity, memory.PutInput{
 		Namespace: call.Namespace, Key: call.Key,
@@ -349,11 +374,7 @@ func (b *Broker) putMemory(ctx context.Context, params json.RawMessage) (any, *E
 }
 
 func (b *Broker) searchMemory(ctx context.Context, params json.RawMessage) (any, *Error) {
-	var call struct {
-		Query     string `json:"query"`
-		Namespace string `json:"namespace"`
-		Limit     int32  `json:"limit"`
-	}
+	var call memorySearchToolInput
 	if err := strictDecode(params, &call); err != nil {
 		return nil, invalidParams(err.Error())
 	}
@@ -370,21 +391,35 @@ func (b *Broker) searchMemory(ctx context.Context, params json.RawMessage) (any,
 	if call.Namespace != "" && !granted(call.Namespace, identity.AllowedMemoryNamespaces) {
 		return toolErrorResult("namespace is not in the AgentVersion capability grant: " + call.Namespace), nil
 	}
+	if call.Sensitivity == "" {
+		call.Sensitivity = "internal"
+	}
+	if !granted(call.Sensitivity, effectiveMemorySensitivities(identity.AllowedMemorySensitivities)) {
+		return toolErrorResult("memory sensitivity is not granted: " + call.Sensitivity), nil
+	}
 	records, searchErr := b.memory.Search(ctx, identity, memory.SearchInput{
-		Query: call.Query, Namespace: call.Namespace, Limit: int(call.Limit),
+		Query: call.Query, Namespace: call.Namespace, Sensitivity: call.Sensitivity, Limit: int(call.Limit),
 	})
 	if searchErr != nil {
 		return toolErrorResult("memory search failed: " + boundedMessage(searchErr)), nil
 	}
 	results := make([]map[string]any, 0, len(records))
+	const maxMemoryResponseBytes = 1 << 20
+	used := 0
+	truncated := false
 	for _, record := range records {
+		if used+len(record.Content) > maxMemoryResponseBytes {
+			truncated = true
+			break
+		}
 		results = append(results, map[string]any{
 			"id": record.ID.String(), "namespace": record.Namespace, "key": record.Key,
 			"contentType": record.ContentType, "content": record.Content,
 			"resourceVersion": record.ResourceVersion, "createdAt": record.CreatedAt.Format(time.RFC3339),
 		})
+		used += len(record.Content)
 	}
-	document, _ := json.Marshal(map[string]any{"records": results})
+	document, _ := json.Marshal(map[string]any{"records": results, "truncated": truncated})
 	return textResult(document, false), nil
 }
 
@@ -393,13 +428,7 @@ func (b *Broker) searchMemory(ctx context.Context, params json.RawMessage) (any,
 // the agent only names the step, its goal and its task spec. Standalone
 // tasks (no workflow) deny closed.
 func (b *Broker) spawnTask(ctx context.Context, params json.RawMessage) (any, *Error) {
-	var call struct {
-		Name            string          `json:"name"`
-		Goal            string          `json:"goal"`
-		AgentVersionRef string          `json:"agentVersionRef"`
-		Spec            json.RawMessage `json:"spec,omitempty"`
-		MaxAttempts     int             `json:"maxAttempts"`
-	}
+	var call spawnToolInput
 	if err := strictDecode(params, &call); err != nil {
 		return nil, invalidParams(err.Error())
 	}
@@ -452,22 +481,98 @@ func (b *Broker) spawnTask(ctx context.Context, params json.RawMessage) (any, *E
 // reported its execution id, falling back to the resolver's default (the
 // single-assignment window). Both paths deny closed.
 func (b *Broker) resolveIdentity(ctx context.Context) (AttemptContext, error) {
+	return resolveAttemptIdentity(ctx, b.identity)
+}
+
+// resolveAttemptIdentity is the single identity boundary for system and
+// tenant tools. A reported execution id must never fall back to an unrelated
+// default window when the configured resolver cannot scope it.
+func resolveAttemptIdentity(ctx context.Context, resolver IdentityResolver) (AttemptContext, error) {
 	if execution := ExecutionID(ctx); execution != "" {
-		if scoped, ok := b.identity.(ExecutionIdentityResolver); ok {
-			return scoped.ResolveExecution(ctx, execution)
+		scoped, ok := resolver.(ExecutionIdentityResolver)
+		if !ok {
+			return AttemptContext{}, ErrNoExecutionContext
 		}
+		return scoped.ResolveExecution(ctx, execution)
 	}
-	return b.identity.Resolve(ctx)
+	return resolver.Resolve(ctx)
 }
 
 // granted is the default-deny capability check: an empty grant denies.
 func granted(requested string, allowed []string) bool {
 	for _, candidate := range allowed {
-		if candidate == requested {
+		if capability.MatchGrant(candidate, requested) {
 			return true
 		}
 	}
 	return false
+}
+
+func effectiveMemorySensitivities(allowed []string) []string {
+	if len(allowed) == 0 {
+		return []string{"internal"}
+	}
+	return allowed
+}
+
+// schemaFor generates system-tool input schemas from the exact Go request
+// types decoded by the handlers. This keeps tools/list and runtime validation
+// on one contract and makes schema drift testable in CI.
+func schemaFor[T any]() json.RawMessage {
+	schema := schemaForType(reflect.TypeFor[T]())
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		panic("generate system tool schema: " + err.Error())
+	}
+	return encoded
+}
+
+func schemaForType(typ reflect.Type) map[string]any {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if typ == reflect.TypeFor[json.RawMessage]() {
+		return map[string]any{"type": "object"}
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		properties := map[string]any{}
+		required := []string{}
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" {
+				name = field.Name
+			}
+			if name == "-" {
+				continue
+			}
+			property := schemaForType(field.Type)
+			if enum := field.Tag.Get("enum"); enum != "" {
+				property["enum"] = strings.Split(enum, ",")
+			}
+			properties[name] = property
+			if field.Tag.Get("required") == "true" || (options != "omitempty" && field.Type.Kind() != reflect.Pointer) {
+				required = append(required, name)
+			}
+		}
+		result := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
+		if len(required) > 0 {
+			result["required"] = required
+		}
+		return result
+	case reflect.Slice, reflect.Array:
+		return map[string]any{"type": "array", "items": schemaForType(typ.Elem())}
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]any{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
+	default:
+		return map[string]any{"type": "string"}
+	}
 }
 
 func parseIdentityUUIDs(identity AttemptContext) (uuid.UUID, uuid.UUID, *Error) {
@@ -489,7 +594,7 @@ func systemIdempotencyKey(identity AttemptContext, tool string, args json.RawMes
 		canonical = args
 	}
 	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("mcp/%s/%s/%s", identity.AttemptID, tool, hex.EncodeToString(digest[:8]))
+	return fmt.Sprintf("mcp/%s/%s/%s", identity.AttemptID, tool, hex.EncodeToString(digest[:]))
 }
 
 // strictDecode decodes with unknown-field rejection and a trailing-value

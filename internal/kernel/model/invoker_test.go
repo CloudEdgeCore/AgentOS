@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -40,11 +41,11 @@ func newInvokerEnv(t *testing.T, script ...fakeReply) *invokerEnv {
 	store := newFakeModelStore()
 	store.descriptors["fake/agent-model"] = kernelstore.ModelDescriptor{
 		TenantID: "tenant-1", Provider: "fake", ModelName: "agent-model", SupportsStreaming: true,
-		InputPricePerMillion: 3, OutputPricePerMillion: 6, PriceRevision: "p1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(6), PriceRevision: "p1",
 	}
 	store.descriptors["fake/batch-model"] = kernelstore.ModelDescriptor{
 		TenantID: "tenant-1", Provider: "fake", ModelName: "batch-model", SupportsStreaming: false,
-		InputPricePerMillion: 1, OutputPricePerMillion: 1, PriceRevision: "p1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(1), OutputPriceMicroUSDPerMillion: money.MustFromUSD(1), PriceRevision: "p1",
 	}
 	env := &invokerEnv{
 		policy: &fakeModelPolicy{decisions: map[string]policy.Decision{
@@ -88,13 +89,6 @@ func newInvokerEnv(t *testing.T, script ...fakeReply) *invokerEnv {
 		t.Fatalf("register provider: %v", err)
 	}
 	return env
-}
-
-func abs(value float64) float64 {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
 
 func streamReply(deltas ...string) fakeReply {
@@ -150,11 +144,14 @@ func TestInvokerCompleteChainsBeginProviderFinish(t *testing.T) {
 	if call.Status != kernelstore.ModelCallCompleted {
 		t.Fatalf("call status = %s, want COMPLETED", call.Status)
 	}
+	if call.UsageCertainty != kernelstore.ModelUsageKnown {
+		t.Fatalf("usage certainty = %s, want KNOWN_USAGE", call.UsageCertainty)
+	}
 	if call.InputTokens != 100 || call.OutputTokens != 50 {
 		t.Fatalf("usage = %d/%d, want exact provider-reported 100/50", call.InputTokens, call.OutputTokens)
 	}
-	if want := 100.0/1e6*3 + 50.0/1e6*6; abs(call.CostUSD-want) > 1e-12 {
-		t.Fatalf("cost = %v, want %v computed from the pinned price table", call.CostUSD, want)
+	if want := money.MicroUSD(600); call.CostMicroUSD != want {
+		t.Fatalf("cost = %v, want %v computed from the pinned price table", call.CostMicroUSD, want)
 	}
 	if call.FinishReason != "stop" {
 		t.Fatalf("finish reason = %q", call.FinishReason)
@@ -167,6 +164,21 @@ func TestInvokerCompleteChainsBeginProviderFinish(t *testing.T) {
 	}
 	if strings.Contains(string(env.receipts.written[0].Response), "final answer") {
 		t.Fatalf("receipt leaks completion content: %s", env.receipts.written[0].Response)
+	}
+}
+
+func TestInvokerOmittedOutputLimitUsesBoundedReservation(t *testing.T) {
+	env := newInvokerEnv(t, completionReply("bounded", 5, 2))
+	invoker := NewInvoker(env.gateway, env.registry)
+	input := invokeInput()
+	input.MaxOutputTokens = 0
+
+	if _, err := invoker.Invoke(context.Background(), input); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	want := estimateInputTokens(input.Messages) + defaultMaxOutputTokens
+	if got := env.budget.lastReserved.Tokens; got != want {
+		t.Fatalf("reserved tokens = %d, want bounded default %d", got, want)
 	}
 }
 
@@ -223,8 +235,30 @@ func TestInvokerProviderFailureFinishesLedgerFailed(t *testing.T) {
 	if output.Call.FinishReason != "provider_rejected" {
 		t.Fatalf("finish reason = %q", output.Call.FinishReason)
 	}
+	if output.Call.UsageCertainty != kernelstore.ModelUsageKnownZero {
+		t.Fatalf("usage certainty = %s, want KNOWN_ZERO_USAGE", output.Call.UsageCertainty)
+	}
 	if env.budget.settledTokens != 0 {
 		t.Fatalf("failed call must not bill tokens, got %d", env.budget.settledTokens)
+	}
+}
+
+func TestInvokerAmbiguousProviderFailureRecordsUnknownUsage(t *testing.T) {
+	env := newInvokerEnv(t, fakeReply{body: `{"id":"accepted-but-response-truncated"`})
+	invoker := NewInvoker(env.gateway, env.registry)
+
+	output, err := invoker.Invoke(context.Background(), invokeInput())
+	if err == nil || !errors.Is(err, provider.ErrProviderUnavailable) {
+		t.Fatalf("expected ambiguous provider failure, got %v", err)
+	}
+	if output.Call.Status != kernelstore.ModelCallFailed {
+		t.Fatalf("status = %s, want FAILED", output.Call.Status)
+	}
+	if output.Call.UsageCertainty != kernelstore.ModelUsageUnknown {
+		t.Fatalf("usage certainty = %s, want UNKNOWN_USAGE", output.Call.UsageCertainty)
+	}
+	if env.budget.settledTokens != 0 {
+		t.Fatalf("unknown usage may not be silently settled as zero, got %d", env.budget.settledTokens)
 	}
 }
 

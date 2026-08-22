@@ -34,13 +34,13 @@ func TestConcurrentCompletionConflictRate(t *testing.T) {
 	for i := 0; i < tasks; i++ {
 		a := scheduleRuntimeTask(t, ctx, repository, fmt.Sprintf("conflict-%d", i), 3)
 		starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-			AttemptID: a.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: 1, To: "STARTING",
+			TenantID: "tenant-a", AttemptID: a.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: 1, To: "STARTING",
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		running, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-			AttemptID: a.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: starting.ResourceVersion, To: "RUNNING",
+			TenantID: "tenant-a", AttemptID: a.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: starting.ResourceVersion, To: "RUNNING",
 		})
 		if err != nil {
 			t.Fatal(err)

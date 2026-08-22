@@ -12,6 +12,7 @@ import (
 
 	controlapi "github.com/CloudEdgeCore/AgentOS/internal/control/api"
 	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 )
 
@@ -73,7 +74,7 @@ func TestTenantQuotaLifecycle(t *testing.T) {
 	// GET reports the quota with the current window usage.
 	quotas.usage["tenant-a"] = store.TenantWindowUsage{
 		TenantID: "tenant-a", WindowStart: time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC),
-		Consumed: store.TaskBudget{Tokens: 42, CostUSD: 1.5},
+		Consumed: store.TaskBudget{Tokens: 42, CostMicroUSD: money.MustFromUSD(1.5)},
 	}
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/quota", nil))

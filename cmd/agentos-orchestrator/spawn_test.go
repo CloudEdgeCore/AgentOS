@@ -59,7 +59,7 @@ func (f *fakeSpawnRuntimeStore) GetRuntimeAssignment(_ context.Context, _ string
 	return f.assignment, f.err
 }
 
-func (f *fakeSpawnRuntimeStore) WorkflowLineage(context.Context, string, string) (uuid.UUID, string, int64, bool, error) {
+func (f *fakeSpawnRuntimeStore) WorkflowLineage(context.Context, string, uuid.UUID) (uuid.UUID, string, int64, bool, error) {
 	return f.workflowID, f.step, 7, f.workflowID != uuid.Nil, nil
 }
 
@@ -78,8 +78,8 @@ func validSpawnServiceFixture() (*spawnService, *fakeSpawnWorkflowStore, *runtim
 	runtimeStore := &fakeSpawnRuntimeStore{
 		workflowID: workflowID, step: "planner",
 		assignment: kernelstore.RuntimeAssignment{
-			Task: kernelstore.Task{TenantID: "tenant-a", IdempotencyKey: "workflow/" + workflowID.String() + "/planner/1",
-				Phase: domain.TaskRunning},
+			Task: kernelstore.Task{ID: uuid.New(), TenantID: "tenant-a", WorkflowID: &workflowID,
+				WorkflowStepName: "planner", WorkflowAttempt: 1, Phase: domain.TaskRunning},
 			Attempt: kernelstore.Attempt{ID: attemptID, TenantID: "tenant-a", FencingToken: 9, Phase: domain.AttemptRunning},
 			Lease:   kernelstore.Lease{ExpiresAt: time.Now().UTC().Add(time.Minute)},
 			AgentVersion: &kernelstore.AgentVersion{Spec: []byte(`{

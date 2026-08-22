@@ -77,12 +77,14 @@ func (s *Store) createTaskOnce(ctx context.Context, in kernelstore.CreateTaskInp
 	row := tx.QueryRow(ctx, `
 		INSERT INTO tasks (
 			id, tenant_id, namespace, agent_version_ref, goal, spec, request_hash,
-			idempotency_key, phase, resource_version, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'QUEUED', 1, $9, $9)
+			idempotency_key, workflow_id, workflow_step_id, workflow_step_name, workflow_attempt, parent_task_id,
+			phase, resource_version, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), NULLIF($12, 0), $13, 'QUEUED', 1, $14, $14)
 		ON CONFLICT (tenant_id, namespace, idempotency_key) DO NOTHING
 		RETURNING `+taskColumns,
 		in.ID.String(), in.TenantID, in.Namespace, in.AgentVersionRef, in.Goal,
-		normalized, requestHash[:], in.IdempotencyKey, now,
+		normalized, requestHash[:], in.IdempotencyKey, in.WorkflowID, in.WorkflowStepID,
+		in.WorkflowStepName, in.WorkflowAttempt, in.ParentTaskID, now,
 	)
 	created, scanErr := scanTask(row)
 	if scanErr == nil {
@@ -120,8 +122,11 @@ func (s *Store) createTaskOnce(ctx context.Context, in kernelstore.CreateTaskInp
 	return kernelstore.CreateTaskResult{Task: existing, Existing: true}, nil
 }
 
-func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersion int64, to domain.TaskPhase) (kernelstore.Task, error) {
+func (s *Store) TransitionTask(ctx context.Context, tenantID string, id uuid.UUID, expectedVersion int64, to domain.TaskPhase) (kernelstore.Task, error) {
 	var zero kernelstore.Task
+	if strings.TrimSpace(tenantID) == "" || id == uuid.Nil || expectedVersion <= 0 {
+		return zero, fmt.Errorf("tenant, task id and positive resource version are required")
+	}
 	if to == domain.TaskSucceeded {
 		return zero, fmt.Errorf("%w: task success is only committed by CompleteRun", kernelstore.ErrResultRequired)
 	}
@@ -131,7 +136,7 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 	}
 	defer rollback(ctx, tx)
 
-	current, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1 FOR UPDATE`, id.String()))
+	current, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, tenantID, id.String()))
 	if err != nil {
 		return zero, classify(err)
 	}
@@ -144,8 +149,8 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 	now := s.now()
 	updated, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks
 		SET phase = $1, resource_version = resource_version + 1, updated_at = $2
-		WHERE id = $3 AND resource_version = $4 RETURNING `+taskColumns,
-		to, now, id.String(), expectedVersion))
+		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
+		to, now, tenantID, id.String(), expectedVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "task", id, expectedVersion)
 	}
@@ -153,6 +158,9 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 	// ceiling to the tenant window.
 	if to == domain.TaskFailed || to == domain.TaskCancelled {
 		if err := s.releaseTenantReservation(ctx, tx, updated.TenantID, updated.ID); err != nil {
+			return zero, err
+		}
+		if err := s.releaseRuntimeCapacity(ctx, tx, updated.TenantID, updated.ID, now); err != nil {
 			return zero, err
 		}
 	}
@@ -174,6 +182,9 @@ func (s *Store) TransitionTask(ctx context.Context, id uuid.UUID, expectedVersio
 
 func (s *Store) CreateRun(ctx context.Context, in kernelstore.CreateRunInput) (kernelstore.Run, error) {
 	var zero kernelstore.Run
+	if strings.TrimSpace(in.TenantID) == "" || in.TaskID == uuid.Nil || in.ExpectedTaskVersion <= 0 {
+		return zero, fmt.Errorf("tenant, task id and positive task version are required")
+	}
 	if in.ID == uuid.Nil {
 		in.ID = s.newID()
 	}
@@ -183,7 +194,7 @@ func (s *Store) CreateRun(ctx context.Context, in kernelstore.CreateRunInput) (k
 	}
 	defer rollback(ctx, tx)
 
-	task, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1 FOR UPDATE`, in.TaskID.String()))
+	task, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.TaskID.String()))
 	if err != nil {
 		return zero, classify(err)
 	}
@@ -194,10 +205,11 @@ func (s *Store) CreateRun(ctx context.Context, in kernelstore.CreateRunInput) (k
 		return zero, fmt.Errorf("%w: %v", kernelstore.ErrInvalidTransition, err)
 	}
 	var ordinal int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM runs WHERE task_id = $1`, task.ID.String()).Scan(&ordinal); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM runs WHERE tenant_id = $1 AND task_id = $2`, in.TenantID, task.ID.String()).Scan(&ordinal); err != nil {
 		return zero, classify(err)
 	}
 	now := s.now()
+	executionDeadline := taskExecutionDeadline(task.Spec, now)
 	run, err := scanRun(tx.QueryRow(ctx, `INSERT INTO runs (
 		id, tenant_id, task_id, ordinal, phase, resource_version, created_at, updated_at
 	) VALUES ($1, $2, $3, $4, 'PENDING', 1, $5, $5) RETURNING `+runColumns,
@@ -206,9 +218,9 @@ func (s *Store) CreateRun(ctx context.Context, in kernelstore.CreateRunInput) (k
 		return zero, classify(err)
 	}
 	updatedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'RUNNING', active_run_id = $1,
-		resource_version = resource_version + 1, updated_at = $2
-		WHERE id = $3 AND resource_version = $4 RETURNING `+taskColumns,
-		run.ID.String(), now, task.ID.String(), in.ExpectedTaskVersion))
+		execution_deadline_at = $2, resource_version = resource_version + 1, updated_at = $3
+		WHERE tenant_id = $4 AND id = $5 AND resource_version = $6 RETURNING `+taskColumns,
+		run.ID.String(), executionDeadline, now, in.TenantID, task.ID.String(), in.ExpectedTaskVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
 	}
@@ -230,8 +242,9 @@ func (s *Store) CreateRun(ctx context.Context, in kernelstore.CreateRunInput) (k
 
 func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemptInput) (kernelstore.AttemptLease, error) {
 	var zero kernelstore.AttemptLease
-	if in.TTL <= 0 || strings.TrimSpace(in.RuntimeClass) == "" || strings.TrimSpace(in.RuntimeInstanceID) == "" {
-		return zero, fmt.Errorf("attempt runtime and positive lease TTL are required")
+	if strings.TrimSpace(in.TenantID) == "" || in.RunID == uuid.Nil || in.ExpectedRunVersion <= 0 ||
+		in.TTL <= 0 || strings.TrimSpace(in.RuntimeClass) == "" || strings.TrimSpace(in.RuntimeInstanceID) == "" {
+		return zero, fmt.Errorf("tenant, run, positive version, attempt runtime and positive lease TTL are required")
 	}
 	if in.AttemptID == uuid.Nil {
 		in.AttemptID = s.newID()
@@ -245,7 +258,7 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 	}
 	defer rollback(ctx, tx)
 
-	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1 FOR UPDATE`, in.RunID.String()))
+	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.RunID.String()))
 	if err != nil {
 		return zero, classify(err)
 	}
@@ -257,7 +270,7 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 	}
 	now := s.now()
 	activeLease, leaseErr := scanLease(tx.QueryRow(ctx, `SELECT `+leaseColumns+`
-		FROM runtime_leases WHERE run_id = $1 AND released_at IS NULL FOR UPDATE`, run.ID.String()))
+		FROM runtime_leases WHERE tenant_id = $1 AND run_id = $2 AND released_at IS NULL FOR UPDATE`, in.TenantID, run.ID.String()))
 	if leaseErr == nil {
 		if activeLease.ExpiresAt.After(now) {
 			return zero, fmt.Errorf("%w: run=%s expires_at=%s", kernelstore.ErrLeaseHeld, run.ID, activeLease.ExpiresAt.Format(time.RFC3339Nano))
@@ -270,7 +283,7 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 	}
 
 	var ordinal int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM attempts WHERE run_id = $1`, run.ID.String()).Scan(&ordinal); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM attempts WHERE tenant_id = $1 AND run_id = $2`, in.TenantID, run.ID.String()).Scan(&ordinal); err != nil {
 		return zero, classify(err)
 	}
 	token := run.CurrentFencingToken + 1
@@ -293,8 +306,8 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 	}
 	updatedRun, err := scanRun(tx.QueryRow(ctx, `UPDATE runs SET phase = 'RUNNING', active_attempt_id = $1,
 		current_fencing_token = $2, resource_version = resource_version + 1, updated_at = $3
-		WHERE id = $4 AND resource_version = $5 RETURNING `+runColumns,
-		attempt.ID.String(), token, now, run.ID.String(), in.ExpectedRunVersion))
+		WHERE tenant_id = $4 AND id = $5 AND resource_version = $6 RETURNING `+runColumns,
+		attempt.ID.String(), token, now, in.TenantID, run.ID.String(), in.ExpectedRunVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "run", run.ID, in.ExpectedRunVersion)
 	}
@@ -316,6 +329,9 @@ func (s *Store) AcquireAttempt(ctx context.Context, in kernelstore.AcquireAttemp
 
 func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.TransitionAttemptInput) (kernelstore.Attempt, error) {
 	var zero kernelstore.Attempt
+	if strings.TrimSpace(in.TenantID) == "" || in.AttemptID == uuid.Nil || in.FencingToken <= 0 || in.ExpectedAttemptVersion <= 0 {
+		return zero, fmt.Errorf("tenant, attempt id, positive fencing token and positive resource version are required")
+	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return zero, err
@@ -323,14 +339,14 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 	defer rollback(ctx, tx)
 
 	var runID string
-	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM attempts WHERE id = $1`, in.AttemptID.String()).Scan(&runID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM attempts WHERE tenant_id = $1 AND id = $2`, in.TenantID, in.AttemptID.String()).Scan(&runID); err != nil {
 		return zero, classify(err)
 	}
-	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1 FOR UPDATE`, runID))
+	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, runID))
 	if err != nil {
 		return zero, classify(err)
 	}
-	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts WHERE id = $1 FOR UPDATE`, in.AttemptID.String()))
+	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.AttemptID.String()))
 	if err != nil {
 		return zero, classify(err)
 	}
@@ -341,7 +357,7 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 		return zero, versionConflict("attempt", attempt.ID, in.ExpectedAttemptVersion, attempt.ResourceVersion)
 	}
 	lease, err := scanLease(tx.QueryRow(ctx, `SELECT `+leaseColumns+` FROM runtime_leases
-		WHERE attempt_id = $1 AND released_at IS NULL FOR UPDATE`, attempt.ID.String()))
+		WHERE tenant_id = $1 AND attempt_id = $2 AND released_at IS NULL FOR UPDATE`, in.TenantID, attempt.ID.String()))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return zero, fmt.Errorf("%w: attempt %s has no active lease", kernelstore.ErrFenced, attempt.ID)
@@ -362,29 +378,29 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 		started_at = CASE WHEN $4 THEN COALESCE(started_at, $5) ELSE started_at END,
 		finished_at = CASE WHEN $6 THEN $5 ELSE finished_at END,
 		resource_version = resource_version + 1, updated_at = $5
-		WHERE id = $7 AND resource_version = $8 RETURNING `+attemptColumns,
+		WHERE tenant_id = $7 AND id = $8 AND resource_version = $9 RETURNING `+attemptColumns,
 		in.To, in.FailureCode, in.FailureMessage, started, now, finished,
-		attempt.ID.String(), in.ExpectedAttemptVersion))
+		in.TenantID, attempt.ID.String(), in.ExpectedAttemptVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "attempt", attempt.ID, in.ExpectedAttemptVersion)
 	}
 	if in.To == domain.AttemptFailed || in.To == domain.AttemptCancelled {
 		if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = $2
-			WHERE id = $3 AND released_at IS NULL`, now, string(in.To), lease.ID.String()); err != nil {
+			WHERE tenant_id = $3 AND id = $4 AND released_at IS NULL`, now, string(in.To), in.TenantID, lease.ID.String()); err != nil {
 			return zero, classify(err)
 		}
 		if _, err := tx.Exec(ctx, `UPDATE runs SET active_attempt_id = NULL,
 			resource_version = resource_version + 1, updated_at = $1
-			WHERE id = $2 AND active_attempt_id = $3 AND current_fencing_token = $4`,
-			now, run.ID.String(), attempt.ID.String(), in.FencingToken); err != nil {
+			WHERE tenant_id = $2 AND id = $3 AND active_attempt_id = $4 AND current_fencing_token = $5`,
+			now, in.TenantID, run.ID.String(), attempt.ID.String(), in.FencingToken); err != nil {
 			return zero, classify(err)
 		}
 		// v1.2: a cleanly failed attempt finalizes the task unless the
 		// workload declared a multi-attempt retryPolicy (those keep the
 		// recovery-driven requeue path). Without this, a task whose agent
 		// exits FAILED stays RUNNING forever with no active attempt.
-		task, taskErr := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1 FOR UPDATE`,
-			run.TaskID.String()))
+		task, taskErr := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+			in.TenantID, run.TaskID.String()))
 		if taskErr != nil {
 			return zero, classify(taskErr)
 		}
@@ -395,9 +411,15 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 			}
 			if err := domain.ValidateTaskTransition(task.Phase, target); err == nil {
 				if _, err := tx.Exec(ctx, `UPDATE tasks SET phase = $1,
-					resource_version = resource_version + 1, updated_at = $2 WHERE id = $3`,
-					string(target), now, task.ID.String()); err != nil {
+					resource_version = resource_version + 1, updated_at = $2 WHERE tenant_id = $3 AND id = $4`,
+					string(target), now, in.TenantID, task.ID.String()); err != nil {
 					return zero, classify(err)
+				}
+				if err := s.releaseTenantReservation(ctx, tx, task.TenantID, task.ID); err != nil {
+					return zero, err
+				}
+				if err := s.releaseRuntimeCapacity(ctx, tx, task.TenantID, task.ID, now); err != nil {
+					return zero, err
 				}
 				if err := insertEvent(ctx, tx, task.TenantID, "Task", task.ID, task.ResourceVersion+1,
 					"Task"+title(string(target)), map[string]any{
@@ -427,8 +449,9 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 
 func (s *Store) HeartbeatLease(ctx context.Context, in kernelstore.HeartbeatLeaseInput) (kernelstore.Lease, error) {
 	var zero kernelstore.Lease
-	if in.TTL <= 0 {
-		return zero, fmt.Errorf("positive lease TTL is required")
+	if strings.TrimSpace(in.TenantID) == "" || in.AttemptID == uuid.Nil || in.FencingToken <= 0 ||
+		in.ExpectedLeaseVersion <= 0 || in.TTL <= 0 {
+		return zero, fmt.Errorf("tenant, attempt id, positive fencing token, resource version and lease TTL are required")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -437,10 +460,10 @@ func (s *Store) HeartbeatLease(ctx context.Context, in kernelstore.HeartbeatLeas
 	defer rollback(ctx, tx)
 
 	var runID string
-	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM attempts WHERE id = $1`, in.AttemptID.String()).Scan(&runID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT run_id::text FROM attempts WHERE tenant_id = $1 AND id = $2`, in.TenantID, in.AttemptID.String()).Scan(&runID); err != nil {
 		return zero, classify(err)
 	}
-	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1 FOR UPDATE`, runID))
+	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, runID))
 	if err != nil {
 		return zero, classify(err)
 	}
@@ -448,7 +471,7 @@ func (s *Store) HeartbeatLease(ctx context.Context, in kernelstore.HeartbeatLeas
 		return zero, fmt.Errorf("%w: attempt is not the current run owner", kernelstore.ErrFenced)
 	}
 	lease, err := scanLease(tx.QueryRow(ctx, `SELECT `+leaseColumns+` FROM runtime_leases
-		WHERE attempt_id = $1 AND fencing_token = $2 AND released_at IS NULL FOR UPDATE`, in.AttemptID.String(), in.FencingToken))
+		WHERE tenant_id = $1 AND attempt_id = $2 AND fencing_token = $3 AND released_at IS NULL FOR UPDATE`, in.TenantID, in.AttemptID.String(), in.FencingToken))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return zero, fmt.Errorf("%w: active lease not found", kernelstore.ErrFenced)
@@ -464,8 +487,8 @@ func (s *Store) HeartbeatLease(ctx context.Context, in kernelstore.HeartbeatLeas
 	}
 	updated, err := scanLease(tx.QueryRow(ctx, `UPDATE runtime_leases
 		SET heartbeat_at = $1, expires_at = $2, resource_version = resource_version + 1
-		WHERE id = $3 AND resource_version = $4 AND released_at IS NULL RETURNING `+leaseColumns,
-		now, now.Add(in.TTL), lease.ID.String(), in.ExpectedLeaseVersion))
+		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 AND released_at IS NULL RETURNING `+leaseColumns,
+		now, now.Add(in.TTL), in.TenantID, lease.ID.String(), in.ExpectedLeaseVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "lease", lease.ID, in.ExpectedLeaseVersion)
 	}
@@ -478,6 +501,10 @@ func (s *Store) HeartbeatLease(ctx context.Context, in kernelstore.HeartbeatLeas
 func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput) (kernelstore.Run, kernelstore.Task, error) {
 	var zeroRun kernelstore.Run
 	var zeroTask kernelstore.Task
+	if strings.TrimSpace(in.TenantID) == "" || in.RunID == uuid.Nil || in.AttemptID == uuid.Nil ||
+		in.FencingToken <= 0 || in.ExpectedRunVersion <= 0 {
+		return zeroRun, zeroTask, fmt.Errorf("tenant, run, attempt and positive fencing/version values are required")
+	}
 	if strings.TrimSpace(in.ResultRef) == "" {
 		return zeroRun, zeroTask, kernelstore.ErrResultRequired
 	}
@@ -487,7 +514,7 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 	}
 	defer rollback(ctx, tx)
 
-	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1 FOR UPDATE`, in.RunID.String()))
+	run, err := scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.RunID.String()))
 	if err != nil {
 		return zeroRun, zeroTask, classify(err)
 	}
@@ -500,7 +527,7 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 	if err := domain.ValidateRunTransition(run.Phase, domain.RunCompleted); err != nil {
 		return zeroRun, zeroTask, fmt.Errorf("%w: %v", kernelstore.ErrInvalidTransition, err)
 	}
-	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts WHERE id = $1 FOR UPDATE`, in.AttemptID.String()))
+	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, in.AttemptID.String()))
 	if err != nil {
 		return zeroRun, zeroTask, classify(err)
 	}
@@ -513,12 +540,12 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 	now := s.now()
 	updatedRun, err := scanRun(tx.QueryRow(ctx, `UPDATE runs SET phase = 'COMPLETED', result_ref = $1,
 		resource_version = resource_version + 1, updated_at = $2, completed_at = $2
-		WHERE id = $3 AND resource_version = $4 RETURNING `+runColumns,
-		in.ResultRef, now, run.ID.String(), in.ExpectedRunVersion))
+		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+runColumns,
+		in.ResultRef, now, in.TenantID, run.ID.String(), in.ExpectedRunVersion))
 	if err != nil {
 		return zeroRun, zeroTask, classifyCAS(err, "run", run.ID, in.ExpectedRunVersion)
 	}
-	task, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1 FOR UPDATE`, run.TaskID.String()))
+	task, err := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, in.TenantID, run.TaskID.String()))
 	if err != nil {
 		return zeroRun, zeroTask, classify(err)
 	}
@@ -527,18 +554,21 @@ func (s *Store) CompleteRun(ctx context.Context, in kernelstore.CompleteRunInput
 	}
 	updatedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'SUCCEEDED', result_ref = $1,
 		resource_version = resource_version + 1, updated_at = $2
-		WHERE id = $3 AND resource_version = $4 RETURNING `+taskColumns,
-		in.ResultRef, now, task.ID.String(), task.ResourceVersion))
+		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
+		in.ResultRef, now, in.TenantID, task.ID.String(), task.ResourceVersion))
 	if err != nil {
 		return zeroRun, zeroTask, classifyCAS(err, "task", task.ID, task.ResourceVersion)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = 'COMPLETED'
-		WHERE attempt_id = $2 AND fencing_token = $3 AND released_at IS NULL`, now, attempt.ID.String(), in.FencingToken); err != nil {
+		WHERE tenant_id = $2 AND attempt_id = $3 AND fencing_token = $4 AND released_at IS NULL`, now, in.TenantID, attempt.ID.String(), in.FencingToken); err != nil {
 		return zeroRun, zeroTask, classify(err)
 	}
 	// Quota reservation release (v0.8): the task is terminal, so its reserved
 	// ceiling is returned to the tenant window it was admitted in.
 	if err := s.releaseTenantReservation(ctx, tx, task.TenantID, task.ID); err != nil {
+		return zeroRun, zeroTask, err
+	}
+	if err := s.releaseRuntimeCapacity(ctx, tx, task.TenantID, task.ID, now); err != nil {
 		return zeroRun, zeroTask, err
 	}
 	if err := insertEvent(ctx, tx, run.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunCompleted", map[string]any{
@@ -573,23 +603,12 @@ func (s *Store) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-// beginSerializable is retained for future cross-row invariants that row
-// locks cannot express. Any adoption must first measure the SSI conflict rate
-// under the target concurrency and calibrate retry budgets.
-func (s *Store) beginSerializable(ctx context.Context) (pgx.Tx, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return nil, classify(err)
-	}
-	return tx, nil
-}
-
 func rollback(ctx context.Context, tx pgx.Tx) {
 	_ = tx.Rollback(context.WithoutCancel(ctx))
 }
 
 func (s *Store) expireLeaseAndAttempt(ctx context.Context, tx pgx.Tx, lease kernelstore.Lease, now time.Time) error {
-	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts WHERE id = $1 FOR UPDATE`, lease.AttemptID.String()))
+	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, lease.TenantID, lease.AttemptID.String()))
 	if err != nil {
 		return classify(err)
 	}
@@ -597,14 +616,14 @@ func (s *Store) expireLeaseAndAttempt(ctx context.Context, tx pgx.Tx, lease kern
 		return fmt.Errorf("%w: attempt %s completed before its result was committed", kernelstore.ErrCompletionPending, attempt.ID)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runtime_leases SET released_at = $1, release_reason = 'EXPIRED'
-		WHERE id = $2 AND released_at IS NULL`, now, lease.ID.String()); err != nil {
+		WHERE tenant_id = $2 AND id = $3 AND released_at IS NULL`, now, lease.TenantID, lease.ID.String()); err != nil {
 		return classify(err)
 	}
 	updated, err := scanAttempt(tx.QueryRow(ctx, `UPDATE attempts SET phase = 'ATTEMPT_FAILED', failure_code = 'LEASE_EXPIRED',
 		failure_message = 'runtime lease expired before completion', finished_at = $1,
 		resource_version = resource_version + 1, updated_at = $1
-		WHERE id = $2 AND phase NOT IN ('COMPLETED', 'ATTEMPT_FAILED', 'CANCELLED')
-		RETURNING `+attemptColumns, now, lease.AttemptID.String()))
+		WHERE tenant_id = $2 AND id = $3 AND phase NOT IN ('COMPLETED', 'ATTEMPT_FAILED', 'CANCELLED')
+		RETURNING `+attemptColumns, now, lease.TenantID, lease.AttemptID.String()))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -687,10 +706,35 @@ func attemptEventType(phase domain.AttemptPhase) string {
 	return "Attempt" + title(string(phase))
 }
 
+func taskExecutionDeadline(raw json.RawMessage, startedAt time.Time) *time.Time {
+	var timing struct {
+		Deadline *time.Time `json:"deadline"`
+		Budget   struct {
+			WallSeconds int64 `json:"wallSeconds"`
+		} `json:"budget"`
+	}
+	if json.Unmarshal(raw, &timing) != nil {
+		return nil
+	}
+	var effective *time.Time
+	if timing.Deadline != nil && !timing.Deadline.IsZero() {
+		deadline := timing.Deadline.UTC()
+		effective = &deadline
+	}
+	if timing.Budget.WallSeconds > 0 {
+		wall := startedAt.UTC().Add(time.Duration(timing.Budget.WallSeconds) * time.Second)
+		if effective == nil || wall.Before(*effective) {
+			effective = &wall
+		}
+	}
+	return effective
+}
+
 const taskColumns = `
 	id::text, tenant_id, namespace, agent_version_ref, agent_version_id::text, goal, spec, request_hash,
 	idempotency_key, phase, admission_reason_code, admitted_at, cancel_requested_at, active_run_id::text, result_ref,
-	next_schedule_attempt_at, schedule_retry_count,
+	workflow_id::text, workflow_step_id::text, workflow_step_name, workflow_attempt, parent_task_id::text, execution_deadline_at,
+	next_schedule_attempt_at, schedule_retry_count, last_schedule_rejection,
 	resource_version, created_at, updated_at`
 
 const runColumns = `
@@ -712,12 +756,14 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 	var task kernelstore.Task
 	var id string
 	var agentVersionID sql.NullString
-	var admissionReason, activeID, result sql.NullString
-	var admitted, cancel, nextSchedule sql.NullTime
-	var hash []byte
+	var admissionReason, activeID, result, workflowID, workflowStepID, workflowStepName, parentTaskID sql.NullString
+	var workflowAttempt sql.NullInt32
+	var admitted, cancel, executionDeadline, nextSchedule sql.NullTime
+	var hash, scheduleRejection []byte
 	if err := row.Scan(&id, &task.TenantID, &task.Namespace, &task.AgentVersionRef, &agentVersionID,
 		&task.Goal, &task.Spec, &hash, &task.IdempotencyKey, &task.Phase, &admissionReason, &admitted, &cancel,
-		&activeID, &result, &nextSchedule, &task.ScheduleRetryCount,
+		&activeID, &result, &workflowID, &workflowStepID, &workflowStepName, &workflowAttempt, &parentTaskID, &executionDeadline,
+		&nextSchedule, &task.ScheduleRetryCount, &scheduleRejection,
 		&task.ResourceVersion, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return task, err
 	}
@@ -746,8 +792,14 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 	if cancel.Valid {
 		task.CancelRequestedAt = &cancel.Time
 	}
+	if executionDeadline.Valid {
+		task.ExecutionDeadlineAt = &executionDeadline.Time
+	}
 	if nextSchedule.Valid {
 		task.NextScheduleAttemptAt = &nextSchedule.Time
+	}
+	if scheduleRejection != nil {
+		task.LastScheduleRejection = scheduleRejection
 	}
 	if activeID.Valid {
 		parsed, err := uuid.Parse(activeID.String)
@@ -758,6 +810,33 @@ func scanTask(row scanner) (kernelstore.Task, error) {
 	}
 	if result.Valid {
 		task.ResultRef = result.String
+	}
+	if workflowID.Valid {
+		parsed, parseErr := uuid.Parse(workflowID.String)
+		if parseErr != nil {
+			return task, fmt.Errorf("parse workflow id: %w", parseErr)
+		}
+		task.WorkflowID = &parsed
+	}
+	if workflowStepID.Valid {
+		parsed, parseErr := uuid.Parse(workflowStepID.String)
+		if parseErr != nil {
+			return task, fmt.Errorf("parse workflow step id: %w", parseErr)
+		}
+		task.WorkflowStepID = &parsed
+	}
+	if workflowStepName.Valid {
+		task.WorkflowStepName = workflowStepName.String
+	}
+	if workflowAttempt.Valid {
+		task.WorkflowAttempt = int(workflowAttempt.Int32)
+	}
+	if parentTaskID.Valid {
+		parsed, parseErr := uuid.Parse(parentTaskID.String)
+		if parseErr != nil {
+			return task, fmt.Errorf("parse parent task id: %w", parseErr)
+		}
+		task.ParentTaskID = &parsed
 	}
 	return task, nil
 }

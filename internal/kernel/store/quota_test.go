@@ -1,11 +1,15 @@
 package store
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+)
 
 func TestSetTenantQuotaInputValid(t *testing.T) {
 	valid := SetTenantQuotaInput{
 		TenantID: "tenant-a", WindowSeconds: 86400,
-		Limits: TaskBudget{Tokens: 1000, CostUSD: 10, ToolCalls: 100, WallSeconds: 3600},
+		Limits: TaskBudget{Tokens: 1000, CostMicroUSD: money.MustFromUSD(10), ToolCalls: 100, WallSeconds: 3600},
 	}
 	if !valid.Valid() {
 		t.Fatalf("valid quota rejected: %+v", valid)
@@ -18,7 +22,7 @@ func TestSetTenantQuotaInputValid(t *testing.T) {
 		{"window too short", SetTenantQuotaInput{TenantID: "tenant-a", WindowSeconds: 59, Limits: TaskBudget{Tokens: 1}}},
 		{"zero window", SetTenantQuotaInput{TenantID: "tenant-a", WindowSeconds: 0, Limits: TaskBudget{Tokens: 1}}},
 		{"negative token limit", SetTenantQuotaInput{TenantID: "tenant-a", WindowSeconds: 86400, Limits: TaskBudget{Tokens: -1}}},
-		{"negative cost limit", SetTenantQuotaInput{TenantID: "tenant-a", WindowSeconds: 86400, Limits: TaskBudget{CostUSD: -0.5}}},
+		{"negative cost limit", SetTenantQuotaInput{TenantID: "tenant-a", WindowSeconds: 86400, Limits: TaskBudget{CostMicroUSD: -1}}},
 	}
 	for _, tc := range cases {
 		if tc.input.Valid() {
@@ -28,21 +32,21 @@ func TestSetTenantQuotaInputValid(t *testing.T) {
 }
 
 func TestQuotaExceeded(t *testing.T) {
-	limits := TaskBudget{Tokens: 100, CostUSD: 1.0, ToolCalls: 10, WallSeconds: 60}
+	limits := TaskBudget{Tokens: 100, CostMicroUSD: money.MustFromUSD(1), ToolCalls: 10, WallSeconds: 60}
 	if QuotaExceeded(limits, TaskBudget{Tokens: 90}, TaskBudget{Tokens: 9}) {
 		t.Fatal("within token limit rejected")
 	}
 	if !QuotaExceeded(limits, TaskBudget{Tokens: 90}, TaskBudget{Tokens: 11}) {
 		t.Fatal("token overshoot not detected")
 	}
-	if !QuotaExceeded(limits, TaskBudget{Tokens: 90, CostUSD: 0.9}, TaskBudget{CostUSD: 0.2}) {
+	if !QuotaExceeded(limits, TaskBudget{Tokens: 90, CostMicroUSD: money.MustFromUSD(0.9)}, TaskBudget{CostMicroUSD: money.MustFromUSD(0.2)}) {
 		t.Fatal("cost overshoot not detected")
 	}
 	if !QuotaExceeded(limits, TaskBudget{Tokens: 101}, TaskBudget{}) {
 		t.Fatal("already-over window not detected")
 	}
 	// A zero limit means the dimension is unlimited.
-	unlimited := TaskBudget{Tokens: 0, CostUSD: 0, ToolCalls: 0, WallSeconds: 0}
+	unlimited := TaskBudget{Tokens: 0, CostMicroUSD: 0, ToolCalls: 0, WallSeconds: 0}
 	if QuotaExceeded(unlimited, TaskBudget{Tokens: 1 << 40}, TaskBudget{Tokens: 1 << 40}) {
 		t.Fatal("unlimited quota rejected consumption")
 	}

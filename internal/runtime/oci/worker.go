@@ -14,6 +14,7 @@ import (
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/attemptstate"
 	"github.com/CloudEdgeCore/AgentOS/internal/runtime/leasekeeper"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -277,10 +278,22 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 // fail marks the Attempt ATTEMPT_FAILED with a machine-readable code, mirroring
 // ADR-007: the recovery controller decides retry vs. terminal failure.
 func (w *Worker) fail(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64, code string, cause error) (bool, error) {
-	if _, err := w.transition(ctx, identity, version, runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED, code, cause.Error()); err != nil {
-		return false, fmt.Errorf("mark attempt failed (%s): %w", code, err)
+	const maxConflictRetries = 3
+	for conflict := 0; ; conflict++ {
+		if _, err := w.transition(ctx, identity, version, runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED, code, cause.Error()); err == nil {
+			return true, nil
+		} else if status.Code(err) != codes.Aborted || conflict >= maxConflictRetries {
+			return false, fmt.Errorf("mark attempt failed (%s): %w", code, err)
+		}
+		current, err := attemptstate.Refresh(ctx, w.client, identity, controlRPCTimeout)
+		if err != nil {
+			return false, fmt.Errorf("mark attempt failed (%s): %w", code, err)
+		}
+		if current.Settled() {
+			return true, nil
+		}
+		version = current.Version
 	}
-	return true, nil
 }
 
 func (w *Worker) transition(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64,

@@ -122,6 +122,7 @@ func (c *Controller) processCandidate(ctx context.Context, candidate store.Recov
 		TenantID: candidate.TenantID, AttemptID: candidate.AttemptID,
 		FencingToken: candidate.FencingToken, NewAttemptID: c.newID(), NewLeaseID: c.newID(),
 		LeaseTTL: c.leaseTTL, MaxAttempts: spec.RetryPolicy.EffectiveMaxAttempts(),
+		DeadlineExceeded: candidate.DeadlineExceeded,
 	})
 	if errors.Is(err, store.ErrFenced) || errors.Is(err, store.ErrLeaseNotExpired) || errors.Is(err, store.ErrNotFound) {
 		return false, nil

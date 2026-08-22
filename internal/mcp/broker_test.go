@@ -11,6 +11,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
@@ -131,7 +132,7 @@ func TestBrokerModelInvokeEnforcesGrantAndFencing(t *testing.T) {
 		output: kernelmodel.InvokeOutput{
 			Call: store.ModelCall{ID: uuid.MustParse("00000000-0000-0000-0000-00000000000a"),
 				TenantID: "tenant-1", ModelRef: "fake/agent-model", Status: store.ModelCallCompleted,
-				InputTokens: 30, OutputTokens: 12, CostUSD: 0.0002, FinishReason: "stop", ProviderRequestID: "req-1"},
+				InputTokens: 30, OutputTokens: 12, CostMicroUSD: money.MustFromUSD(0.0002), FinishReason: "stop", ProviderRequestID: "req-1"},
 			Content: "the answer",
 		},
 	}

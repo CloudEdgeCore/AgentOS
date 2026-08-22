@@ -18,6 +18,7 @@ import (
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -191,7 +192,10 @@ func prepareReferenceDatabase(t *testing.T) (*pgxpool.Pool, *postgresstore.Store
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
+		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
 		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
@@ -220,7 +224,7 @@ func scheduleReferenceTask(t *testing.T, ctx context.Context, store *postgressto
 		t.Fatal(err)
 	}
 	limits := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10, MaxToolCalls: 100,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostMicroUSD: money.MustFromUSD(10), MaxToolCalls: 100,
 		MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
 	policyEngine, err := policy.New(policy.TenantPolicies{"tenant-a": {MaxPriority: 100}})

@@ -2,7 +2,10 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/agentmetrics"
 	"github.com/google/uuid"
 )
 
@@ -29,6 +33,10 @@ type RuntimePool struct {
 	Region            string   `json:"region"`
 	DataResidency     string   `json:"dataResidency"`
 	Ready             bool     `json:"ready"`
+	// Status separates health from operator intent. Empty/ACTIVE accepts new
+	// work; CORDONED and DRAINING preserve existing leases but reject placement.
+	Status            string   `json:"status,omitempty"`
+	FailureDomain     string   `json:"failureDomain,omitempty"`
 	AvailableCPU      int64    `json:"availableCpuMillis"`
 	AvailableMemory   int64    `json:"availableMemoryMiB"`
 	AvailableLLMSlots int      `json:"availableLlmSlots"`
@@ -59,6 +67,13 @@ type Result struct {
 }
 
 func Select(spec workload.Spec, pools []RuntimePool) (Result, error) {
+	return selectForTask(spec, pools, uuid.Nil)
+}
+
+// selectForTask uses rendezvous hashing only to break equal-score ties. This
+// preserves explainable placement scores while preventing every task from
+// hot-spotting the lexicographically first identical pool.
+func selectForTask(spec workload.Spec, pools []RuntimePool, taskID uuid.UUID) (Result, error) {
 	var candidates []Placement
 	result := Result{}
 	seen := make(map[string]struct{}, len(pools))
@@ -71,8 +86,26 @@ func Select(spec workload.Spec, pools []RuntimePool) (Result, error) {
 			return result, fmt.Errorf("%w: duplicate pool ID %q", ErrInvalidPoolSet, pool.ID)
 		}
 		seen[pool.ID] = struct{}{}
+		if math.IsNaN(pool.CostWeight) || math.IsInf(pool.CostWeight, 0) || pool.CostWeight < 0 {
+			return result, fmt.Errorf("%w: pool %q costWeight must be finite and non-negative", ErrInvalidPoolSet, pool.ID)
+		}
+		if pool.AvailableCPU < 0 || pool.AvailableMemory < 0 || pool.AvailableLLMSlots < 0 {
+			return result, fmt.Errorf("%w: pool %q capacities must be non-negative", ErrInvalidPoolSet, pool.ID)
+		}
 		if !pool.Ready {
 			rejected = append(rejected, "POOL_NOT_READY")
+		}
+		switch strings.ToUpper(strings.TrimSpace(pool.Status)) {
+		case "", "ACTIVE":
+		case "CORDONED":
+			rejected = append(rejected, "POOL_CORDONED")
+		case "DRAINING":
+			rejected = append(rejected, "POOL_DRAINING")
+		default:
+			return result, fmt.Errorf("%w: pool %q has unknown status %q", ErrInvalidPoolSet, pool.ID, pool.Status)
+		}
+		if pool.FailureDomain != "" && slices.Contains(spec.Placement.AvoidFailureDomains, pool.FailureDomain) {
+			rejected = append(rejected, "FAILURE_DOMAIN_ANTI_AFFINITY")
 		}
 		if !slices.Contains(spec.Placement.RuntimeClasses, pool.RuntimeClass) {
 			rejected = append(rejected, "RUNTIME_CLASS_MISMATCH")
@@ -109,6 +142,13 @@ func Select(spec workload.Spec, pools []RuntimePool) (Result, error) {
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].Score == candidates[j].Score {
+			if taskID != uuid.Nil {
+				left := placementTieHash(taskID, candidates[i].Pool.ID)
+				right := placementTieHash(taskID, candidates[j].Pool.ID)
+				if comparison := bytes.Compare(left[:], right[:]); comparison != 0 {
+					return comparison > 0
+				}
+			}
 			return candidates[i].Pool.ID < candidates[j].Pool.ID
 		}
 		return candidates[i].Score > candidates[j].Score
@@ -116,6 +156,13 @@ func Select(spec workload.Spec, pools []RuntimePool) (Result, error) {
 	result.Placement = candidates[0]
 	sort.Slice(result.Rejected, func(i, j int) bool { return result.Rejected[i].PoolID < result.Rejected[j].PoolID })
 	return result, nil
+}
+
+func placementTieHash(taskID uuid.UUID, poolID string) [sha256.Size]byte {
+	payload := make([]byte, 0, len(taskID)+len(poolID))
+	payload = append(payload, taskID[:]...)
+	payload = append(payload, poolID...)
+	return sha256.Sum256(payload)
 }
 
 func score(spec workload.Spec, pool RuntimePool) []ScoreComponent {
@@ -165,7 +212,7 @@ func (s StaticPoolSource) ListRuntimePools(_ context.Context, tenantID string) (
 }
 
 // LeaseAwarePoolSource overlays lease-derived runtime health onto a static
-// pool configuration (v0.6): a pool is ready only when its static
+// pool configuration: a pool is ready only when its static
 // configuration says ready AND its runtime instance is presumed alive by
 // recent lease heartbeats. Placement therefore rejects pools whose worker
 // stopped renewing its lease instead of scheduling a task that would be
@@ -262,6 +309,8 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	agentmetrics.SchedulerClaims(ctx, len(claims))
+	agentmetrics.QueueDepth(ctx, "scheduler_claim_batch", int64(len(claims)))
 	return c.processClaims(ctx, claims)
 }
 
@@ -340,9 +389,13 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 		slog.Error("runtime pool list failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
 		return false, nil
 	}
-	selection, err := Select(spec, pools)
+	selection, err := selectForTask(spec, pools, claim.Task.ID)
 	if err != nil {
 		if errors.Is(err, ErrNoPlacement) {
+			rejection, encodeErr := json.Marshal(selection.Rejected)
+			if encodeErr != nil {
+				return false, fmt.Errorf("encode placement rejection: %w", encodeErr)
+			}
 			// O6: release the claim immediately and defer the next attempt
 			// with exponential backoff instead of pinning the claim until
 			// its TTL. The deferral lives on the task, so every controller
@@ -351,7 +404,8 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 			_, deferErr := c.store.DeferTaskSchedule(ctx, store.DeferTaskScheduleInput{
 				TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
 				ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
-				Until: time.Now().UTC().Add(scheduleBackoff(claim.Task.ScheduleRetryCount)),
+				Until:     time.Now().UTC().Add(scheduleBackoff(claim.Task.ScheduleRetryCount, claim.Task.ID)),
+				Rejection: rejection,
 			})
 			if deferErr != nil {
 				if store.IsRetryableTransaction(deferErr) {
@@ -363,6 +417,7 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 				_ = c.store.ReleaseTaskClaim(ctx, claim)
 				slog.Error("schedule deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
 			}
+			agentmetrics.SchedulerOutcome(ctx, "placement_deferred")
 			return false, nil
 		}
 		_ = c.store.ReleaseTaskClaim(ctx, claim)
@@ -375,17 +430,50 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 		ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 		RunID: c.newID(), AttemptID: c.newID(), LeaseID: c.newID(), RuntimePoolID: pool.ID,
 		RuntimeClass: pool.RuntimeClass, RuntimeInstanceID: pool.RuntimeInstanceID, LeaseTTL: c.leaseTTL,
+		PoolCPUCapacity: pool.AvailableCPU, PoolMemoryCapacity: pool.AvailableMemory,
+		PoolLLMCapacity: pool.AvailableLLMSlots, RequestedCPU: spec.Placement.CPU,
+		RequestedMemory: spec.Placement.Memory, RequestedLLMSlots: spec.Placement.LLMConcurrency,
 	})
 	if err != nil {
 		if store.IsRetryableTransaction(err) {
 			return false, err
 		}
+		if errors.Is(err, store.ErrCapacityExhausted) {
+			// The selected pool may fill between the read-only placement pass
+			// and the transactional reservation. Persist the same bounded
+			// backoff used for a no-fit decision instead of immediately
+			// reclaiming the task in a hot loop.
+			rejections := append(selection.Rejected, Rejection{
+				PoolID: pool.ID, Reasons: []string{"CAPACITY_RESERVATION_RACE"},
+			})
+			rejection, encodeErr := json.Marshal(rejections)
+			if encodeErr != nil {
+				return false, fmt.Errorf("encode capacity rejection: %w", encodeErr)
+			}
+			_, deferErr := c.store.DeferTaskSchedule(ctx, store.DeferTaskScheduleInput{
+				TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
+				ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
+				Until:     time.Now().UTC().Add(capacityBackoff(claim.Task.ScheduleRetryCount, claim.Task.ID)),
+				Rejection: rejection,
+			})
+			if deferErr != nil {
+				if store.IsRetryableTransaction(deferErr) {
+					return false, deferErr
+				}
+				_ = c.store.ReleaseTaskClaim(ctx, claim)
+				slog.Error("capacity deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
+			}
+			agentmetrics.SchedulerOutcome(ctx, "placement_deferred")
+			return false, nil
+		}
 		// A stale claim or a per-task schedule failure: release and
 		// continue so one task cannot starve the batch.
 		_ = c.store.ReleaseTaskClaim(ctx, claim)
 		slog.Error("schedule commit failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
+		agentmetrics.SchedulerOutcome(ctx, "schedule_failed")
 		return false, nil
 	}
+	agentmetrics.SchedulerOutcome(ctx, "scheduled")
 	return true, nil
 }
 
@@ -402,7 +490,7 @@ func newUUIDv7() uuid.UUID {
 // deferral, capped at 5 minutes. The retry count comes from the task row, so
 // the progression survives controller restarts and is shared across
 // instances.
-func scheduleBackoff(retries int64) time.Duration {
+func scheduleBackoff(retries int64, taskIDs ...uuid.UUID) time.Duration {
 	const (
 		base = 5 * time.Second
 		max  = 5 * time.Minute
@@ -411,11 +499,53 @@ func scheduleBackoff(retries int64) time.Duration {
 		retries = 0
 	}
 	if retries > 6 {
-		return max
+		retries = 6
 	}
 	backoff := base << retries
 	if backoff > max {
 		return max
+	}
+	// Stable per-task jitter spreads deferred tasks without making replay
+	// diagnostics nondeterministic. The window is capped at 25%.
+	if len(taskIDs) > 0 && taskIDs[0] != uuid.Nil {
+		window := backoff / 4
+		if window > 0 {
+			seed := int64(taskIDs[0][0])<<8 | int64(taskIDs[0][1])
+			backoff += time.Duration(seed) % window
+			if backoff > max {
+				backoff = max
+			}
+		}
+	}
+	return backoff
+}
+
+// capacityBackoff is intentionally much shorter than a structural
+// no-placement backoff. An atomic reservation race means a suitable pool
+// exists and capacity is actively turning over; exponential multi-minute
+// delays would strand runnable tasks after the fleet becomes idle.
+func capacityBackoff(retries int64, taskIDs ...uuid.UUID) time.Duration {
+	const (
+		base = 100 * time.Millisecond
+		max  = time.Second
+	)
+	if retries < 0 {
+		retries = 0
+	}
+	if retries > 4 {
+		retries = 4
+	}
+	backoff := base << retries
+	if backoff > max {
+		backoff = max
+	}
+	if len(taskIDs) > 0 && taskIDs[0] != uuid.Nil {
+		window := backoff / 4
+		seed := int64(taskIDs[0][0])<<8 | int64(taskIDs[0][1])
+		backoff += time.Duration(seed) % window
+		if backoff > max {
+			backoff = max
+		}
 	}
 	return backoff
 }

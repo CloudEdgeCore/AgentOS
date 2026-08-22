@@ -1,15 +1,46 @@
-# TypeScript SDK (planned)
+# AgentOS SDK for TypeScript
 
-Status: **planned** — part of the v0.9 Platform slice, not yet implemented.
+Typed, dependency-free clients for Node.js 20+ and modern browsers. SDK `1.x`
+supports the stable AgentOS Control API and `agentos.runtime.interface/v1`.
 
-Purpose: Web/Node clients of the Agent OS control plane (`/v1` REST + SSE task
-events), generated from the OpenAPI document in `api/openapi`.
+The package includes manifest, budget, capability, task, workflow, dynamic-step,
+runtime event, and result types. Mutating operations expose idempotency keys and
+resource-version ETags instead of hiding the platform's concurrency contract.
 
-Boundary rules (per the tech baseline):
+```ts
+import { ControlClient, type WorkflowSpec } from "@agentos/sdk";
 
-- TypeScript never enters the Kernel trusted computing base.
-- Node Agents must run inside a `RuntimeClass`, never as trusted
-  control-plane plugins.
+const client = new ControlClient("https://control.example.com", {
+  token: () => obtainShortLivedToken(),
+});
 
-This directory is reserved; package layout is defined when the v0.9 SDK work
-starts.
+const workflow: WorkflowSpec = {
+  apiVersion: "agentos.dev/workflow/v1",
+  kind: "Workflow",
+  steps: [{
+    name: "research",
+    agentVersionRef: "researcher@1.0.0",
+    goal: "Research the requested topic",
+  }],
+};
+
+const created = await client.createWorkflow(
+  { namespace: "default", goal: "Prepare a brief", workflow },
+  crypto.randomUUID(),
+);
+
+await client.cancelWorkflow(created.value.id, created.value.resourceVersion);
+```
+
+Runtime adapters and conformance tooling can use `RuntimeClient` for health,
+start, stop, event, result, checkpoint, and restore calls. Agent processes must
+not receive model-provider credentials; use the execution-scoped MCP endpoint
+in the Runtime Interface start request.
+
+Build and test locally:
+
+```bash
+cd sdk/typescript
+npm ci
+npm test
+```

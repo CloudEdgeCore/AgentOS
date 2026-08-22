@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/google/uuid"
 )
 
@@ -17,23 +18,27 @@ var (
 	// ErrBudgetNotReserved reports a settlement or read for a task without a
 	// budget reservation.
 	ErrBudgetNotReserved = errors.New("task has no budget reservation")
+	// ErrUsageReservationConflict reports a replay that changes the amount
+	// reserved under an existing reservation key.
+	ErrUsageReservationConflict = errors.New("usage reservation conflicts with its replay")
 )
 
 // TaskBudget is the reserved or consumed four-dimensional budget of a task.
 // All fields are non-negative; a zero budget means the dimension is unlimited.
 type TaskBudget struct {
-	Tokens      int64
-	CostUSD     float64
-	ToolCalls   int64
-	WallSeconds int64
+	Tokens       int64
+	CostMicroUSD money.MicroUSD
+	ToolCalls    int64
+	WallSeconds  int64
 }
 
 func (b TaskBudget) Zero() bool {
-	return b.Tokens == 0 && b.CostUSD == 0 && b.ToolCalls == 0 && b.WallSeconds == 0
+	return b.Tokens == 0 && b.CostMicroUSD == 0 && b.ToolCalls == 0 && b.WallSeconds == 0
 }
 
 func (b TaskBudget) Valid() bool {
-	return b.Tokens >= 0 && b.CostUSD >= 0 && b.ToolCalls >= 0 && b.WallSeconds >= 0
+	return b.Tokens >= 0 && b.CostMicroUSD >= 0 &&
+		b.ToolCalls >= 0 && b.WallSeconds >= 0
 }
 
 // TaskBudgetStatus is the current reservation and cumulative consumption of a
@@ -53,6 +58,9 @@ type SettleTaskUsageInput struct {
 	TaskID         uuid.UUID
 	IdempotencyKey string
 	Usage          TaskBudget
+	// ReservationKey identifies the active pre-consumption reservation that
+	// this settlement replaces. It is excluded from concurrent headroom.
+	ReservationKey string
 }
 
 func (in SettleTaskUsageInput) Valid() bool {
@@ -78,6 +86,20 @@ type SettleTaskUsageDeltaInput struct {
 	Target TaskBudget
 	// IdempotencyKey is the key of the delta settlement row.
 	IdempotencyKey string
+	ReservationKey string
+}
+
+type ReserveTaskUsageInput struct {
+	TenantID       string
+	TaskID         uuid.UUID
+	ReservationKey string
+	Amount         TaskBudget
+	ExpiresAt      time.Time
+}
+
+func (in ReserveTaskUsageInput) Valid() bool {
+	return strings.TrimSpace(in.TenantID) != "" && in.TaskID != uuid.Nil &&
+		strings.TrimSpace(in.ReservationKey) != "" && in.Amount.Valid() && !in.Amount.Zero() && !in.ExpiresAt.IsZero()
 }
 
 func (in SettleTaskUsageDeltaInput) Valid() bool {
@@ -100,4 +122,10 @@ type BudgetStore interface {
 	// The hard stop and replay semantics match SettleTaskUsage; a family that
 	// already settled at least the target settles nothing.
 	SettleTaskUsageDelta(context.Context, SettleTaskUsageDeltaInput) (TaskBudgetStatus, error)
+	// ReserveTaskUsage atomically protects headroom before a provider or tool
+	// call starts. Replays with the same key and amount are idempotent.
+	ReserveTaskUsage(context.Context, ReserveTaskUsageInput) error
+	// ReleaseTaskUsageReservation is idempotent and must run on every terminal
+	// call path. Expired reservations are reclaimed by reconciliation.
+	ReleaseTaskUsageReservation(context.Context, string, uuid.UUID, string) error
 }

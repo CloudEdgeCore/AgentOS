@@ -53,7 +53,7 @@ type TenantWindowUsage struct {
 // dimension is unlimited.
 func QuotaExceeded(limits, consumed, additional TaskBudget) bool {
 	return (limits.Tokens > 0 && consumed.Tokens+additional.Tokens > limits.Tokens) ||
-		(limits.CostUSD > 0 && consumed.CostUSD+additional.CostUSD > limits.CostUSD) ||
+		(limits.CostMicroUSD > 0 && consumed.CostMicroUSD+additional.CostMicroUSD > limits.CostMicroUSD) ||
 		(limits.ToolCalls > 0 && consumed.ToolCalls+additional.ToolCalls > limits.ToolCalls) ||
 		(limits.WallSeconds > 0 && consumed.WallSeconds+additional.WallSeconds > limits.WallSeconds)
 }
@@ -64,7 +64,7 @@ func QuotaExceeded(limits, consumed, additional TaskBudget) bool {
 // concurrent-admission overshoot of the v0.6 consumed-only gate.
 func QuotaReservationExceeded(limits, consumed, reserved, additional TaskBudget) bool {
 	return (limits.Tokens > 0 && consumed.Tokens+reserved.Tokens+additional.Tokens > limits.Tokens) ||
-		(limits.CostUSD > 0 && consumed.CostUSD+reserved.CostUSD+additional.CostUSD > limits.CostUSD) ||
+		(limits.CostMicroUSD > 0 && consumed.CostMicroUSD+reserved.CostMicroUSD+additional.CostMicroUSD > limits.CostMicroUSD) ||
 		(limits.ToolCalls > 0 && consumed.ToolCalls+reserved.ToolCalls+additional.ToolCalls > limits.ToolCalls) ||
 		(limits.WallSeconds > 0 && consumed.WallSeconds+reserved.WallSeconds+additional.WallSeconds > limits.WallSeconds)
 }

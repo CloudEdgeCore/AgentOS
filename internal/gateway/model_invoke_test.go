@@ -12,6 +12,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -56,7 +57,7 @@ func newInvocationTestClient(t *testing.T, runner ModelRunner, authorizer *capab
 func TestModelInvocationStreamsDeltasAndFinish(t *testing.T) {
 	call := store.ModelCall{ID: uuid.New(), TenantID: "tenant-a", AttemptID: uuid.New(),
 		ModelRef: "fake/model", Status: store.ModelCallCompleted, InputTokens: 90, OutputTokens: 45,
-		CostUSD: 0.001, PriceRevision: "p1", FinishReason: "stop", ProviderRequestID: "req-9", ResourceVersion: 2}
+		CostMicroUSD: money.MustFromUSD(0.001), PriceRevision: "p1", FinishReason: "stop", ProviderRequestID: "req-9", ResourceVersion: 2}
 	runner := &fakeModelRunner{
 		deltas: []string{"Hel", "lo"},
 		output: model.InvokeOutput{Call: call, Content: "Hello", ToolCalls: []provider.ToolCall{

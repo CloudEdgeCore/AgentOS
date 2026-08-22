@@ -156,6 +156,47 @@ func TestV13ConcurrentSpawnCreatesExactlyOneStep(t *testing.T) {
 	}
 }
 
+func TestWorkflowApprovalPreservesActorDecisionAndLifecycleEvidence(t *testing.T) {
+	clock := newFakeClock()
+	pool, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+	workflow := createV13Workflow(t, ctx, repository, "tenant-evidence", "workflow-evidence")
+	steps, err := repository.ListWorkflowSteps(ctx, workflow.TenantID, workflow.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("list initial step: len=%d err=%v", len(steps), err)
+	}
+	waiting, err := repository.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
+		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: steps[0].Name,
+		ExpectedVersion: steps[0].ResourceVersion, To: kernelstore.StepWaitingApproval,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decided, err := repository.DecideWorkflowStepApproval(ctx, kernelstore.DecideWorkflowStepApprovalInput{
+		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: waiting.Name,
+		ExpectedVersion: waiting.ResourceVersion, Approved: false, DecidedBy: "user:reviewer-42",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decided.DecidedBy != "user:reviewer-42" || decided.ApprovalDecision != "rejected" {
+		t.Fatalf("approval identity = actor %q decision %q", decided.DecidedBy, decided.ApprovalDecision)
+	}
+	var lifecycleEvents, auditEvents int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events
+		WHERE tenant_id = $1 AND payload->>'workflowId' = $2`, workflow.TenantID, workflow.ID.String()).Scan(&lifecycleEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events
+		WHERE tenant_id = $1 AND (resource_id = $2::uuid OR details->>'workflowId' = $3)`,
+		workflow.TenantID, workflow.ID.String(), workflow.ID.String()).Scan(&auditEvents); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleEvents < 3 || auditEvents < 3 {
+		t.Fatalf("workflow evidence incomplete: outbox=%d audit=%d", lifecycleEvents, auditEvents)
+	}
+}
+
 func TestV13SpawnStopsAtWorkflowBudgetAndDeadline(t *testing.T) {
 	clock := newFakeClock()
 	_, repository := prepare(t, clock.Now)
@@ -163,13 +204,18 @@ func TestV13SpawnStopsAtWorkflowBudgetAndDeadline(t *testing.T) {
 	budgeted := createV13Workflow(t, ctx, repository, "tenant-v13", "budget-stop", func(input *kernelstore.CreateWorkflowInput) {
 		input.BudgetMaxTasks = 1
 	})
+	steps, err := repository.ListWorkflowSteps(ctx, budgeted.TenantID, budgeted.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("list budget workflow steps: len=%d err=%v", len(steps), err)
+	}
 	if _, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
 		ID: uuid.New(), TenantID: budgeted.TenantID, Namespace: "default", AgentVersionRef: "planner@1",
 		Goal: "already consumed", Spec: []byte(`{}`), IdempotencyKey: fmt.Sprintf("workflow/%s/planner/1", budgeted.ID),
+		WorkflowID: &budgeted.ID, WorkflowStepID: &steps[0].ID, WorkflowStepName: steps[0].Name, WorkflowAttempt: 1,
 	}); err != nil {
 		t.Fatalf("seed workflow task: %v", err)
 	}
-	_, err := repository.SpawnWorkflowStep(ctx, kernelstore.SpawnWorkflowStepInput{
+	_, err = repository.SpawnWorkflowStep(ctx, kernelstore.SpawnWorkflowStepInput{
 		WorkflowID: budgeted.ID, TenantID: budgeted.TenantID, WorkflowVersion: budgeted.ResourceVersion,
 		ParentStepName: "planner", Name: "over-budget", Goal: "must not run", AgentVersionRef: "worker@1",
 		Spec: []byte(`{}`), Guards: kernelstore.SpawnGuards{Enabled: true, MaxDynamicSteps: 10, MaxChildrenPerStep: 10}, IdempotencyKey: "budget", Arguments: []byte(`{}`),

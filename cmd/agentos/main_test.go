@@ -180,3 +180,57 @@ func TestPublishRunAndLogsUseControlContract(t *testing.T) {
 		t.Fatalf("calls=%v output=%s", calls, output.String())
 	}
 }
+
+func TestWorkflowCommandsUseCASAndRenderTree(t *testing.T) {
+	workflowID := "44444444-4444-4444-4444-444444444444"
+	stepPath := "/v1/workflows/" + workflowID + "/steps/review/approval"
+	directory := t.TempDir()
+	workflowFile := filepath.Join(directory, "workflow.json")
+	if err := os.WriteFile(workflowFile, []byte(`{"apiVersion":"agentos.dev/workflow/v1","kind":"Workflow","steps":[{"name":"root","agentVersionRef":"api-agent@0.1.0","goal":"work"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls = append(calls, request.Method+" "+request.URL.Path)
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/workflows":
+			if request.Header.Get("Idempotency-Key") != "wf-fixed" {
+				t.Errorf("missing workflow idempotency key")
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		case "/v1/workflows/" + workflowID:
+		case "/v1/workflows/" + workflowID + "/cancel", stepPath:
+			if request.Header.Get("If-Match") != `W/"7"` {
+				t.Errorf("If-Match = %q", request.Header.Get("If-Match"))
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		default:
+			http.NotFound(writer, request)
+			return
+		}
+		_, _ = writer.Write([]byte(`{"id":"` + workflowID + `","status":"RUNNING","steps":[{"name":"root","status":"SUCCEEDED"},{"name":"review","status":"WAITING_APPROVAL","parentStepName":"root","isDynamic":true,"spawnDepth":1}]}`))
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	commands := [][]string{
+		{"workflow", "create", "-endpoint", server.URL, "-file", workflowFile, "-goal", "ship", "-idempotency-key", "wf-fixed"},
+		{"workflow", "get", "-endpoint", server.URL, "-id", workflowID},
+		{"workflow", "cancel", "-endpoint", server.URL, "-id", workflowID, "-version", "7"},
+		{"workflow", "approve", "-endpoint", server.URL, "-id", workflowID, "-step", "review", "-version", "7"},
+		{"workflow", "reject", "-endpoint", server.URL, "-id", workflowID, "-step", "review", "-version", "7"},
+		{"workflow", "tree", "-endpoint", server.URL, "-id", workflowID},
+	}
+	for _, command := range commands {
+		if err := run(command, &output, io.Discard); err != nil {
+			t.Fatalf("%v: %v", command, err)
+		}
+	}
+	if !strings.Contains(output.String(), "review [WAITING_APPROVAL] <- root") {
+		t.Fatalf("tree output:\n%s", output.String())
+	}
+	if len(calls) != len(commands) {
+		t.Fatalf("calls=%v", calls)
+	}
+}

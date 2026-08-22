@@ -1,4 +1,4 @@
-// Command agentos-orchestrator runs the v1.3 workflow orchestrator: it
+// Command agentos-orchestrator runs the durable workflow orchestrator: it
 // decides which workflow steps execute when and creates ordinary Tasks for
 // them. Scheduling (where a Task runs) stays with the scheduler. The
 // reconcile loop is stateless and durable — restarts and concurrent

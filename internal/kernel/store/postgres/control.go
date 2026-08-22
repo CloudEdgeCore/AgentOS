@@ -61,7 +61,12 @@ func (s *Store) ClaimTasks(ctx context.Context, in kernelstore.ClaimTasksInput) 
 			WHERE c.tenant_id = t.tenant_id AND c.task_id = t.id
 			  AND c.controller_kind = $2 AND c.expires_at > $3
 		  )`+scheduleEligible+shardEligible+`
-		ORDER BY t.created_at, t.id
+		ORDER BY
+		  (SELECT COUNT(*) FROM task_controller_claims active
+		   WHERE active.tenant_id = t.tenant_id AND active.controller_kind = $2 AND active.expires_at > $3),
+		  COALESCE((t.spec->>'priority')::int, 0) DESC,
+		  NULLIF(t.spec->>'deadline', '')::timestamptz ASC NULLS LAST,
+		  t.created_at, t.id
 		FOR UPDATE OF t SKIP LOCKED
 		LIMIT $4`, args...)
 	if err != nil {
@@ -202,11 +207,11 @@ func (s *Store) DecideAdmission(ctx context.Context, in kernelstore.DecideAdmiss
 			windowStart = *quotaWindowStart
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO task_budget_ledgers (
-			tenant_id, task_id, reserved_tokens, reserved_cost_usd,
+			tenant_id, task_id, reserved_tokens, reserved_cost_micro_usd,
 			reserved_tool_calls, reserved_wall_seconds, quota_reserved_window_start, created_at, updated_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
 		ON CONFLICT (tenant_id, task_id) DO NOTHING`,
-			in.TenantID, in.TaskID.String(), in.Budget.Tokens, in.Budget.CostUSD,
+			in.TenantID, in.TaskID.String(), in.Budget.Tokens, in.Budget.CostMicroUSD,
 			in.Budget.ToolCalls, in.Budget.WallSeconds, windowStart, now); err != nil {
 			return kernelstore.Task{}, classify(err)
 		}
@@ -250,7 +255,8 @@ func (s *Store) ReleaseTaskClaim(ctx context.Context, claim kernelstore.TaskClai
 // stale owners are fenced.
 func (s *Store) DeferTaskSchedule(ctx context.Context, in kernelstore.DeferTaskScheduleInput) (kernelstore.Task, error) {
 	var zero kernelstore.Task
-	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.OwnerID) == "" || in.Until.IsZero() {
+	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.OwnerID) == "" || in.Until.IsZero() ||
+		(len(in.Rejection) > 0 && (!json.Valid(in.Rejection) || len(in.Rejection) > 64<<10)) {
 		return zero, fmt.Errorf("tenant, owner, and a deferral deadline are required")
 	}
 	now := s.now()
@@ -277,9 +283,10 @@ func (s *Store) DeferTaskSchedule(ctx context.Context, in kernelstore.DeferTaskS
 	updated, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET
 		next_schedule_attempt_at = $1,
 		schedule_retry_count = schedule_retry_count + 1,
-		resource_version = resource_version + 1, updated_at = $2
-		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
-		in.Until.UTC(), now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion))
+		last_schedule_rejection = $2,
+		resource_version = resource_version + 1, updated_at = $3
+		WHERE tenant_id = $4 AND id = $5 AND resource_version = $6 RETURNING `+taskColumns,
+		in.Until.UTC(), jsonRawNull(in.Rejection), now, in.TenantID, in.TaskID.String(), in.ExpectedTaskVersion))
 	if err != nil {
 		return zero, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
 	}
@@ -287,12 +294,12 @@ func (s *Store) DeferTaskSchedule(ctx context.Context, in kernelstore.DeferTaskS
 		return zero, err
 	}
 	if err := insertEvent(ctx, tx, in.TenantID, "Task", task.ID, updated.ResourceVersion, "TaskScheduleDeferred", map[string]any{
-		"taskId": task.ID, "until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount,
+		"taskId": task.ID, "until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount, "rejection": json.RawMessage(in.Rejection),
 	}, now, s.newID()); err != nil {
 		return zero, err
 	}
 	if err := auditHook(ctx, tx, in.TenantID, "task.schedule.deferred", "Task", task.ID, map[string]any{
-		"until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount,
+		"until": in.Until.UTC(), "retryCount": updated.ScheduleRetryCount, "rejection": json.RawMessage(in.Rejection),
 	}, now); err != nil {
 		return zero, err
 	}
@@ -338,8 +345,11 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 	if err := domain.ValidateTaskTransition(task.Phase, domain.TaskRunning); err != nil {
 		return kernelstore.AttemptLease{}, fmt.Errorf("%w: %v", kernelstore.ErrInvalidTransition, err)
 	}
+	if err := s.reserveRuntimeCapacity(ctx, tx, in, now); err != nil {
+		return kernelstore.AttemptLease{}, err
+	}
 	var runOrdinal int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM runs WHERE task_id = $1`, task.ID.String()).Scan(&runOrdinal); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(ordinal), 0) + 1 FROM runs WHERE tenant_id = $1 AND task_id = $2`, in.TenantID, task.ID.String()).Scan(&runOrdinal); err != nil {
 		return kernelstore.AttemptLease{}, classify(err)
 	}
 	run, err := scanRun(tx.QueryRow(ctx, `INSERT INTO runs (
@@ -367,11 +377,13 @@ func (s *Store) ScheduleTask(ctx context.Context, in kernelstore.ScheduleTaskInp
 	if err != nil {
 		return kernelstore.AttemptLease{}, classify(err)
 	}
+	executionDeadline := taskExecutionDeadline(task.Spec, now)
 	updatedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'RUNNING', active_run_id = $1,
-		next_schedule_attempt_at = NULL, schedule_retry_count = 0,
-		resource_version = resource_version + 1, updated_at = $2
-		WHERE tenant_id = $3 AND id = $4 AND resource_version = $5 RETURNING `+taskColumns,
-		run.ID.String(), now, in.TenantID, task.ID.String(), in.ExpectedTaskVersion))
+		execution_deadline_at = $2,
+		next_schedule_attempt_at = NULL, schedule_retry_count = 0, last_schedule_rejection = NULL,
+		resource_version = resource_version + 1, updated_at = $3
+		WHERE tenant_id = $4 AND id = $5 AND resource_version = $6 RETURNING `+taskColumns,
+		run.ID.String(), executionDeadline, now, in.TenantID, task.ID.String(), in.ExpectedTaskVersion))
 	if err != nil {
 		return kernelstore.AttemptLease{}, classifyCAS(err, "task", task.ID, in.ExpectedTaskVersion)
 	}
@@ -518,8 +530,13 @@ func validateClaimInput(in kernelstore.ClaimTasksInput) error {
 func validateScheduleInput(in kernelstore.ScheduleTaskInput) error {
 	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.OwnerID) == "" ||
 		strings.TrimSpace(in.RuntimePoolID) == "" || strings.TrimSpace(in.RuntimeClass) == "" ||
-		strings.TrimSpace(in.RuntimeInstanceID) == "" || in.LeaseTTL <= 0 {
+		strings.TrimSpace(in.RuntimeInstanceID) == "" || in.LeaseTTL <= 0 ||
+		in.PoolCPUCapacity < 0 || in.PoolMemoryCapacity < 0 || in.PoolLLMCapacity < 0 ||
+		in.RequestedCPU < 0 || in.RequestedMemory < 0 || in.RequestedLLMSlots < 0 {
 		return fmt.Errorf("schedule tenant, owner, runtime placement, and positive lease TTL are required")
+	}
+	if in.RequestedCPU > in.PoolCPUCapacity || in.RequestedMemory > in.PoolMemoryCapacity || in.RequestedLLMSlots > in.PoolLLMCapacity {
+		return kernelstore.ErrCapacityExhausted
 	}
 	return nil
 }

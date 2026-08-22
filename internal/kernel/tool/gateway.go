@@ -12,6 +12,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/redact"
 	"github.com/google/uuid"
 )
 
@@ -510,8 +511,8 @@ func (g *Gateway) sanitize(output json.RawMessage, handle SecretHandle) []byte {
 	if int64(len(output)) > g.maxResultBytes {
 		output = output[:g.maxResultBytes]
 	}
-	redacted := bytes.ReplaceAll(output, []byte(handle), []byte("[REDACTED]"))
-	if !json.Valid(redacted) {
+	redacted, ok := redact.RedactJSON(output, string(handle))
+	if !ok {
 		return []byte("null")
 	}
 	return redacted

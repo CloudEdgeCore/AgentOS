@@ -11,6 +11,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/recovery"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
@@ -74,7 +75,7 @@ func TestMultiTenantStressQuotaIsolationAndRecovery(t *testing.T) {
 	}
 
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1_000_000, MaxCostUSD: 1_000,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1_000_000, MaxCostMicroUSD: money.MustFromUSD(1_000),
 		MaxToolCalls: 100_000, MaxWallSeconds: 86_400, MaxCPU: 64_000,
 		MaxMemory: 262_144, MaxLLMConcurrency: 128,
 	})
@@ -83,7 +84,7 @@ func TestMultiTenantStressQuotaIsolationAndRecovery(t *testing.T) {
 	pools := staticPools{{
 		ID: "stress-pool", TenantIDs: tenants, RuntimeClass: "oci", RuntimeInstanceID: "stress-worker-1",
 		Region: "cn-east", DataResidency: "cn", Ready: true,
-		AvailableCPU: 64_000, AvailableMemory: 262_144, AvailableLLMSlots: 128,
+		AvailableCPU: int64(wantStressCapacity() * 100), AvailableMemory: int64(wantStressCapacity() * 128), AvailableLLMSlots: wantStressCapacity(),
 	}}
 	schedulerController := scheduler.NewController(store, pools, "stress/scheduler", 50, time.Minute, 30*time.Minute)
 	recoveryController := recovery.NewController(store, 50, time.Minute)
@@ -169,13 +170,13 @@ func TestMultiTenantStressQuotaIsolationAndRecovery(t *testing.T) {
 			t.Fatalf("get task for jitter: %v", err)
 		}
 		run, err := store.CreateRun(ctx, kernelstore.CreateRunInput{
-			ID: uuid.New(), TaskID: task.id, ExpectedTaskVersion: current.ResourceVersion,
+			ID: uuid.New(), TenantID: task.tenant, TaskID: task.id, ExpectedTaskVersion: current.ResourceVersion,
 		})
 		if err != nil {
 			t.Fatalf("create run for jitter task: %v", err)
 		}
 		if _, err := store.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-			AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+			TenantID: task.tenant, AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 			ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "oci",
 			RuntimeInstanceID: "stress-worker-1", TTL: 100 * time.Millisecond,
 		}); err != nil {
@@ -264,6 +265,10 @@ func TestMultiTenantStressQuotaIsolationAndRecovery(t *testing.T) {
 	if claims != 0 {
 		t.Fatalf("lingering claims = %d, want 0", claims)
 	}
+}
+
+func wantStressCapacity() int {
+	return stressTasksPerTenant * 8
 }
 
 // admittedRefsByKind returns the admitted task refs of one kind, ordered by

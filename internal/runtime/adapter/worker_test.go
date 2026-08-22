@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,9 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type runtimeFixture struct {
@@ -24,11 +28,24 @@ type runtimeFixture struct {
 	state map[string]json.RawMessage
 }
 
+type delayedRuntime struct{ delay time.Duration }
+
+func (r delayedRuntime) Run(context.Context, agent.StartRequest, agent.Emitter) (json.RawMessage, error) {
+	time.Sleep(r.delay)
+	return json.RawMessage(`{"done":true}`), nil
+}
+
+func (delayedRuntime) Checkpoint(context.Context, string) (agent.Checkpoint, error) {
+	return agent.Checkpoint{SchemaVersion: "delayed/v1", State: json.RawMessage(`{}`), CreatedAt: time.Now().UTC()}, nil
+}
+
+func (delayedRuntime) Restore(context.Context, agent.RestoreRequest) error { return nil }
+
 func (r *runtimeFixture) Run(_ context.Context, request agent.StartRequest, emit agent.Emitter) (json.RawMessage, error) {
 	if err := emit("fixture.started", json.RawMessage("{\"ok\":true}")); err != nil {
 		return nil, err
 	}
-	output := json.RawMessage("{\"adapter\":\"complete\"}")
+	output := json.RawMessage("{\"adapter\":\"complete\",\"apiKey\":\"must-not-reach-artifact\"}")
 	r.mu.Lock()
 	r.state[request.ExecutionID] = output
 	r.mu.Unlock()
@@ -53,6 +70,36 @@ type fakeControl struct {
 	completed   *runtimev1.CompleteAttemptRequest
 	failure     string
 	checkpoints int
+}
+
+type conflictControl struct {
+	*fakeControl
+	mu                 sync.Mutex
+	failureConflicts   int
+	failureTransitions int
+	refreshPhase       string
+}
+
+func (c *conflictControl) GetAssignment(context.Context, *runtimev1.GetAssignmentRequest, ...grpc.CallOption) (*runtimev1.GetAssignmentResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	assignment := proto.Clone(c.assignment).(*runtimev1.Assignment)
+	assignment.AttemptVersion = c.version
+	assignment.Phase = c.refreshPhase
+	return &runtimev1.GetAssignmentResponse{Assignment: assignment}, nil
+}
+
+func (c *conflictControl) TransitionAttempt(ctx context.Context, request *runtimev1.TransitionAttemptRequest, options ...grpc.CallOption) (*runtimev1.TransitionAttemptResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if request.GetTargetPhase() == runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED {
+		c.failureTransitions++
+		if c.failureConflicts > 0 {
+			c.failureConflicts--
+			return nil, status.Error(codes.Aborted, "attempt version changed")
+		}
+	}
+	return c.fakeControl.TransitionAttempt(ctx, request, options...)
 }
 
 func (f *fakeControl) PollAssignment(context.Context, *runtimev1.PollAssignmentRequest, ...grpc.CallOption) (*runtimev1.PollAssignmentResponse, error) {
@@ -162,6 +209,9 @@ func TestWorkerExecutesManifestThroughRuntimeInterface(t *testing.T) {
 		!bytes.Contains(result, []byte("\"adapter\":\"complete\"")) {
 		t.Fatalf("unexpected adapter result: %s", result)
 	}
+	if bytes.Contains(result, []byte("must-not-reach-artifact")) {
+		t.Fatalf("runtime credential leaked into result artifact: %s", result)
+	}
 }
 
 func TestWorkerHonorsCheckpointNone(t *testing.T) {
@@ -206,5 +256,82 @@ func TestWorkerHonorsCheckpointNone(t *testing.T) {
 	}
 	if control.checkpoints != 0 {
 		t.Fatalf("checkpoint-none publication committed %d checkpoints", control.checkpoints)
+	}
+}
+
+func TestCheckpointCadenceCannotStarveTerminalResultPolling(t *testing.T) {
+	host, err := agent.NewHost(delayedRuntime{delay: 75 * time.Millisecond}, agent.HostOptions{Adapter: "delayed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	worker, err := NewWorker(&fakeControl{}, &memoryArtifacts{content: map[string][]byte{}},
+		server.URL, "tenant-a", "adapter-1", 30*time.Second, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.pollInterval = 25 * time.Millisecond
+	executionID := uuid.NewString()
+	if _, err := worker.runtime.Start(context.Background(), agent.StartRequest{
+		ExecutionID: executionID, AgentVersionRef: "delayed@1", Goal: "finish",
+		Input: json.RawMessage(`{}`), Capabilities: agent.CapabilityGrant{
+			Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{}, ChildAgents: []string{},
+		},
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	checkpoints := 0
+	result, _, err := worker.wait(ctx, executionID, 10*time.Millisecond, func() error {
+		checkpoints++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if result.Status != agent.StatusSucceeded || checkpoints == 0 {
+		t.Fatalf("result=%s checkpoints=%d, want terminal result despite faster checkpoints", result.Status, checkpoints)
+	}
+}
+
+func TestFailureTransitionRefreshesAttemptVersionAfterConflict(t *testing.T) {
+	identity := &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1}
+	base := &fakeControl{
+		version: 4,
+		assignment: &runtimev1.Assignment{
+			Identity: identity, AttemptVersion: 4, Phase: "RUNNING",
+		},
+	}
+	control := &conflictControl{
+		fakeControl: base, failureConflicts: 1, refreshPhase: "RUNNING",
+	}
+	processed, err := (&Worker{control: control}).fail(context.Background(), identity, 3, "execution_failed", io.ErrUnexpectedEOF)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v error=%v", processed, err)
+	}
+	if control.failureTransitions != 2 || !strings.HasPrefix(base.failure, "execution_failed:") {
+		t.Fatalf("failure transitions=%d failure=%q, want one conflict followed by a committed failure", control.failureTransitions, base.failure)
+	}
+}
+
+func TestFailureTransitionNeverOverwritesCancellation(t *testing.T) {
+	identity := &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1}
+	base := &fakeControl{
+		version: 4,
+		assignment: &runtimev1.Assignment{
+			Identity: identity, AttemptVersion: 4, Phase: "CANCEL_REQUESTED",
+		},
+	}
+	control := &conflictControl{
+		fakeControl: base, failureConflicts: 1, refreshPhase: "CANCEL_REQUESTED",
+	}
+	processed, err := (&Worker{control: control}).fail(context.Background(), identity, 3, "execution_failed", io.ErrUnexpectedEOF)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v error=%v", processed, err)
+	}
+	if control.failureTransitions != 1 || base.failure != "" {
+		t.Fatalf("failure transitions=%d failure=%q, cancellation must win", control.failureTransitions, base.failure)
 	}
 }

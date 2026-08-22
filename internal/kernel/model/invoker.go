@@ -1,4 +1,4 @@
-// Real model invocation (v1.1 Phase 1.2): Invoker binds the fenced decision
+// Real model invocation: Invoker binds the fenced decision
 // chain (Begin → Settle → Finish) to a provider execution layer. The gateway
 // still owns policy, budget, the call ledger and cost computation; the
 // executor owns the wire. Content flows through and is never persisted — only
@@ -87,11 +87,11 @@ func (inv *Invoker) Invoke(ctx context.Context, in InvokeInput) (InvokeOutput, e
 }
 
 func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(string)) (InvokeOutput, error) {
-	providerName, _, ok := strings.Cut(in.ModelRef, "/")
-	if !ok {
-		return InvokeOutput{}, fmt.Errorf("model reference must be provider/model")
+	if in.MaxOutputTokens < 0 {
+		return InvokeOutput{}, fmt.Errorf("max output tokens must not be negative")
 	}
-	executor, err := inv.providers.Resolve(providerName)
+	providerName, _, _ := strings.Cut(in.ModelRef, "/")
+	executor, wireModel, err := inv.providers.ResolveModel(in.ModelRef)
 	if err != nil {
 		return InvokeOutput{}, fmt.Errorf("%w: %s", ErrNoProviderExecution, providerName)
 	}
@@ -100,10 +100,12 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 		TenantID: in.TenantID, TaskID: in.TaskID, RunID: in.RunID, AttemptID: in.AttemptID,
 		FencingToken: in.FencingToken, AgentVersionRef: in.AgentVersionRef,
 		ModelRef: in.ModelRef, IdempotencyKey: in.IdempotencyKey,
+		EstimatedInputTokens: estimateInputTokens(in.Messages), MaxOutputTokens: int64(in.MaxOutputTokens),
 	})
 	if err != nil {
 		return InvokeOutput{}, err
 	}
+	in.MaxOutputTokens = int32(begin.EffectiveMaxOutputTokens)
 	call := begin.Call
 
 	// The hard-stop guard: stream deltas are settled as estimated increments
@@ -111,22 +113,21 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	sequence := int64(0)
-	pendingTokens := int64(0)
+	pendingBytes := int64(0)
+	settledEstimate := int64(0)
 	var exhausted error
-	guardedDelta := func(delta string) {
-		if onDelta != nil {
-			onDelta(delta)
-		}
+	guardedGenerated := func(delta string) {
 		if exhausted != nil {
 			return
 		}
-		pendingTokens += int64(len(delta)) / 4
-		if pendingTokens < midStreamSettleTokens {
+		pendingBytes += int64(len(delta))
+		estimatedTokens := pendingBytes / 4
+		increment := estimatedTokens - settledEstimate
+		if increment < midStreamSettleTokens {
 			return
 		}
 		sequence++
-		increment := pendingTokens
-		pendingTokens = 0
+		settledEstimate = estimatedTokens
 		if err := inv.gateway.Settle(streamCtx, call, sequence, Usage{OutputTokens: increment}); err != nil {
 			if errors.Is(err, ErrBudgetExhausted) {
 				exhausted = err
@@ -141,15 +142,19 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 	}
 
 	invocation := provider.Invocation{
-		ModelName: begin.Descriptor.ModelName, Messages: in.Messages,
+		ModelName: wireModel, Messages: in.Messages,
 		Temperature: in.Temperature, MaxOutputTokens: in.MaxOutputTokens, Stream: in.Stream,
+		IdempotencyKey: in.IdempotencyKey, TaskID: in.TaskID.String(), AttemptID: in.AttemptID.String(),
+		ModelCallID: call.ID.String(),
 	}
 	var result provider.Result
 	if in.Stream && !begin.Descriptor.SupportsStreaming {
 		// The tenant descriptor declares the capability; honor it.
 		result, err = executor.Complete(streamCtx, invocation)
 	} else if in.Stream {
-		result, err = executor.Stream(streamCtx, invocation, guardedDelta)
+		result, err = executor.StreamObserved(streamCtx, invocation, provider.StreamObserver{
+			OnContent: onDelta, OnGenerated: guardedGenerated,
+		})
 	} else {
 		result, err = executor.Complete(streamCtx, invocation)
 	}
@@ -157,16 +162,21 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 		return inv.finishGuarded(ctx, call, result, exhausted)
 	}
 	if err != nil {
-		// Provider failure: close the ledger row FAILED with zero usage —
-		// content was not delivered in full, so nothing is billable here.
+		// Provider failure: definitive rejection/overload is known zero usage;
+		// transport loss, 5xx, and partial streams are explicitly unknown and
+		// enter reconciliation instead of being silently treated as free.
 		finishReason := "provider_error"
 		if finish := providerFinishReason(err); finish != "" {
 			finishReason = finish
 		}
+		usageCertainty := store.ModelUsageUnknown
+		if provider.UsageKnownZero(err) {
+			usageCertainty = store.ModelUsageKnownZero
+		}
 		failed, finishErr := inv.gateway.Finish(ctx, call, FinishInput{
 			TenantID: call.TenantID, ModelCallID: call.ID, ExpectedVersion: call.ResourceVersion,
 			Status: store.ModelCallFailed, ProviderRequestID: result.ProviderRequestID,
-			FinishReason: finishReason,
+			FinishReason: finishReason, UsageCertainty: usageCertainty,
 		})
 		if finishErr != nil && !errors.Is(finishErr, ErrBudgetExhausted) {
 			return InvokeOutput{}, errors.Join(err, finishErr)
@@ -174,10 +184,18 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 		return InvokeOutput{Call: failed}, err
 	}
 
+	usageCertainty := store.ModelUsageUnknown
+	if result.UsageReported {
+		usageCertainty = store.ModelUsageKnownZero
+		if result.InputTokens+result.OutputTokens > 0 {
+			usageCertainty = store.ModelUsageKnown
+		}
+	}
 	finished, err := inv.gateway.Finish(ctx, call, FinishInput{
 		TenantID: call.TenantID, ModelCallID: call.ID, ExpectedVersion: call.ResourceVersion,
 		Status: store.ModelCallCompleted, InputTokens: result.InputTokens, OutputTokens: result.OutputTokens,
 		ProviderRequestID: result.ProviderRequestID, FinishReason: result.FinishReason,
+		UsageCertainty: usageCertainty,
 	})
 	output := InvokeOutput{Call: finished, Content: result.Content, ToolCalls: result.ToolCalls}
 	if err != nil {
@@ -186,14 +204,36 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 	return output, nil
 }
 
+func estimateInputTokens(messages []provider.Message) int64 {
+	var bytes int64
+	for _, message := range messages {
+		bytes += int64(len(message.Role) + len(message.Content) + len(message.ToolCallID))
+		for _, call := range message.ToolCalls {
+			bytes += int64(len(call.ID) + len(call.Name) + len(call.Arguments))
+		}
+	}
+	if bytes == 0 {
+		return 0
+	}
+	return (bytes + 3) / 4
+}
+
 // finishGuarded closes a stream that the budget guard cancelled: exact usage
 // is unknown, so the row finishes STOPPED with the provider-reported usage if
 // any arrived before cancellation.
 func (inv *Invoker) finishGuarded(ctx context.Context, call store.ModelCall, result provider.Result, cause error) (InvokeOutput, error) {
+	usageCertainty := store.ModelUsageUnknown
+	if result.UsageReported {
+		usageCertainty = store.ModelUsageKnownZero
+		if result.InputTokens+result.OutputTokens > 0 {
+			usageCertainty = store.ModelUsageKnown
+		}
+	}
 	finished, err := inv.gateway.Finish(ctx, call, FinishInput{
 		TenantID: call.TenantID, ModelCallID: call.ID, ExpectedVersion: call.ResourceVersion,
 		Status: store.ModelCallStopped, InputTokens: result.InputTokens, OutputTokens: result.OutputTokens,
 		ProviderRequestID: result.ProviderRequestID, FinishReason: "budget_guard",
+		UsageCertainty: usageCertainty,
 	})
 	if err != nil && !errors.Is(err, ErrBudgetExhausted) {
 		return InvokeOutput{}, errors.Join(cause, err)

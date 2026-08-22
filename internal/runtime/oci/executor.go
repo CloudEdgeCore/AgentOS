@@ -154,17 +154,22 @@ type RunscOption func(*ctrExecutor)
 // here (platform-neutral fields) so the non-Linux stub can name the type; its
 // constructor and methods are Linux-only and live in runsc_linux.go.
 type ctrExecutor struct {
+	//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
 	ctrPath           string
 	namespace         string
 	runtime           string
 	runtimeConfigPath string
 	snapshotter       string
 	skipPull          bool
-	pullTimeout       time.Duration
-	outputLimit       int64
+	//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
+	pullTimeout time.Duration
+	//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
+	outputLimit int64
 	// active tracks sandbox container IDs owned by live executions so the
 	// preflight reaper never deletes a running workload.
-	mu     sync.Mutex
+	//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
+	mu sync.Mutex
+	//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
 	active map[string]struct{}
 }
 
@@ -209,6 +214,8 @@ func (s ExecutionSpec) Limits() (cpuMillis, memoryMiB, workspaceBytes int64) {
 
 // register marks a sandbox container ID as owned by a live execution so the
 // orphan reaper never deletes it.
+//
+//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
 func (e *ctrExecutor) register(containerID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -219,6 +226,8 @@ func (e *ctrExecutor) register(containerID string) {
 }
 
 // unregister releases ownership after the execution is destroyed.
+//
+//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
 func (e *ctrExecutor) unregister(containerID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -226,6 +235,8 @@ func (e *ctrExecutor) unregister(containerID string) {
 }
 
 // activeSnapshot copies the live-execution container IDs.
+//
+//lint:ignore U1000 Used by the Linux implementation in runsc_linux.go.
 func (e *ctrExecutor) activeSnapshot() map[string]struct{} {
 	e.mu.Lock()
 	defer e.mu.Unlock()

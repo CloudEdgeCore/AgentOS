@@ -54,6 +54,14 @@ type Task struct {
 	CancelRequestedAt   *time.Time
 	ActiveRunID         *uuid.UUID
 	ResultRef           string
+	WorkflowID          *uuid.UUID
+	WorkflowStepID      *uuid.UUID
+	WorkflowStepName    string
+	WorkflowAttempt     int
+	ParentTaskID        *uuid.UUID
+	// ExecutionDeadlineAt is the hard stop computed when execution begins:
+	// min(workload deadline, start + wallSeconds).
+	ExecutionDeadlineAt *time.Time
 	// NextScheduleAttemptAt gates scheduling-claim eligibility (O6): a task
 	// deferred after a no-placement is not claimable by the scheduler until
 	// this deadline. Nil means eligible immediately.
@@ -61,10 +69,11 @@ type Task struct {
 	// ScheduleRetryCount is the number of consecutive no-placement
 	// deferrals; it drives the exponential scheduling backoff and resets on
 	// successful placement.
-	ScheduleRetryCount int64
-	ResourceVersion    int64
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ScheduleRetryCount    int64
+	LastScheduleRejection json.RawMessage
+	ResourceVersion       int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type Run struct {
@@ -120,13 +129,18 @@ type AttemptLease struct {
 }
 
 type CreateTaskInput struct {
-	ID              uuid.UUID
-	TenantID        string
-	Namespace       string
-	AgentVersionRef string
-	Goal            string
-	Spec            json.RawMessage
-	IdempotencyKey  string
+	ID               uuid.UUID
+	TenantID         string
+	Namespace        string
+	AgentVersionRef  string
+	Goal             string
+	Spec             json.RawMessage
+	IdempotencyKey   string
+	WorkflowID       *uuid.UUID
+	WorkflowStepID   *uuid.UUID
+	WorkflowStepName string
+	WorkflowAttempt  int
+	ParentTaskID     *uuid.UUID
 }
 
 func (in CreateTaskInput) ValidateAndHash() (json.RawMessage, [32]byte, error) {
@@ -139,6 +153,10 @@ func (in CreateTaskInput) ValidateAndHash() (json.RawMessage, [32]byte, error) {
 	}
 	if strings.TrimSpace(in.IdempotencyKey) == "" {
 		return nil, zero, fmt.Errorf("idempotency key is required")
+	}
+	if (in.WorkflowID == nil) != (in.WorkflowStepID == nil) ||
+		(in.WorkflowID != nil && (strings.TrimSpace(in.WorkflowStepName) == "" || in.WorkflowAttempt < 1)) {
+		return nil, zero, fmt.Errorf("workflow lineage requires workflow, step, name, and positive attempt")
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(in.Spec))
@@ -158,7 +176,11 @@ func (in CreateTaskInput) ValidateAndHash() (json.RawMessage, [32]byte, error) {
 		AgentVersionRef string          `json:"agentVersionRef"`
 		Goal            string          `json:"goal"`
 		Spec            json.RawMessage `json:"spec"`
-	}{in.AgentVersionRef, in.Goal, normalized})
+		WorkflowID      *uuid.UUID      `json:"workflowId,omitempty"`
+		WorkflowStepID  *uuid.UUID      `json:"workflowStepId,omitempty"`
+		WorkflowAttempt int             `json:"workflowAttempt,omitempty"`
+		ParentTaskID    *uuid.UUID      `json:"parentTaskId,omitempty"`
+	}{in.AgentVersionRef, in.Goal, normalized, in.WorkflowID, in.WorkflowStepID, in.WorkflowAttempt, in.ParentTaskID})
 	if err != nil {
 		return nil, zero, fmt.Errorf("hash task request: %w", err)
 	}
@@ -184,11 +206,13 @@ type CreateTaskResult struct {
 
 type CreateRunInput struct {
 	ID                  uuid.UUID
+	TenantID            string
 	TaskID              uuid.UUID
 	ExpectedTaskVersion int64
 }
 
 type AcquireAttemptInput struct {
+	TenantID           string
 	AttemptID          uuid.UUID
 	LeaseID            uuid.UUID
 	RunID              uuid.UUID
@@ -199,6 +223,7 @@ type AcquireAttemptInput struct {
 }
 
 type TransitionAttemptInput struct {
+	TenantID               string
 	AttemptID              uuid.UUID
 	FencingToken           int64
 	ExpectedAttemptVersion int64
@@ -208,6 +233,7 @@ type TransitionAttemptInput struct {
 }
 
 type HeartbeatLeaseInput struct {
+	TenantID             string
 	AttemptID            uuid.UUID
 	FencingToken         int64
 	ExpectedLeaseVersion int64
@@ -215,6 +241,7 @@ type HeartbeatLeaseInput struct {
 }
 
 type CompleteRunInput struct {
+	TenantID           string
 	RunID              uuid.UUID
 	AttemptID          uuid.UUID
 	FencingToken       int64
@@ -224,7 +251,7 @@ type CompleteRunInput struct {
 
 type KernelStore interface {
 	CreateTask(context.Context, CreateTaskInput) (CreateTaskResult, error)
-	TransitionTask(context.Context, uuid.UUID, int64, domain.TaskPhase) (Task, error)
+	TransitionTask(context.Context, string, uuid.UUID, int64, domain.TaskPhase) (Task, error)
 	CreateRun(context.Context, CreateRunInput) (Run, error)
 	AcquireAttempt(context.Context, AcquireAttemptInput) (AttemptLease, error)
 	TransitionAttempt(context.Context, TransitionAttemptInput) (Attempt, error)

@@ -321,7 +321,7 @@ func parseSpiffeID(identity string) (*parsedIdentity, error) {
 		return nil, fmt.Errorf("parse SPIFFE ID: %w", err)
 	}
 	if parsed.Scheme != "spiffe" || parsed.Host == "" {
-		return nil, fmt.Errorf("SPIFFE ID must be spiffe://<trust-domain>/...")
+		return nil, fmt.Errorf("identity must be a spiffe://<trust-domain>/... URI")
 	}
 	return &parsedIdentity{trustDomain: parsed.Host, segments: splitPath(parsed.EscapedPath())}, nil
 }
