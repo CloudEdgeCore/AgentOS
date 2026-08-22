@@ -122,11 +122,16 @@ func (s *ModelService) Finish(ctx context.Context, request *modelv1.FinishReques
 	if err != nil {
 		return nil, modelRPCError(err)
 	}
+	usageCertainty := store.ModelUsageKnownZero
+	if request.GetInputTokens()+request.GetOutputTokens() > 0 {
+		usageCertainty = store.ModelUsageKnown
+	}
 	finished, err := s.invoker.Finish(ctx, call, model.FinishInput{
 		TenantID: call.TenantID, ModelCallID: call.ID, ExpectedVersion: request.GetExpectedVersion(),
 		Status: store.ModelCallStatus(request.GetStatus()), InputTokens: request.GetInputTokens(),
 		OutputTokens: request.GetOutputTokens(), ProviderRequestID: request.GetProviderRequestId(),
-		FinishReason: request.GetFinishReason(),
+		FinishReason:   request.GetFinishReason(),
+		UsageCertainty: usageCertainty,
 	})
 	if err != nil {
 		return nil, modelRPCError(err)
@@ -134,7 +139,7 @@ func (s *ModelService) Finish(ctx context.Context, request *modelv1.FinishReques
 	return &modelv1.FinishResponse{
 		CallId: finished.ID.String(), ModelRef: finished.ModelRef, Status: string(finished.Status),
 		InputTokens: finished.InputTokens, OutputTokens: finished.OutputTokens,
-		CostUsd: finished.CostUSD, PriceRevision: finished.PriceRevision, FinishReason: finished.FinishReason,
+		CostUsd: finished.CostMicroUSD.USD(), PriceRevision: finished.PriceRevision, FinishReason: finished.FinishReason,
 	}, nil
 }
 

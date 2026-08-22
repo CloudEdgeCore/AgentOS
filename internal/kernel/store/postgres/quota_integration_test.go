@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -24,7 +25,7 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 
 	configured, err := repository.SetTenantQuota(ctx, kernelstore.SetTenantQuotaInput{
 		TenantID: "tenant-a", WindowSeconds: 3600,
-		Limits: kernelstore.TaskBudget{Tokens: 1000, CostUSD: 10, ToolCalls: 100, WallSeconds: 3600},
+		Limits: kernelstore.TaskBudget{Tokens: 1000, CostMicroUSD: money.MustFromUSD(10), ToolCalls: 100, WallSeconds: 3600},
 	})
 	if err != nil {
 		t.Fatalf("set quota: %v", err)
@@ -34,7 +35,7 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 	}
 
 	quota, err := repository.GetTenantQuota(ctx, "tenant-a")
-	if err != nil || quota.Limits.CostUSD != 10 {
+	if err != nil || quota.Limits.CostMicroUSD != money.MustFromUSD(10) {
 		t.Fatalf("get quota: %+v err=%v", quota, err)
 	}
 
@@ -55,13 +56,13 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get usage after admission: %v", err)
 	}
-	if usage.Reserved.Tokens != 200 || usage.Reserved.CostUSD != 2.0 ||
+	if usage.Reserved.Tokens != 200 || usage.Reserved.CostMicroUSD != money.MustFromUSD(2.0) ||
 		usage.Reserved.ToolCalls != 20 || usage.Reserved.WallSeconds != 120 {
 		t.Fatalf("reservation not recorded: %+v", usage.Reserved)
 	}
 	if _, err := repository.SettleTaskUsage(ctx, kernelstore.SettleTaskUsageInput{
 		TenantID: "tenant-a", TaskID: task.ID, IdempotencyKey: "quota-usage-1",
-		Usage: kernelstore.TaskBudget{Tokens: 40, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 60},
+		Usage: kernelstore.TaskBudget{Tokens: 40, CostMicroUSD: money.MustFromUSD(0.5), ToolCalls: 4, WallSeconds: 60},
 	}); err != nil {
 		t.Fatalf("settle usage: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get usage after settlement: %v", err)
 	}
-	if usage.Consumed.Tokens != 40 || usage.Consumed.CostUSD != 0.5 ||
+	if usage.Consumed.Tokens != 40 || usage.Consumed.CostMicroUSD != money.MustFromUSD(0.5) ||
 		usage.Consumed.ToolCalls != 4 || usage.Consumed.WallSeconds != 60 {
 		t.Fatalf("unexpected window consumption: %+v", usage.Consumed)
 	}
@@ -80,7 +81,7 @@ func TestTenantQuotaConfigurationAndWindowAccounting(t *testing.T) {
 	// Replaying the same settlement must not double-count the window.
 	if _, err := repository.SettleTaskUsage(ctx, kernelstore.SettleTaskUsageInput{
 		TenantID: "tenant-a", TaskID: task.ID, IdempotencyKey: "quota-usage-1",
-		Usage: kernelstore.TaskBudget{Tokens: 40, CostUSD: 0.5, ToolCalls: 4, WallSeconds: 60},
+		Usage: kernelstore.TaskBudget{Tokens: 40, CostMicroUSD: money.MustFromUSD(0.5), ToolCalls: 4, WallSeconds: 60},
 	}); err != nil {
 		t.Fatalf("replay settlement: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestTenantQuotaAdmissionGate(t *testing.T) {
 
 	// Terminal release (v0.8): cancelling t1 returns its reserved ceiling,
 	// re-opening headroom for new admissions.
-	if _, err := repository.TransitionTask(ctx, t1.ID, t1.ResourceVersion, domain.TaskCancelled); err != nil {
+	if _, err := repository.TransitionTask(ctx, t1.TenantID, t1.ID, t1.ResourceVersion, domain.TaskCancelled); err != nil {
 		t.Fatalf("cancel t1: %v", err)
 	}
 	usage, err = repository.GetTenantQuotaUsage(ctx, "tenant-a", clock.Now())

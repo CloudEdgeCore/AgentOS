@@ -9,6 +9,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/redact"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -111,7 +112,7 @@ func (s *ModelInvocationService) Invoke(request *modelv1.InvokeRequest, stream m
 	}
 	return stream.Send(&modelv1.InvokeResponse{Finish: &modelv1.InvokeFinish{
 		CallId: output.Call.ID.String(), ModelRef: output.Call.ModelRef, Status: string(output.Call.Status),
-		InputTokens: output.Call.InputTokens, OutputTokens: output.Call.OutputTokens, CostUsd: output.Call.CostUSD,
+		InputTokens: output.Call.InputTokens, OutputTokens: output.Call.OutputTokens, CostUsd: output.Call.CostMicroUSD.USD(),
 		PriceRevision: output.Call.PriceRevision, FinishReason: output.Call.FinishReason,
 		ProviderRequestId: output.Call.ProviderRequestID, Content: output.Content,
 	}})
@@ -156,7 +157,7 @@ func invokeCode(err error) string {
 // sanitizeInvokeError keeps provider detail but never retries, URLs or keys —
 // the executor already sanitized; this bounds the length defensively.
 func sanitizeInvokeError(err error) string {
-	message := err.Error()
+	message := redact.RedactText(err.Error())
 	if len(message) > 512 {
 		message = message[:512]
 	}

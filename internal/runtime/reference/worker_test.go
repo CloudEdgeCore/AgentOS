@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -180,7 +179,7 @@ func (f *fakeRuntimeStore) RecoverExpiredAttempt(context.Context, store.RecoverE
 func (f *fakeRuntimeStore) CreateTask(context.Context, store.CreateTaskInput) (store.CreateTaskResult, error) {
 	panic("not used")
 }
-func (f *fakeRuntimeStore) TransitionTask(context.Context, uuid.UUID, int64, domain.TaskPhase) (store.Task, error) {
+func (f *fakeRuntimeStore) TransitionTask(context.Context, string, uuid.UUID, int64, domain.TaskPhase) (store.Task, error) {
 	panic("not used")
 }
 func (f *fakeRuntimeStore) CreateRun(context.Context, store.CreateRunInput) (store.Run, error) {
@@ -450,18 +449,6 @@ func newTestWorkerWithGatewayWithTTL(t *testing.T, repository store.RuntimeStore
 	return worker.WithToolGateway(gatewayv1.NewToolGatewayServiceClient(connection))
 }
 
-func (f *fakeRuntimeStore) WorkflowLineage(_ context.Context, _, taskKey string) (uuid.UUID, string, int64, bool, error) {
-	rest, ok := strings.CutPrefix(taskKey, "workflow/")
-	if !ok {
-		return uuid.Nil, "", 0, false, nil
-	}
-	parts := strings.Split(rest, "/")
-	if len(parts) != 3 {
-		return uuid.Nil, "", 0, false, nil
-	}
-	workflowID, err := uuid.Parse(parts[0])
-	if err != nil {
-		return uuid.Nil, "", 0, false, nil
-	}
-	return workflowID, parts[1], 1, true, nil
+func (f *fakeRuntimeStore) WorkflowLineage(context.Context, string, uuid.UUID) (uuid.UUID, string, int64, bool, error) {
+	return uuid.Nil, "", 0, false, nil
 }

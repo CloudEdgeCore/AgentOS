@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/recovery"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
@@ -30,8 +31,9 @@ func main() {
 	poolsFile := flag.String("runtime-pools", "", "JSON runtime pool configuration")
 	tenantPoliciesFile := flag.String("tenant-policies", "", "JSON tenant policy data (absent tenants are denied by default)")
 	interval := flag.Duration("interval", 250*time.Millisecond, "reconciliation interval")
+	accountingInterval := flag.Duration("accounting-interval", 5*time.Minute, "budget/quota/model accounting audit interval")
 	// poolHealthFreshness is the lease heartbeat freshness window for pool
-	// health (v0.6): a pool whose worker holds an unreleased lease that was
+	// health: a pool whose worker holds an unreleased lease that was
 	// not renewed within this window (or expired) is not ready for
 	// placement. Keep it comfortably above the scheduler lease TTL.
 	poolHealthFreshness := flag.Duration("pool-health-freshness", 90*time.Second, "lease heartbeat freshness window for pool health")
@@ -41,16 +43,24 @@ func main() {
 	// fail-visibly instead of misprocessing them.
 	shardIndex := flag.Int("shard-index", 0, "tenant-consistent claim shard index (ADR-016)")
 	shardCount := flag.Int("shard-count", 0, "tenant-consistent claim shard count; 0 disables sharding")
-	devMode := flag.Bool("dev-mode", false, "acknowledge static development pools and built-in limits")
+	devMode := flag.Bool("dev-mode", false, "allow seeding the durable runtime-pool registry from -runtime-pools")
 	flag.Parse()
-	if *databaseURL == "" || strings.TrimSpace(*controllerID) == "" || *poolsFile == "" || *interval <= 0 || !*devMode {
-		slog.Error("database URL, controller ID, runtime pool file, positive interval, and explicit -dev-mode are required")
+	if *databaseURL == "" || strings.TrimSpace(*controllerID) == "" || *interval <= 0 || *accountingInterval <= 0 {
+		slog.Error("database URL, controller ID, and positive intervals are required")
 		os.Exit(2)
 	}
-	pools, err := loadPools(*poolsFile)
-	if err != nil {
-		slog.Error("load runtime pools", "error", err)
-		os.Exit(2)
+	var pools []scheduler.RuntimePool
+	var err error
+	if *poolsFile != "" {
+		if !*devMode {
+			slog.Error("-runtime-pools seeds mutable registry state and is only allowed with explicit -dev-mode")
+			os.Exit(2)
+		}
+		pools, err = loadPools(*poolsFile)
+		if err != nil {
+			slog.Error("load runtime pools", "error", err)
+			os.Exit(2)
+		}
 	}
 	tenantPolicies := policy.TenantPolicies{}
 	if *tenantPoliciesFile != "" {
@@ -89,8 +99,14 @@ func main() {
 		os.Exit(1)
 	}
 	repository := postgresstore.New(pool)
+	if len(pools) > 0 {
+		if err := repository.RegisterRuntimePools(ctx, pools); err != nil {
+			slog.Error("seed runtime pool registry", "error", err)
+			os.Exit(1)
+		}
+	}
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"wasm", "oci"}, MaxTokens: 1_000_000, MaxCostUSD: 1_000,
+		RuntimeClasses: []string{"wasm", "oci"}, MaxTokens: 1_000_000, MaxCostMicroUSD: money.MustFromUSD(1_000),
 		MaxToolCalls: 100_000, MaxWallSeconds: 86_400, MaxCPU: 64_000,
 		MaxMemory: 262_144, MaxLLMConcurrency: 128,
 		// Container classes must declare explicit sandbox limits; zero values
@@ -98,10 +114,10 @@ func main() {
 		ContainerClasses: []string{"oci"},
 	})
 	admissionController := admission.NewController(repository, engine, policyEngine, *controllerID+"/admission", 50, 30*time.Second)
-	// Runtime-aware pool health (v0.6): static pool configuration is
+	// Runtime-aware pool health: static pool configuration is
 	// overlaid with lease-derived instance liveness, so a pool whose worker
 	// stopped renewing its lease is rejected by placement.
-	poolSource := scheduler.NewLeaseAwarePoolSource(scheduler.StaticPoolSource(pools), repository, *poolHealthFreshness)
+	poolSource := scheduler.NewLeaseAwarePoolSource(repository, repository, *poolHealthFreshness)
 	schedulerController := scheduler.NewController(repository, poolSource, *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
 	// Tenant-consistent sharding (ADR-016): admission and scheduling must
 	// share the same shard so one instance owns a tenant's whole pipeline.
@@ -117,9 +133,21 @@ func main() {
 		slog.Warn("controller instance is NOT sharded (claims every tenant; ADR-016)", "controllerID", *controllerID)
 	}
 	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
+	nextAccountingAudit := time.Now().UTC()
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	for {
+		if now := time.Now().UTC(); !now.Before(nextAccountingAudit) {
+			report, accountingErr := repository.ReconcileAccounting(ctx, true)
+			if accountingErr != nil && ctx.Err() == nil {
+				slog.Error("accounting reconciliation", "error", accountingErr)
+			} else if report.TaskLedgerDrift > 0 || report.QuotaReservedDrift > 0 || report.ModelLedgerDrift > 0 || report.ProviderReceiptGaps > 0 {
+				slog.Warn("accounting drift detected", "taskLedger", report.TaskLedgerDrift,
+					"quotaReserved", report.QuotaReservedDrift, "modelLedger", report.ModelLedgerDrift,
+					"providerReceiptGaps", report.ProviderReceiptGaps, "repaired", report.Repaired)
+			}
+			nextAccountingAudit = now.Add(*accountingInterval)
+		}
 		admitted, admissionErr := admissionController.Reconcile(ctx)
 		scheduled, schedulerErr := schedulerController.Reconcile(ctx)
 		recovered, recoveryErr := recoveryController.Reconcile(ctx)

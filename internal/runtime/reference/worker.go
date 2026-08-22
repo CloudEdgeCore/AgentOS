@@ -21,6 +21,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
 	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
+	"github.com/CloudEdgeCore/AgentOS/internal/runtime/attemptstate"
 	"github.com/CloudEdgeCore/AgentOS/internal/runtime/leasekeeper"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -644,18 +645,31 @@ func (w *Worker) mergeConfirmedResults(ctx context.Context, assignment *runtimev
 // deterministic script failures converge instead of spinning until lease
 // expiry.
 func (w *Worker) fail(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64, code string, cause error) (bool, error) {
-	rpcCtx, cancel := rpcContext(ctx, controlRPCTimeout)
-	defer cancel()
-	_, err := w.client.TransitionAttempt(rpcCtx, &runtimev1.TransitionAttemptRequest{
-		Identity: identity, ExpectedAttemptVersion: version,
-		IdempotencyKey: identity.GetAttemptId() + ":" + code,
-		TargetPhase:    runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED,
-		FailureCode:    code, FailureMessage: cause.Error(),
-	})
-	if err != nil {
-		return false, fmt.Errorf("mark attempt failed (%s): %w", code, err)
+	const maxConflictRetries = 3
+	for conflict := 0; ; conflict++ {
+		rpcCtx, cancel := rpcContext(ctx, controlRPCTimeout)
+		_, err := w.client.TransitionAttempt(rpcCtx, &runtimev1.TransitionAttemptRequest{
+			Identity: identity, ExpectedAttemptVersion: version,
+			IdempotencyKey: identity.GetAttemptId() + ":" + code,
+			TargetPhase:    runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED,
+			FailureCode:    code, FailureMessage: cause.Error(),
+		})
+		cancel()
+		if err == nil {
+			return true, nil
+		}
+		if status.Code(err) != codes.Aborted || conflict >= maxConflictRetries {
+			return false, fmt.Errorf("mark attempt failed (%s): %w", code, err)
+		}
+		current, refreshErr := attemptstate.Refresh(ctx, w.client, identity, controlRPCTimeout)
+		if refreshErr != nil {
+			return false, fmt.Errorf("mark attempt failed (%s): %w", code, refreshErr)
+		}
+		if current.Settled() {
+			return true, nil
+		}
+		version = current.Version
 	}
-	return true, nil
 }
 
 func (w *Worker) transition(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64, phase runtimev1.AttemptPhase, operation string) (*runtimev1.TransitionAttemptResponse, error) {

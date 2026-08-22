@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -23,6 +24,32 @@ func mustSpec(t *testing.T, document string) []kernelstore.CreateWorkflowStepInp
 		t.Fatalf("decode spec: %v", err)
 	}
 	return steps
+}
+
+func TestDecodeSpecValidatesTypedOutputContractAndJSONPointerCondition(t *testing.T) {
+	raw := []byte(`{
+	  "steps": [
+	    {"name":"producer","agentVersionRef":"a@1","goal":"produce","spec":{"priority":1},
+	     "output":{"contentType":"application/json","schemaVersion":"result/v1",
+	       "schema":{"type":"object","required":["score"],"properties":{"score":{"type":"integer"}}}}},
+	    {"name":"consumer","agentVersionRef":"b@1","goal":"consume","spec":{"priority":1},
+	     "dependsOn":["producer"],"condition":{"step":"producer","jsonPointer":"/score","equalsJson":7}}
+	  ]
+	}`)
+	if _, err := DecodeWorkflowSpec(raw); err != nil {
+		t.Fatalf("typed workflow contract rejected: %v", err)
+	}
+
+	invalid := []byte(`{"steps":[{"name":"a","agentVersionRef":"a@1","goal":"g","spec":{"priority":1},"output":{"schemaVersion":"v1","schema":{"type":"definitely-not-a-json-schema-type"}}}]}`)
+	if _, err := DecodeWorkflowSpec(invalid); err == nil {
+		t.Fatal("invalid JSON Schema was accepted")
+	}
+
+	document := map[string]any{"nested": map[string]any{"value": float64(7)}}
+	value, ok := resolveJSONPointer(document, "/nested/value")
+	if !ok || value != float64(7) {
+		t.Fatalf("pointer result = %#v, %v", value, ok)
+	}
 }
 
 const validTwoStepSpec = `{
@@ -97,7 +124,7 @@ func TestDecodeSpecPreservesV13BudgetRuntimeAndDeadline(t *testing.T) {
 		t.Fatalf("decode v1.3 spec: %v", err)
 	}
 	tasks, tokens, cost := spec.Budgets()
-	if tasks != 25 || tokens != 5000 || cost != 2.5 || spec.Deadline == nil || !spec.Deadline.Equal(deadline) {
+	if tasks != 25 || tokens != 5000 || cost != money.MustFromUSD(2.5) || spec.Deadline == nil || !spec.Deadline.Equal(deadline) {
 		t.Fatalf("v1.3 policy lost: %+v", spec)
 	}
 	if spec.Runtime == nil || spec.Runtime.Dynamic.MaxSpawnDepth != 3 {
@@ -158,7 +185,7 @@ func (f *fakeWorkflowStore) CreateWorkflow(_ context.Context, in kernelstore.Cre
 		ID: in.ID, TenantID: in.TenantID, Namespace: in.Namespace, IdempotencyKey: in.IdempotencyKey,
 		Goal: in.Goal, Spec: in.Spec, Status: kernelstore.WorkflowPending, ResourceVersion: 1,
 		BudgetMaxTasks: in.BudgetMaxTasks, BudgetMaxTokens: in.BudgetMaxTokens,
-		BudgetMaxCostUSD: in.BudgetMaxCostUSD, DeadlineAt: in.DeadlineAt,
+		BudgetMaxCostMicroUSD: in.BudgetMaxCostMicroUSD, DeadlineAt: in.DeadlineAt,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
 	f.workflows[workflow.ID] = &workflow
@@ -205,6 +232,16 @@ func (f *fakeWorkflowStore) ListWorkflowSteps(_ context.Context, _ string, workf
 	}
 	sort.Slice(steps, func(i, j int) bool { return steps[i].Ordinal < steps[j].Ordinal })
 	return steps, nil
+}
+
+func (f *fakeWorkflowStore) GetWorkflowStep(_ context.Context, tenantID string, workflowID uuid.UUID, name string) (kernelstore.WorkflowStep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	step, ok := f.steps[workflowID][name]
+	if !ok || step.TenantID != tenantID {
+		return kernelstore.WorkflowStep{}, kernelstore.ErrStepNotFound
+	}
+	return *step, nil
 }
 
 func (f *fakeWorkflowStore) TransitionWorkflow(_ context.Context, in kernelstore.TransitionWorkflowInput) (kernelstore.Workflow, error) {
@@ -267,10 +304,11 @@ func (f *fakeWorkflowStore) DecideWorkflowStepApproval(_ context.Context, in ker
 		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: approval state", kernelstore.ErrInvalidTransition)
 	}
 	if in.Approved {
-		step.DecidedBy = "approved"
+		step.ApprovalDecision = "approved"
 	} else {
-		step.DecidedBy = "rejected"
+		step.ApprovalDecision = "rejected"
 	}
+	step.DecidedBy = in.DecidedBy
 	step.DecidedAt = &[]time.Time{time.Now()}[0]
 	step.ResourceVersion++
 	return *step, nil
@@ -394,7 +432,7 @@ func (f *fakeWorkflowStore) WorkflowUsageSnapshot(_ context.Context, _ string, w
 	}
 	return kernelstore.WorkflowUsage{
 		BudgetMaxTasks: workflow.BudgetMaxTasks, BudgetMaxTokens: workflow.BudgetMaxTokens,
-		BudgetMaxCostUSD: workflow.BudgetMaxCostUSD,
+		BudgetMaxCostMicroUSD: workflow.BudgetMaxCostMicroUSD,
 	}, nil
 }
 
@@ -465,14 +503,6 @@ func (f *fakeTaskPipeline) RequestTaskCancellation(_ context.Context, _ string, 
 	return *task, nil
 }
 
-// complete flips a task terminal-succeeded (the harness drives outcomes).
-func (f *fakeTaskPipeline) complete(id uuid.UUID) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.tasks[id].Phase = domain.TaskSucceeded
-	f.tasks[id].ResultRef = "file://results/" + id.String()
-}
-
 func (f *fakeTaskPipeline) fail(id uuid.UUID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -506,7 +536,7 @@ func createWorkflowForTest(t *testing.T, store *fakeWorkflowStore, spec string) 
 	created, err := store.CreateWorkflow(context.Background(), kernelstore.CreateWorkflowInput{
 		ID: uuid.New(), TenantID: "tenant-1", Namespace: "default", IdempotencyKey: "wf-" + uuid.NewString(),
 		Goal: "workflow goal", Spec: []byte(spec), Steps: decoded.StepInputs(),
-		BudgetMaxTasks: tasksBudget, BudgetMaxTokens: tokensBudget, BudgetMaxCostUSD: costBudget,
+		BudgetMaxTasks: tasksBudget, BudgetMaxTokens: tokensBudget, BudgetMaxCostMicroUSD: costBudget,
 		DeadlineAt: decoded.Deadline,
 	})
 	if err != nil {
@@ -837,7 +867,7 @@ func TestEngineHumanApprovalParkAndDecisions(t *testing.T) {
 		}(),
 		Approved: true, DecidedBy: "human-1",
 	})
-	if err != nil || approved.DecidedBy != "approved" {
+	if err != nil || approved.DecidedBy != "human-1" || approved.ApprovalDecision != "approved" {
 		t.Fatalf("approve: %+v err=%v", approved, err)
 	}
 	reconcileUntil(t, engine, func() bool {

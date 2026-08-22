@@ -1,0 +1,109 @@
+name: nightly-production-evidence
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+    - cron: "41 17 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-production-evidence
+  cancel-in-progress: false
+
+jobs:
+  scale-fuzz-and-live-model:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: agentos_test
+          POSTGRES_USER: agentos
+          POSTGRES_PASSWORD: agentos-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos -d agentos_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
+      AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
+      AGENTOS_REAL_MODEL_URL: ${{ vars.AGENTOS_REAL_MODEL_URL }}
+      AGENTOS_REAL_MODEL_NAME: ${{ vars.AGENTOS_REAL_MODEL_NAME }}
+      AGENTOS_CAPACITY_TASKS: "100000"
+      AGENTOS_V13_SCALE_TEST: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: go.sum
+
+      - name: Start NATS JetStream
+        run: docker run --detach --name agentos-nightly-nats --publish 4222:4222 nats:2.14.1-alpine@sha256:ea17b9b7f74279b9239cf65e5786c0133e9a7c353bf218d29004abf2e7a33181 --jetstream
+
+      - name: Require the governed live-model target
+        run: |
+          test -n "$AGENTOS_REAL_MODEL_URL"
+          test -n "$AGENTOS_REAL_MODEL_NAME"
+
+      - name: Run scale and multi-tenant evidence
+        run: |
+          go test -race -tags=integration -count=1 -timeout 120m -run 'TestControlPlanePipelineCapacityBaseline|TestV13DynamicSpawnScale10K|TestV12WorkflowScale|TestMultiTenant' ./internal/kernel/store/postgres ./e2e/workflows
+          go test -race -count=1 -timeout 45m -run 'TestV13Orchestrates10KDynamicTasks' ./internal/kernel/workflow
+
+      - name: Run parser fuzz corpus and discovery
+        run: |
+          go test -run '^$' -fuzz '^FuzzDecodeManifest$' -fuzztime 60s ./internal/kernel/agentversion
+          go test -run '^$' -fuzz '^FuzzDecodeWorkflowSpec$' -fuzztime 60s ./internal/kernel/workflow
+          go test -run '^$' -fuzz '^FuzzParseRequest$' -fuzztime 60s ./internal/mcp
+          go test -run '^$' -fuzz '^FuzzConsumeOpenAIStream$' -fuzztime 60s ./internal/kernel/model/provider
+
+      - name: Run mandatory live-model acceptance
+        run: go test -tags=integration -count=1 -run '^TestV11RealModel' -v ./e2e/single-agent/
+
+  firecracker-kvm:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'
+    runs-on: [self-hosted, Linux, X64, agentos-kvm]
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Assert real KVM and boot Firecracker
+        run: |
+          test -r /dev/kvm -a -w /dev/kvm
+          bash deploy/ci/firecracker-smoke.sh
+
+  soak-24h:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 17 * * 0'
+    runs-on: [self-hosted, Linux, X64, agentos-soak]
+    timeout-minutes: 1500
+    env:
+      AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
+      AGENTOS_TEST_NATS_URL: ${{ secrets.AGENTOS_SOAK_NATS_URL }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run recovery and orchestration acceptance continuously for 24 hours
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$AGENTOS_TEST_DATABASE_URL"
+          test -n "$AGENTOS_TEST_NATS_URL"
+          deadline=$(( $(date +%s) + 86400 ))
+          iterations=0
+          while (( $(date +%s) < deadline )); do
+            go test -race -tags=integration -count=1 -timeout 60m ./internal/kernel/store/postgres ./internal/kernel/recovery ./internal/kernel/workflow ./e2e/workflows
+            iterations=$((iterations + 1))
+          done
+          test "$iterations" -gt 0

@@ -24,13 +24,13 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/version"
 	"github.com/google/uuid"
 )
 
 const maxRequestBody = 1 << 20
-const requestTimeout = 10 * time.Second
 
 // Route budgets (N9): reads answer quickly, mutations get the full budget,
 // streams are unbounded. Overridable with WithRequestTimeouts.
@@ -102,6 +102,10 @@ type TenantQuotaStore interface {
 	GetTenantQuotaUsage(context.Context, string, time.Time) (store.TenantWindowUsage, error)
 }
 
+type RuntimePoolOperatorStore interface {
+	UpdateRuntimePoolStatus(context.Context, store.UpdateRuntimePoolStatusInput) (store.RuntimePoolState, error)
+}
+
 type Handler struct {
 	tasks        TaskStore
 	agentVersion AgentVersionStore
@@ -120,7 +124,8 @@ type Handler struct {
 	quotas TenantQuotaStore
 	// workflows is the v1.2 orchestration surface; when nil the workflow
 	// endpoints answer 404.
-	workflows WorkflowStore
+	workflows    WorkflowStore
+	runtimePools RuntimePoolOperatorStore
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
@@ -154,6 +159,10 @@ func WithAuditStore(audit AuditStore) Option {
 // without it the workflow endpoints are disabled.
 func WithWorkflowStore(workflows WorkflowStore) Option {
 	return func(h *Handler) { h.workflows = workflows }
+}
+
+func WithRuntimePoolOperatorStore(runtimePools RuntimePoolOperatorStore) Option {
+	return func(h *Handler) { h.runtimePools = runtimePools }
 }
 
 // WithTenantQuotaStore installs the tenant aggregate consumption quota
@@ -232,6 +241,7 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("GET /v1/workflows/{workflowID}", handler.getWorkflow)
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/cancel", handler.cancelWorkflow)
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/steps/{stepName}/approval", handler.decideWorkflowStepApproval)
+	mux.HandleFunc("PUT /v1/runtime-pools/{poolID}/status", handler.updateRuntimePoolStatus)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /readyz", handler.ready)
 	mux.HandleFunc("GET /versionz", handler.version)
@@ -239,6 +249,7 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("/v1/workflows/{workflowID}", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/workflows/{workflowID}/cancel", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/workflows/{workflowID}/steps/{stepName}/approval", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/runtime-pools/{poolID}/status", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/tasks/{taskID}/events", handler.methodNotAllowed)
@@ -267,10 +278,10 @@ type createTaskRequest struct {
 }
 
 type usageSummary struct {
-	Tokens      int64   `json:"tokens"`
-	CostUSD     float64 `json:"costUsd"`
-	ToolCalls   int64   `json:"toolCalls"`
-	WallSeconds int64   `json:"wallSeconds"`
+	Tokens       int64          `json:"tokens"`
+	CostMicroUSD money.MicroUSD `json:"costUsd"`
+	ToolCalls    int64          `json:"toolCalls"`
+	WallSeconds  int64          `json:"wallSeconds"`
 }
 
 type taskResponse struct {
@@ -555,7 +566,7 @@ func (h *Handler) readUsage(ctx context.Context, tenantID string, id uuid.UUID) 
 		return usageSummary{}, false
 	}
 	return usageSummary{
-		Tokens: status.Consumed.Tokens, CostUSD: status.Consumed.CostUSD,
+		Tokens: status.Consumed.Tokens, CostMicroUSD: status.Consumed.CostMicroUSD,
 		ToolCalls: status.Consumed.ToolCalls, WallSeconds: status.Consumed.WallSeconds,
 	}, status.Exhausted
 }
@@ -1614,7 +1625,7 @@ func (h *Handler) setTenantQuota(writer http.ResponseWriter, request *http.Reque
 	input := store.SetTenantQuotaInput{
 		TenantID: principal.TenantID, WindowSeconds: body.WindowSeconds,
 		Limits: store.TaskBudget{
-			Tokens: body.Limits.Tokens, CostUSD: body.Limits.CostUSD,
+			Tokens: body.Limits.Tokens, CostMicroUSD: body.Limits.CostMicroUSD,
 			ToolCalls: body.Limits.ToolCalls, WallSeconds: body.Limits.WallSeconds,
 		},
 	}
@@ -1662,15 +1673,15 @@ func (h *Handler) writeQuota(writer http.ResponseWriter, status int, quota store
 		APIVersion: agentversion.APIVersion, Kind: "TenantQuota", TenantID: quota.TenantID,
 		WindowSeconds: quota.WindowSeconds,
 		Limits: usageSummary{
-			Tokens: quota.Limits.Tokens, CostUSD: quota.Limits.CostUSD,
+			Tokens: quota.Limits.Tokens, CostMicroUSD: quota.Limits.CostMicroUSD,
 			ToolCalls: quota.Limits.ToolCalls, WallSeconds: quota.Limits.WallSeconds,
 		},
 		Usage: usageSummary{
-			Tokens: usage.Consumed.Tokens, CostUSD: usage.Consumed.CostUSD,
+			Tokens: usage.Consumed.Tokens, CostMicroUSD: usage.Consumed.CostMicroUSD,
 			ToolCalls: usage.Consumed.ToolCalls, WallSeconds: usage.Consumed.WallSeconds,
 		},
 		Reserved: usageSummary{
-			Tokens: usage.Reserved.Tokens, CostUSD: usage.Reserved.CostUSD,
+			Tokens: usage.Reserved.Tokens, CostMicroUSD: usage.Reserved.CostMicroUSD,
 			ToolCalls: usage.Reserved.ToolCalls, WallSeconds: usage.Reserved.WallSeconds,
 		},
 		ResourceVersion: quota.ResourceVersion, UpdatedAt: quota.UpdatedAt.UTC(), TraceID: traceID,

@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
+import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Protocol
@@ -19,6 +22,13 @@ from urllib.parse import parse_qs, urlparse
 PROTOCOL_VERSION = "agentos.runtime.interface/v1"
 LEGACY_PROTOCOL_VERSION = "agentos.runtime.interface/v1alpha1"
 MAX_BODY = 2 << 20
+MAX_EVENT_PAYLOAD = 256 << 10
+MAX_EVENT_PAGE = 1 << 20
+MAX_EVENTS_PER_PAGE = 256
+MAX_RESULT = 2 << 20
+DEFAULT_EXECUTION_TIMEOUT = 60 * 60
+DEFAULT_CONTROL_TIMEOUT = 10.0
+SOCKET_TIMEOUT = 30.0
 
 
 class AgentRuntime(Protocol):
@@ -43,6 +53,8 @@ class _Execution:
     events: list[dict[str, Any]] = field(default_factory=list)
     next_sequence: int = 1
     result: dict[str, Any] | None = None
+    finalized: bool = False
+    capacity_released: bool = False
 
 
 class RuntimeHost:
@@ -56,25 +68,46 @@ class RuntimeHost:
         max_concurrent: int = 16,
         event_limit: int = 1024,
         execution_limit: int = 4096,
+        execution_timeout: float = DEFAULT_EXECUTION_TIMEOUT,
+        control_timeout: float = DEFAULT_CONTROL_TIMEOUT,
+        termination_grace: float = 5.0,
+        force_terminate: Callable[[str], None] | None = None,
     ) -> None:
         if not adapter.strip():
             raise ValueError("adapter identity is required")
-        if max_concurrent <= 0 or event_limit <= 0 or execution_limit < max_concurrent:
+        if (
+            max_concurrent <= 0
+            or event_limit <= 0
+            or execution_limit < max_concurrent
+            or execution_timeout <= 0
+            or control_timeout <= 0
+            or termination_grace <= 0
+        ):
             raise ValueError("host limits must be positive")
         self.runtime = runtime
         self.adapter = adapter
         self.max_concurrent = max_concurrent
         self.event_limit = event_limit
         self.execution_limit = execution_limit
+        self.execution_timeout = execution_timeout
+        self.control_timeout = control_timeout
+        self.termination_grace = termination_grace
+        self.force_terminate = force_terminate
         self.lock = threading.RLock()
         self.executions: dict[str, _Execution] = {}
         self.active = 0
+        self.executor = ThreadPoolExecutor(max_workers=max_concurrent, thread_name_prefix="agentos-execution")
+        self.control_slots = threading.BoundedSemaphore(max_concurrent)
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         host = self
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "AgentOSRuntime/1.0"
+
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(SOCKET_TIMEOUT)
 
             def do_GET(self) -> None:  # noqa: N802
                 host._handle(self, "GET")
@@ -168,7 +201,7 @@ class RuntimeHost:
                 terminal = [
                     (key, value)
                     for key, value in self.executions.items()
-                    if value.status not in {"ACCEPTED", "RUNNING"}
+                    if value.status not in {"ACCEPTED", "RUNNING"} and value.capacity_released
                 ]
                 if not terminal:
                     self._problem(handler, 429, "RETENTION_EXHAUSTED", "execution retention capacity exhausted")
@@ -178,7 +211,7 @@ class RuntimeHost:
             execution = _Execution(digest=digest)
             self.executions[execution_id] = execution
             self.active += 1
-        threading.Thread(target=self._run, args=(body, execution), daemon=True).start()
+        self.executor.submit(self._run, body, execution)
         self._write(handler, 202, {"executionId": execution_id, "status": "ACCEPTED", "replayed": False})
 
     def _run(self, request: dict[str, Any], execution: _Execution) -> None:
@@ -190,8 +223,8 @@ class RuntimeHost:
             if not isinstance(event_type, str) or not event_type.strip() or len(event_type) > 128:
                 raise ValueError("event type is required and bounded")
             encoded = json.dumps(payload, separators=(",", ":"))
-            if len(encoded.encode()) > MAX_BODY:
-                raise ValueError("event payload exceeds 2 MiB")
+            if len(encoded.encode()) > MAX_EVENT_PAYLOAD:
+                raise ValueError("event payload exceeds 256 KiB")
             with self.lock:
                 if execution.status != "RUNNING":
                     raise RuntimeError("events cannot be emitted after execution termination")
@@ -207,21 +240,97 @@ class RuntimeHost:
                 )
                 execution.next_sequence += 1
 
+        watchdog = threading.Timer(
+            self.execution_timeout,
+            self._execution_timed_out,
+            args=(execution_id,),
+        )
+        watchdog.daemon = True
+        watchdog.start()
         try:
             output = self.runtime.run(request, emit, execution.stop_event)
             if execution.stop_event.is_set():
-                result = self._terminal(execution_id, "CANCELLED", error_code="EXECUTION_CANCELLED", error="execution cancelled")
+                self._finish(execution_id, "CANCELLED", error_code="EXECUTION_CANCELLED", error="execution cancelled")
             else:
-                json.dumps(output)
-                result = self._terminal(execution_id, "SUCCEEDED", output=output)
-        except Exception as error:  # fail closed at the adapter boundary
+                encoded = json.dumps(output, separators=(",", ":")).encode()
+                if len(encoded) > MAX_RESULT:
+                    self._finish(execution_id, "FAILED", error_code="INVALID_RESULT", error="adapter result exceeds 2 MiB")
+                else:
+                    self._finish(execution_id, "SUCCEEDED", output=output)
+        except Exception as exc:  # fail closed without disclosing adapter internals
+            # Preserve an operational signal without logging the exception
+            # message, request, result, credentials, or user-controlled data.
+            print(f"agent runtime execution failed: {type(exc).__name__}", file=sys.stderr, flush=True)
             status = "CANCELLED" if execution.stop_event.is_set() else "FAILED"
             code = "EXECUTION_CANCELLED" if status == "CANCELLED" else "ADAPTER_FAILED"
-            result = self._terminal(execution_id, status, error_code=code, error=str(error))
+            detail = "execution cancelled" if status == "CANCELLED" else "adapter execution failed"
+            self._finish(execution_id, status, error_code=code, error=detail)
+        finally:
+            watchdog.cancel()
+            self._release_capacity(execution_id)
+
+    def _execution_timed_out(self, execution_id: str) -> None:
         with self.lock:
-            execution.status = result["status"]
-            execution.result = result
-            self.active -= 1
+            execution = self.executions.get(execution_id)
+            if execution is None or execution.finalized:
+                return
+            execution.stop_event.set()
+        self._finish(
+            execution_id,
+            "FAILED",
+            error_code="EXECUTION_TIMEOUT",
+            error="adapter execution timed out",
+            release_capacity=False,
+        )
+        self._schedule_force_termination(execution_id)
+
+    def _schedule_force_termination(self, execution_id: str) -> None:
+        if self.force_terminate is None:
+            return
+
+        def terminate_if_stuck() -> None:
+            with self.lock:
+                execution = self.executions.get(execution_id)
+                stuck = execution is not None and not execution.capacity_released
+            if stuck:
+                try:
+                    self.force_terminate(execution_id)
+                except Exception:
+                    pass
+
+        timer = threading.Timer(self.termination_grace, terminate_if_stuck)
+        timer.daemon = True
+        timer.start()
+
+    def _finish(
+        self,
+        execution_id: str,
+        status: str,
+        *,
+        output: Any | None = None,
+        error_code: str = "",
+        error: str = "",
+        release_capacity: bool = True,
+    ) -> None:
+        result = self._terminal(execution_id, status, output=output, error_code=error_code, error=error)
+        with self.lock:
+            execution = self.executions.get(execution_id)
+            if execution is None:
+                return
+            if not execution.finalized:
+                execution.finalized = True
+                execution.status = status
+                execution.result = result
+            if release_capacity and not execution.capacity_released:
+                execution.capacity_released = True
+                self.active -= 1
+
+    def _release_capacity(self, execution_id: str) -> None:
+        with self.lock:
+            execution = self.executions.get(execution_id)
+            if execution is not None and not execution.capacity_released:
+                execution.capacity_released = True
+                self.active -= 1
 
     def _stop(self, handler: BaseHTTPRequestHandler, execution_id: str, method: str, _query: str) -> None:
         if method != "POST":
@@ -234,6 +343,7 @@ class RuntimeHost:
                 return
             execution.stop_event.set()
             status = execution.status
+        self._schedule_force_termination(execution_id)
         self._write(handler, 202, {"executionId": execution_id, "status": status})
 
     def _checkpoint(self, handler: BaseHTTPRequestHandler, execution_id: str, method: str, _query: str) -> None:
@@ -246,10 +356,13 @@ class RuntimeHost:
             self._problem(handler, 404, "EXECUTION_NOT_FOUND", "agent execution not found")
             return
         try:
-            checkpoint = self.runtime.checkpoint(execution_id)
+            checkpoint = self._call_with_timeout(self.runtime.checkpoint, execution_id)
             self._validate_checkpoint(checkpoint)
-        except Exception as error:
-            self._problem(handler, 422, "CHECKPOINT_FAILED", str(error))
+        except TimeoutError:
+            self._problem(handler, 504, "CHECKPOINT_TIMEOUT", "checkpoint operation timed out")
+            return
+        except Exception:
+            self._problem(handler, 422, "CHECKPOINT_FAILED", "checkpoint operation failed")
             return
         self._write(handler, 200, {"executionId": execution_id, "checkpoint": checkpoint})
 
@@ -265,9 +378,12 @@ class RuntimeHost:
             return
         try:
             self._validate_checkpoint(body["checkpoint"])
-            self.runtime.restore(execution_id, body["checkpoint"])
-        except Exception as error:
-            self._problem(handler, 422, "RESTORE_FAILED", str(error))
+            self._call_with_timeout(self.runtime.restore, execution_id, body["checkpoint"])
+        except TimeoutError:
+            self._problem(handler, 504, "RESTORE_TIMEOUT", "restore operation timed out")
+            return
+        except Exception:
+            self._problem(handler, 422, "RESTORE_FAILED", "restore operation failed")
             return
         self._write(handler, 200, {"executionId": execution_id, "restored": True})
 
@@ -287,9 +403,20 @@ class RuntimeHost:
             if execution is None:
                 self._problem(handler, 404, "EXECUTION_NOT_FOUND", "agent execution not found")
                 return
-            events = [event for event in execution.events if event["sequence"] > after]
+            events: list[dict[str, Any]] = []
+            page_bytes = 0
+            truncated = False
+            for event in execution.events:
+                if event["sequence"] <= after:
+                    continue
+                event_bytes = len(json.dumps(event, separators=(",", ":")).encode())
+                if len(events) >= MAX_EVENTS_PER_PAGE or page_bytes + event_bytes > MAX_EVENT_PAGE:
+                    truncated = True
+                    break
+                events.append(event)
+                page_bytes += event_bytes
         next_after = events[-1]["sequence"] if events else after
-        self._write(handler, 200, {"executionId": execution_id, "events": events, "nextAfter": next_after})
+        self._write(handler, 200, {"executionId": execution_id, "events": events, "nextAfter": next_after, "truncated": truncated})
 
     def _result(self, handler: BaseHTTPRequestHandler, execution_id: str, method: str, _query: str) -> None:
         if method != "GET":
@@ -310,17 +437,28 @@ class RuntimeHost:
     @staticmethod
     def _validate_start(body: dict[str, Any]) -> None:
         required = {"executionId", "agentVersionRef", "goal", "input", "capabilities"}
-        if set(body) != required:
-            raise ValueError("start request contains missing or unknown fields")
+        if not required.issubset(body):
+            raise ValueError("start request is missing required fields")
         for key in ("executionId", "agentVersionRef", "goal"):
             if not isinstance(body[key], str) or not body[key].strip():
                 raise ValueError(f"{key} is required")
         capabilities = body["capabilities"]
         classes = {"tools", "models", "memory", "secrets"}
-        if not isinstance(capabilities, dict) or set(capabilities) != classes:
+        if not isinstance(capabilities, dict) or not classes.issubset(capabilities):
             raise ValueError("all capability classes must be explicit")
         if any(not isinstance(capabilities[name], list) for name in classes):
             raise ValueError("capability classes must be arrays")
+        for name in classes | {"childAgents", "memorySensitivities"}:
+            values = capabilities.get(name, [])
+            if not isinstance(values, list) or len(values) > 256:
+                raise ValueError(f"capabilities.{name} must be a bounded array")
+            if any(not isinstance(value, str) or not value.strip() or len(value) > 256 for value in values):
+                raise ValueError(f"capabilities.{name} contains an invalid grant")
+        sensitivities = capabilities.get("memorySensitivities", [])
+        if any(value not in {"internal", "confidential", "restricted"} for value in sensitivities):
+            raise ValueError("capabilities.memorySensitivities contains an invalid tier")
+        if capabilities.get("spawnTasks") and not capabilities.get("childAgents"):
+            raise ValueError("capabilities.childAgents is required when spawnTasks is enabled")
 
     @staticmethod
     def _validate_checkpoint(checkpoint: dict[str, Any]) -> None:
@@ -350,6 +488,28 @@ class RuntimeHost:
         if error:
             result["error"] = error
         return result
+
+    def _call_with_timeout(self, operation: Callable[..., Any], *args: Any) -> Any:
+        if not self.control_slots.acquire(blocking=False):
+            raise RuntimeError("runtime control operation capacity exhausted")
+        completed: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                completed.put((True, operation(*args)))
+            except BaseException as error:  # transported internally, never exposed
+                completed.put((False, error))
+            finally:
+                self.control_slots.release()
+
+        threading.Thread(target=invoke, daemon=True).start()
+        try:
+            succeeded, value = completed.get(timeout=self.control_timeout)
+        except queue.Empty as error:
+            raise TimeoutError from error
+        if not succeeded:
+            raise value
+        return value
 
     @staticmethod
     def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any] | None:
@@ -387,7 +547,9 @@ def serve(
     port: int = 8088,
 ) -> ThreadingHTTPServer:
     runtime_host = RuntimeHost(runtime, adapter)
-    return ThreadingHTTPServer((host, port), runtime_host.handler())
+    server = ThreadingHTTPServer((host, port), runtime_host.handler())
+    server.daemon_threads = True
+    return server
 
 
 def _timestamp() -> str:

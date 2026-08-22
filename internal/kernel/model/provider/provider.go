@@ -1,5 +1,5 @@
 // Package provider implements the real model execution layer behind the Model
-// Gateway decision chain (v1.1 Phase 1.2): an OpenAI-compatible HTTP executor
+// Gateway decision chain: an OpenAI-compatible HTTP executor
 // covering vLLM, Qwen, DeepSeek, GLM and any endpoint that speaks the
 // /chat/completions dialect, with streaming, bounded retries, a per-provider
 // circuit breaker, exact usage extraction and provider request-id capture.
@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -25,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/redact"
 )
 
 // Sentinel errors the invoker maps onto ledger outcomes.
@@ -40,7 +43,37 @@ var (
 	// been delivered; it is never retried, because a retry would duplicate
 	// billed output.
 	ErrStreamAborted = errors.New("model provider stream aborted after delivery")
+	// ErrCircuitOpen is returned by a shared breaker backend when another
+	// gateway instance has opened or is probing the provider circuit.
+	ErrCircuitOpen = errors.New("model provider circuit breaker open")
 )
+
+// CircuitBreaker is the optional distributed provider-health coordination
+// surface. PostgreSQL implements it so every gateway instance observes the
+// same open/half-open state; a nil breaker retains the process-local fallback.
+type CircuitBreaker interface {
+	AcquireCircuit(context.Context, CircuitAcquire) (CircuitPermit, error)
+	RecordCircuit(context.Context, CircuitRecord) error
+}
+
+type CircuitAcquire struct {
+	Provider  string
+	Threshold int
+	Cooldown  time.Duration
+	ProbeTTL  time.Duration
+	Now       time.Time
+}
+
+type CircuitPermit struct{ ProbeToken string }
+
+type CircuitRecord struct {
+	Provider   string
+	ProbeToken string
+	Success    bool
+	Retryable  bool
+	Threshold  int
+	Now        time.Time
+}
 
 // Message is one chat turn. Role is system|user|assistant|tool; ToolCalls
 // carries OpenAI-style function calls on assistant turns; ToolCallID binds a
@@ -74,6 +107,11 @@ type Invocation struct {
 	MaxOutputTokens int32            `json:"max_tokens,omitempty"`
 	Stream          bool             `json:"stream"`
 	Tools           []ToolDefinition `json:"tools,omitempty"`
+	IdempotencyKey  string           `json:"-"`
+	TraceID         string           `json:"-"`
+	TaskID          string           `json:"-"`
+	AttemptID       string           `json:"-"`
+	ModelCallID     string           `json:"-"`
 }
 
 // Result is the outcome of one invocation. Usage is the exact provider-reported
@@ -85,33 +123,54 @@ type Result struct {
 	InputTokens       int64      `json:"inputTokens"`
 	OutputTokens      int64      `json:"outputTokens"`
 	ProviderRequestID string     `json:"providerRequestId"`
+	UsageReported     bool       `json:"usageReported"`
 }
 
 // Config is one provider endpoint. APIKeyEnv names the environment variable
 // the key is resolved from on every call; the key itself is never stored.
 type Config struct {
-	Name          string        `json:"name"`
-	BaseURL       string        `json:"baseUrl"`
-	APIKeyEnv     string        `json:"apiKeyEnv"`
-	APIKey        string        `json:"-"` // programmatic (tests); file loads must use APIKeyEnv
-	Timeout       time.Duration `json:"-"`
-	TimeoutMs     int64         `json:"timeoutMs"`
-	MaxAttempts   int           `json:"maxAttempts"`
-	BreakerOpens  int           `json:"breakerOpens"`
-	BreakerCoolMs int64         `json:"breakerCooldownMs"`
+	Name                string            `json:"name"`
+	BaseURL             string            `json:"baseUrl"`
+	APIKeyEnv           string            `json:"apiKeyEnv"`
+	APIKey              string            `json:"-"` // programmatic (tests); file loads must use APIKeyEnv
+	Timeout             time.Duration     `json:"-"`
+	TimeoutMs           int64             `json:"timeoutMs"`
+	MaxAttempts         int               `json:"maxAttempts"`
+	BreakerOpens        int               `json:"breakerOpens"`
+	BreakerCoolMs       int64             `json:"breakerCooldownMs"`
+	MaxConcurrent       int               `json:"maxConcurrent"`
+	SupportsIdempotency bool              `json:"supportsIdempotency"`
+	IdempotencyHeader   string            `json:"idempotencyHeader"`
+	RetryAmbiguous      bool              `json:"retryAmbiguous"`
+	HealthPath          string            `json:"healthPath"`
+	HealthMethod        string            `json:"healthMethod"`
+	Capabilities        CapabilityProfile `json:"capabilities,omitempty"`
+}
+
+// CapabilityProfile makes OpenAI-compatible dialect differences explicit.
+// Pointer booleans distinguish an omitted field (safe default) from false.
+type CapabilityProfile struct {
+	StreamUsage    *bool  `json:"streamUsage,omitempty"`
+	ToolCalling    *bool  `json:"toolCalling,omitempty"`
+	JSONSchema     *bool  `json:"jsonSchema,omitempty"`
+	Reasoning      *bool  `json:"reasoning,omitempty"`
+	Usage          *bool  `json:"usage,omitempty"`
+	RequestID      *bool  `json:"requestId,omitempty"`
+	MaxTokensField string `json:"maxTokensField,omitempty"` // max_tokens|max_completion_tokens
 }
 
 // Defaults applied by (Config).resolved().
 const (
-	defaultTimeout     = 120 * time.Second
-	defaultMaxAttempts = 3
-	defaultBreakerOpen = 5
-	defaultBreakerCool = 30 * time.Second
-	maxAttemptsCeiling = 8
-	retryBaseDelay     = 250 * time.Millisecond
-	retryMaxDelay      = 5 * time.Second
-	maxRequestBytes    = 4 << 20
-	maxResponseBytes   = 32 << 20
+	defaultTimeout       = 120 * time.Second
+	defaultMaxAttempts   = 3
+	defaultBreakerOpen   = 5
+	defaultBreakerCool   = 30 * time.Second
+	maxAttemptsCeiling   = 8
+	retryBaseDelay       = 250 * time.Millisecond
+	retryMaxDelay        = 5 * time.Second
+	maxRequestBytes      = 4 << 20
+	maxResponseBytes     = 32 << 20
+	defaultMaxConcurrent = 32
 )
 
 func (c Config) resolved() Config {
@@ -134,6 +193,18 @@ func (c Config) resolved() Config {
 	if c.BreakerCoolMs <= 0 {
 		c.BreakerCoolMs = int64(defaultBreakerCool / time.Millisecond)
 	}
+	if c.MaxConcurrent <= 0 {
+		c.MaxConcurrent = defaultMaxConcurrent
+	}
+	if c.IdempotencyHeader == "" {
+		c.IdempotencyHeader = "Idempotency-Key"
+	}
+	if c.HealthPath == "" {
+		c.HealthPath = "/models"
+	}
+	if c.HealthMethod == "" {
+		c.HealthMethod = http.MethodGet
+	}
 	return c
 }
 
@@ -147,8 +218,16 @@ type Executor struct {
 	breakerOpenedAt time.Time
 	probing         bool
 
-	jitter func(time.Duration) time.Duration
-	now    func() time.Time
+	jitter   func(time.Duration) time.Duration
+	now      func() time.Time
+	bulkhead chan struct{}
+	shared   CircuitBreaker
+}
+
+// WithCircuitBreaker installs a distributed breaker backend.
+func (e *Executor) WithCircuitBreaker(shared CircuitBreaker) *Executor {
+	e.shared = shared
+	return e
 }
 
 // NewExecutor builds the executor for one provider endpoint.
@@ -156,10 +235,11 @@ func NewExecutor(config Config, client *http.Client) *Executor {
 	if client == nil {
 		client = &http.Client{}
 	}
+	resolved := config.resolved()
 	return &Executor{
-		config: config.resolved(), client: client,
+		config: resolved, client: client,
 		jitter: func(d time.Duration) time.Duration { return d/2 + time.Duration(rand.Int64N(int64(d)+1)) },
-		now:    time.Now,
+		now:    time.Now, bulkhead: make(chan struct{}, resolved.MaxConcurrent),
 	}
 }
 
@@ -171,7 +251,7 @@ func (e *Executor) Name() string { return e.config.Name }
 func (e *Executor) Health(ctx context.Context) error {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	request, err := e.newRequest(probeCtx, http.MethodGet, "/models", nil)
+	request, err := e.newRequest(probeCtx, e.config.HealthMethod, e.config.HealthPath, nil)
 	if err != nil {
 		return err
 	}
@@ -190,6 +270,10 @@ func (e *Executor) Health(ctx context.Context) error {
 // Complete performs one non-streaming invocation with bounded retries.
 func (e *Executor) Complete(ctx context.Context, invocation Invocation) (Result, error) {
 	invocation.Stream = false
+	if err := e.acquireBulkhead(ctx); err != nil {
+		return Result{}, err
+	}
+	defer e.releaseBulkhead()
 	var result Result
 	err := e.withRetries(ctx, invocation, func(ctx context.Context, request *http.Request) error {
 		response, err := e.client.Do(request)
@@ -212,7 +296,7 @@ func (e *Executor) Complete(ctx context.Context, invocation Invocation) (Result,
 		}
 		parsed, err := decodeCompletion(body)
 		if err != nil {
-			return fmt.Errorf("%w: decode completion: %s", ErrProviderRejected, sanitize(err.Error(), e))
+			return &classifiedError{err: fmt.Errorf("%w: decode completion: %s", ErrProviderUnavailable, sanitize(err.Error(), e)), retryable: true, ambiguous: true}
 		}
 		parsed.ProviderRequestID = requestID(response, parsed.rawID)
 		result = parsed.Result
@@ -226,7 +310,25 @@ func (e *Executor) Complete(ctx context.Context, invocation Invocation) (Result,
 // delivered; after that, a failure aborts the stream without retry so no
 // output is duplicated.
 func (e *Executor) Stream(ctx context.Context, invocation Invocation, onDelta func(string)) (Result, error) {
+	return e.StreamObserved(ctx, invocation, StreamObserver{OnContent: onDelta})
+}
+
+// StreamObserver separates user-visible content from all provider-generated
+// bytes. Budget meters observe content, tool names and tool arguments while
+// callers only receive textual content.
+type StreamObserver struct {
+	OnContent   func(string)
+	OnGenerated func(string)
+}
+
+// StreamObserved performs one streaming invocation with complete generation
+// metering and retry-delivery semantics.
+func (e *Executor) StreamObserved(ctx context.Context, invocation Invocation, observer StreamObserver) (Result, error) {
 	invocation.Stream = true
+	if err := e.acquireBulkhead(ctx); err != nil {
+		return Result{}, err
+	}
+	defer e.releaseBulkhead()
 	var result Result
 	err := e.withRetries(ctx, invocation, func(ctx context.Context, request *http.Request) error {
 		response, err := e.client.Do(request)
@@ -239,18 +341,18 @@ func (e *Executor) Stream(ctx context.Context, invocation Invocation, onDelta fu
 			return statusError(response, body, e)
 		}
 		providerRequestID := response.Header.Get("x-request-id")
-		parsed, delivered, err := consumeStream(response.Body, onDelta)
+		parsed, delivered, err := consumeStream(response.Body, observer)
+		parsed.ProviderRequestID = requestID(response, parsed.rawID)
+		if providerRequestID != "" {
+			parsed.ProviderRequestID = providerRequestID
+		}
+		result = parsed.Result
 		if err != nil {
 			if delivered {
 				return aborted(err, e)
 			}
 			return transportError(err, e)
 		}
-		parsed.ProviderRequestID = requestID(response, parsed.rawID)
-		if providerRequestID != "" {
-			parsed.ProviderRequestID = providerRequestID
-		}
-		result = parsed.Result
 		return nil
 	})
 	return result, err
@@ -262,6 +364,18 @@ type classifiedError struct {
 	err        error
 	retryable  bool
 	retryAfter time.Duration
+	ambiguous  bool
+}
+
+// UsageKnownZero reports whether an executor error proves the provider did
+// not accept billable generation (for example a definitive 4xx or 429).
+// Every ambiguous transport/5xx/partial-stream outcome returns false.
+func UsageKnownZero(err error) bool {
+	if errors.Is(err, ErrProviderRejected) {
+		return true
+	}
+	var classified *classifiedError
+	return errors.As(err, &classified) && !classified.ambiguous
 }
 
 func (c *classifiedError) Error() string { return c.err.Error() }
@@ -270,7 +384,7 @@ func (c *classifiedError) Unwrap() error { return c.err }
 func transportError(err error, e *Executor) error {
 	return &classifiedError{
 		err:       fmt.Errorf("%w: %s", ErrProviderUnavailable, sanitize(err.Error(), e)),
-		retryable: true,
+		retryable: true, ambiguous: true,
 	}
 }
 
@@ -288,6 +402,7 @@ func statusError(response *http.Response, body []byte, e *Executor) error {
 	if statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests || statusCode >= 500 {
 		classified.err = fmt.Errorf("%w: status %d: %s", ErrProviderUnavailable, statusCode, detail)
 		classified.retryable = true
+		classified.ambiguous = statusCode != http.StatusTooManyRequests
 		return classified
 	}
 	classified.err = fmt.Errorf("%w: status %d: %s", ErrProviderRejected, statusCode, detail)
@@ -298,7 +413,8 @@ func statusError(response *http.Response, body []byte, e *Executor) error {
 // backoff. Only retryable errors (network, 408/429/5xx, malformed 2xx stream
 // before delivery) consume the retry budget.
 func (e *Executor) withRetries(ctx context.Context, invocation Invocation, attempt func(context.Context, *http.Request) error) error {
-	if err := e.acquire(ctx); err != nil {
+	permit, err := e.acquire(ctx)
+	if err != nil {
 		return err
 	}
 	var lastErr error
@@ -311,26 +427,71 @@ func (e *Executor) withRetries(ctx context.Context, invocation Invocation, attem
 		// Each attempt gets a fresh deadline; a slow provider consumes its
 		// own budget, not the whole retry window.
 		attemptCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
-		request, err := e.newRequest(attemptCtx, http.MethodPost, "/chat/completions", encodeInvocation(invocation))
+		body, err := encodeInvocation(invocation, e.config.Capabilities)
 		if err != nil {
 			cancel()
 			return err
 		}
+		request, err := e.newRequest(attemptCtx, http.MethodPost, "/chat/completions", body)
+		if err != nil {
+			cancel()
+			return err
+		}
+		if invocation.IdempotencyKey != "" && e.config.SupportsIdempotency {
+			request.Header.Set(e.config.IdempotencyHeader, invocation.IdempotencyKey)
+		}
+		setCorrelationHeaders(request, invocation)
 		err = attempt(attemptCtx, request)
 		cancel()
 		if err == nil {
-			e.recordSuccess()
+			e.recordSuccess(ctx, permit)
 			return nil
 		}
 		lastErr = err
 		var classified *classifiedError
 		if !errors.As(err, &classified) || !classified.retryable {
-			e.recordFailure(false)
+			e.recordFailure(ctx, permit, false)
 			return err
 		}
-		e.recordFailure(true)
+		if classified.ambiguous && !(e.config.SupportsIdempotency || e.config.RetryAmbiguous) {
+			e.recordFailure(ctx, permit, true)
+			return fmt.Errorf("%w: provider outcome is ambiguous and automatic retry is disabled", ErrProviderUnavailable)
+		}
+		// A distributed breaker counts failed logical invocations, not the
+		// executor's internal attempts, and keeps a half-open probe fenced until
+		// its final outcome. The local fallback retains its historic per-attempt
+		// behavior.
+		if e.shared == nil || try == e.config.MaxAttempts-1 {
+			e.recordFailure(ctx, permit, true)
+		}
 	}
 	return lastErr
+}
+
+func (e *Executor) acquireBulkhead(ctx context.Context) error {
+	select {
+	case e.bulkhead <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("%w: provider concurrency limit reached", ErrProviderUnavailable)
+	}
+}
+
+func (e *Executor) releaseBulkhead() { <-e.bulkhead }
+
+func setCorrelationHeaders(request *http.Request, invocation Invocation) {
+	for name, value := range map[string]string{
+		"X-AgentOS-Trace-ID":      invocation.TraceID,
+		"X-AgentOS-Task-ID":       invocation.TaskID,
+		"X-AgentOS-Attempt-ID":    invocation.AttemptID,
+		"X-AgentOS-Model-Call-ID": invocation.ModelCallID,
+	} {
+		if value != "" {
+			request.Header.Set(name, value)
+		}
+	}
 }
 
 func (e *Executor) newRequest(ctx context.Context, method, path string, body []byte) (*http.Request, error) {
@@ -413,31 +574,56 @@ func parseRetryAfter(response *http.Response) time.Duration {
 // Circuit breaker: acquire admits the call (fast-failing while open), release
 // is handled by recordSuccess/recordFailure through withRetries' defer-free
 // flow. Half-open admits exactly one probe after the cooldown elapses.
-func (e *Executor) acquire(ctx context.Context) error {
+func (e *Executor) acquire(ctx context.Context) (CircuitPermit, error) {
+	if e.shared != nil {
+		permit, err := e.shared.AcquireCircuit(ctx, CircuitAcquire{
+			Provider: e.config.Name, Threshold: e.config.BreakerOpens,
+			Cooldown: time.Duration(e.config.BreakerCoolMs) * time.Millisecond,
+			ProbeTTL: e.config.Timeout, Now: e.now().UTC(),
+		})
+		if err != nil {
+			return CircuitPermit{}, fmt.Errorf("%w: distributed circuit for provider %q: %v", ErrProviderUnavailable, e.config.Name, err)
+		}
+		return permit, nil
+	}
 	e.breakerMu.Lock()
 	defer e.breakerMu.Unlock()
 	if e.consecutiveBad < e.config.BreakerOpens {
-		return nil
+		return CircuitPermit{}, nil
 	}
 	cooldown := time.Duration(e.config.BreakerCoolMs) * time.Millisecond
 	if e.now().Sub(e.breakerOpenedAt) < cooldown {
-		return fmt.Errorf("%w: circuit breaker open for provider %q", ErrProviderUnavailable, e.config.Name)
+		return CircuitPermit{}, fmt.Errorf("%w: circuit breaker open for provider %q", ErrProviderUnavailable, e.config.Name)
 	}
 	if e.probing {
-		return fmt.Errorf("%w: circuit breaker half-open probe in flight", ErrProviderUnavailable)
+		return CircuitPermit{}, fmt.Errorf("%w: circuit breaker half-open probe in flight", ErrProviderUnavailable)
 	}
 	e.probing = true
-	return nil
+	return CircuitPermit{}, nil
 }
 
-func (e *Executor) recordSuccess() {
+func (e *Executor) recordSuccess(ctx context.Context, permit CircuitPermit) {
+	if e.shared != nil {
+		_ = e.shared.RecordCircuit(ctx, CircuitRecord{
+			Provider: e.config.Name, ProbeToken: permit.ProbeToken, Success: true,
+			Threshold: e.config.BreakerOpens, Now: e.now().UTC(),
+		})
+		return
+	}
 	e.breakerMu.Lock()
 	defer e.breakerMu.Unlock()
 	e.consecutiveBad = 0
 	e.probing = false
 }
 
-func (e *Executor) recordFailure(retryable bool) {
+func (e *Executor) recordFailure(ctx context.Context, permit CircuitPermit, retryable bool) {
+	if e.shared != nil {
+		_ = e.shared.RecordCircuit(ctx, CircuitRecord{
+			Provider: e.config.Name, ProbeToken: permit.ProbeToken, Retryable: retryable,
+			Threshold: e.config.BreakerOpens, Now: e.now().UTC(),
+		})
+		return
+	}
 	e.breakerMu.Lock()
 	defer e.breakerMu.Unlock()
 	if !retryable {
@@ -452,32 +638,55 @@ func (e *Executor) recordFailure(retryable bool) {
 	e.probing = false
 }
 
-func encodeInvocation(invocation Invocation) []byte {
+func encodeInvocation(invocation Invocation, profiles ...CapabilityProfile) ([]byte, error) {
+	profile := CapabilityProfile{}
+	if len(profiles) > 0 {
+		profile = profiles[0]
+	}
 	type wire struct {
-		Model         string           `json:"model"`
-		Messages      []Message        `json:"messages"`
-		Temperature   *float64         `json:"temperature,omitempty"`
-		MaxTokens     int32            `json:"max_tokens,omitempty"`
-		Stream        bool             `json:"stream,omitempty"`
-		StreamOptions *wireStreamOpts  `json:"stream_options,omitempty"`
-		Tools         []ToolDefinition `json:"tools,omitempty"`
+		Model               string           `json:"model"`
+		Messages            []Message        `json:"messages"`
+		Temperature         *float64         `json:"temperature,omitempty"`
+		MaxTokens           int32            `json:"max_tokens,omitempty"`
+		MaxCompletionTokens int32            `json:"max_completion_tokens,omitempty"`
+		Stream              bool             `json:"stream,omitempty"`
+		StreamOptions       *wireStreamOpts  `json:"stream_options,omitempty"`
+		Tools               []ToolDefinition `json:"tools,omitempty"`
 	}
 	value := wire{
 		Model: invocation.ModelName, Messages: invocation.Messages,
 		Temperature: invocation.Temperature, MaxTokens: invocation.MaxOutputTokens,
 		Stream: invocation.Stream, Tools: invocation.Tools,
 	}
-	if invocation.Stream {
+	if profile.MaxTokensField != "" && profile.MaxTokensField != "max_tokens" && profile.MaxTokensField != "max_completion_tokens" {
+		return nil, fmt.Errorf("unsupported provider maxTokensField %q", profile.MaxTokensField)
+	}
+	if profile.MaxTokensField == "max_completion_tokens" {
+		value.MaxCompletionTokens, value.MaxTokens = value.MaxTokens, 0
+	}
+	if len(invocation.Tools) > 0 && profile.ToolCalling != nil && !*profile.ToolCalling {
+		return nil, fmt.Errorf("provider capability profile disables tool calling")
+	}
+	if invocation.Stream && (profile.StreamUsage == nil || *profile.StreamUsage) {
 		value.StreamOptions = &wireStreamOpts{IncludeUsage: true}
+	}
+	if strings.TrimSpace(invocation.ModelName) == "" {
+		return nil, fmt.Errorf("provider invocation requires a model")
+	}
+	if invocation.MaxOutputTokens < 0 {
+		return nil, fmt.Errorf("max output tokens must not be negative")
+	}
+	if invocation.Temperature != nil && (math.IsNaN(*invocation.Temperature) || math.IsInf(*invocation.Temperature, 0) || *invocation.Temperature < 0 || *invocation.Temperature > 2) {
+		return nil, fmt.Errorf("temperature must be finite and between 0 and 2")
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return []byte("{}")
+		return nil, fmt.Errorf("encode provider invocation: %w", err)
 	}
 	if len(encoded) > maxRequestBytes {
-		return []byte(`{"error":"request exceeds size limit"}`)
+		return nil, fmt.Errorf("provider request exceeds %d bytes", maxRequestBytes)
 	}
-	return encoded
+	return encoded, nil
 }
 
 type wireStreamOpts struct {
@@ -545,13 +754,14 @@ func decodeCompletion(body []byte) (parsedCompletion, error) {
 	if completion.Usage != nil {
 		parsed.InputTokens = completion.Usage.PromptTokens
 		parsed.OutputTokens = completion.Usage.CompletionTokens
+		parsed.UsageReported = true
 	}
 	return parsed, nil
 }
 
 // consumeStream reads one SSE stream. It returns the assembled result and
 // whether any delta was delivered (retry safety).
-func consumeStream(body io.Reader, onDelta func(string)) (parsed parsedCompletion, delivered bool, err error) {
+func consumeStream(body io.Reader, observer StreamObserver) (parsed parsedCompletion, delivered bool, err error) {
 	reader := bufio.NewReaderSize(body, 64<<10)
 	var content strings.Builder
 	toolCalls := map[int]*ToolCall{}
@@ -572,6 +782,7 @@ func consumeStream(body io.Reader, onDelta func(string)) (parsed parsedCompletio
 					parsed.FinishReason = finishReason
 					if haveUsage {
 						parsed.InputTokens, parsed.OutputTokens = usage.PromptTokens, usage.CompletionTokens
+						parsed.UsageReported = true
 					}
 					return parsed, delivered, nil
 				}
@@ -600,12 +811,22 @@ func consumeStream(body io.Reader, onDelta func(string)) (parsed parsedCompletio
 						}
 						if increment.Content != "" {
 							delivered = true
-							if onDelta != nil {
-								onDelta(increment.Content)
+							if observer.OnContent != nil {
+								observer.OnContent(increment.Content)
+							}
+							if observer.OnGenerated != nil {
+								observer.OnGenerated(increment.Content)
 							}
 							content.WriteString(increment.Content)
 						}
 						for _, call := range increment.ToolCalls {
+							if call.ID != "" || call.Function.Name != "" || call.Function.Arguments != "" {
+								delivered = true
+							}
+							if observer.OnGenerated != nil {
+								observer.OnGenerated(call.Function.Name)
+								observer.OnGenerated(call.Function.Arguments)
+							}
 							index := 0
 							if call.Index != nil {
 								index = *call.Index
@@ -647,9 +868,5 @@ func requestID(response *http.Response, bodyID string) string {
 // sanitize removes credential material and endpoint URLs from provider error
 // text before it crosses into kernel surfaces.
 func sanitize(detail string, e *Executor) string {
-	if key := e.apiKey(); key != "" {
-		detail = strings.ReplaceAll(detail, key, "[redacted]")
-	}
-	detail = strings.ReplaceAll(detail, e.config.BaseURL, "[provider]")
-	return detail
+	return redact.RedactText(detail, e.apiKey(), e.config.BaseURL)
 }

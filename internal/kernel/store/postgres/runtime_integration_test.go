@@ -12,6 +12,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
@@ -25,13 +26,13 @@ func TestRuntimeCheckpointCompletionAndIdempotency(t *testing.T) {
 	assignment := scheduleRuntimeTask(t, ctx, repository, "runtime-complete", 3)
 
 	starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: 1, To: domain.AttemptStarting,
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: 1, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	running, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +86,7 @@ func TestRuntimeCheckpointCompletionAndIdempotency(t *testing.T) {
 		t.Fatalf("idempotent completion retry: %+v err=%v", retriedCompletion, err)
 	}
 	if _, err := repository.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
-		AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedLeaseVersion: 1, TTL: time.Minute,
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedLeaseVersion: 1, TTL: time.Minute,
 	}); !errors.Is(err, kernelstore.ErrFenced) {
 		t.Fatalf("completed owner retained a lease: %v", err)
 	}
@@ -97,13 +98,13 @@ func TestExpiredRuntimeRecoversCheckpointWithHigherFence(t *testing.T) {
 	ctx := context.Background()
 	assignment := scheduleRuntimeTask(t, ctx, repository, "runtime-recovery", 2)
 	starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: 1, To: domain.AttemptStarting,
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: 1, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	running, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1, ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -137,14 +138,14 @@ func TestExpiredRuntimeRecoversCheckpointWithHigherFence(t *testing.T) {
 		t.Fatalf("old owner was not fenced: %v", err)
 	}
 	secondStarting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: recovered.Lease.Attempt.ID, FencingToken: 2,
+		TenantID: "tenant-a", AttemptID: recovered.Lease.Attempt.ID, FencingToken: 2,
 		ExpectedAttemptVersion: recovered.Lease.Attempt.ResourceVersion, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatalf("start recovered attempt: %v", err)
 	}
 	if _, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: recovered.Lease.Attempt.ID, FencingToken: 2,
+		TenantID: "tenant-a", AttemptID: recovered.Lease.Attempt.ID, FencingToken: 2,
 		ExpectedAttemptVersion: secondStarting.ResourceVersion, To: domain.AttemptRunning,
 	}); err != nil {
 		t.Fatalf("run recovered attempt: %v", err)
@@ -161,6 +162,61 @@ func TestExpiredRuntimeRecoversCheckpointWithHigherFence(t *testing.T) {
 	task, err := repository.GetTask(ctx, "tenant-a", assignment.Task.ID)
 	if err != nil || task.Phase != domain.TaskFailed {
 		t.Fatalf("exhausted task=%+v err=%v", task, err)
+	}
+}
+
+func TestWallTimeDeadlineStopsHealthyLeaseWithoutRetry(t *testing.T) {
+	clock := newFakeClock()
+	pool, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+	assignment := scheduleRuntimeTask(t, ctx, repository, "runtime-wall-stop", 3, 1)
+	starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
+		ExpectedAttemptVersion: 1, To: domain.AttemptStarting,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
+		ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
+		ExpectedLeaseVersion: 1, TTL: 5 * time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Second)
+	candidates, err := repository.ListExpiredAttempts(ctx, clock.Now(), 10)
+	if err != nil || len(candidates) != 1 || !candidates[0].DeadlineExceeded {
+		t.Fatalf("deadline candidates=%+v err=%v", candidates, err)
+	}
+	stopped, err := repository.RecoverExpiredAttempt(ctx, kernelstore.RecoverExpiredAttemptInput{
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
+		NewAttemptID: uuid.New(), NewLeaseID: uuid.New(), LeaseTTL: 30 * time.Second, MaxAttempts: 3,
+		DeadlineExceeded: true,
+	})
+	if err != nil || stopped.Retried {
+		t.Fatalf("wall stop=%+v err=%v", stopped, err)
+	}
+	task, err := repository.GetTask(ctx, "tenant-a", assignment.Task.ID)
+	if err != nil || task.Phase != domain.TaskFailed {
+		t.Fatalf("wall-stopped task=%+v err=%v", task, err)
+	}
+	if _, err := repository.HeartbeatLease(ctx, kernelstore.HeartbeatLeaseInput{
+		TenantID: "tenant-a", AttemptID: assignment.Attempt.ID, FencingToken: 1,
+		ExpectedLeaseVersion: 2, TTL: time.Minute,
+	}); !errors.Is(err, kernelstore.ErrFenced) {
+		t.Fatalf("wall-stopped owner not fenced: %v", err)
+	}
+	var failures int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events
+		WHERE tenant_id = 'tenant-a' AND aggregate_id = $1 AND event_type = 'TaskFailed'
+		AND payload->>'failureCode' = 'WALL_TIME_EXCEEDED'`, task.ID.String()).Scan(&failures); err != nil || failures != 1 {
+		t.Fatalf("wall-time evidence=%d err=%v", failures, err)
 	}
 }
 
@@ -197,13 +253,17 @@ func TestRunningTaskCancellationConvergesThroughRuntime(t *testing.T) {
 	}
 }
 
-func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgresstore.Store, key string, maxAttempts int) kernelstore.RuntimeAssignment {
+func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgresstore.Store, key string, maxAttempts int, wallSeconds ...int) kernelstore.RuntimeAssignment {
 	t.Helper()
+	wall := 60
+	if len(wallSeconds) > 0 {
+		wall = wallSeconds[0]
+	}
 	publishVersion(t, ctx, repository, "tenant-a", "agent", "1", `{"runtimeClassPolicy":{"allowed":["oci"]}}`)
 	created, err := repository.CreateTask(ctx, kernelstore.CreateTaskInput{
 		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default", AgentVersionRef: "agent@1", Goal: key,
 		IdempotencyKey: key, Spec: []byte(`{
-			"priority":70,"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":60},
+			"priority":70,"budget":{"tokens":500,"costUsd":2,"toolCalls":10,"wallSeconds":` + strconv.Itoa(wall) + `},
 			"placement":{"runtimeClasses":["oci"],"preferredClass":"oci","region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1},
 			"retryPolicy":{"maxAttempts":` + strconv.Itoa(maxAttempts) + `}
 		}`),
@@ -212,7 +272,7 @@ func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgres
 		t.Fatal(err)
 	}
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostUSD: 10, MaxToolCalls: 100,
+		RuntimeClasses: []string{"oci"}, MaxTokens: 1000, MaxCostMicroUSD: money.MustFromUSD(10), MaxToolCalls: 100,
 		MaxWallSeconds: 3600, MaxCPU: 2000, MaxMemory: 4096, MaxLLMConcurrency: 4,
 	})
 	if count, err := admission.NewController(repository, engine, testPolicyEngine(t), "admission-"+key, 10, time.Minute).Reconcile(ctx); err != nil || count != 1 {
@@ -220,7 +280,7 @@ func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgres
 	}
 	pools := staticPools{{
 		ID: "pool-cn-1", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-cn-1",
-		Region: "cn-east", Ready: true, AvailableCPU: 2000, AvailableMemory: 4096, AvailableLLMSlots: 4,
+		Region: "cn-east", Ready: true, AvailableCPU: 100_000, AvailableMemory: 1_000_000, AvailableLLMSlots: 1_000,
 	}}
 	if count, err := scheduler.NewController(repository, pools, "scheduler-"+key, 10, time.Minute, 30*time.Second).Reconcile(ctx); err != nil || count != 1 {
 		t.Fatalf("scheduler count=%d err=%v", count, err)

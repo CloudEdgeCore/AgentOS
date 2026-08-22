@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -35,6 +36,26 @@ func TestBeginRejectsExhaustedBudgetBeforeStream(t *testing.T) {
 	}
 	if fakes.models.calls != 0 {
 		t.Fatalf("hard stop must precede opening a call")
+	}
+}
+
+func TestBeginCapsOmittedOutputLimitToRemainingBudget(t *testing.T) {
+	gateway, fakes := newTestGateway()
+	fakes.policy.decisions["openai/gpt-4o"] = policy.Decision{Allow: true}
+	fakes.budget.reservedTokens = 700
+	fakes.budget.settledTokens = 200
+	input := beginInput("openai/gpt-4o")
+	input.EstimatedInputTokens = 100
+
+	begun, err := gateway.Begin(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if begun.EffectiveMaxOutputTokens != 400 {
+		t.Fatalf("effective max output = %d, want remaining 400", begun.EffectiveMaxOutputTokens)
+	}
+	if fakes.budget.lastReserved.Tokens != 500 {
+		t.Fatalf("reservation = %d, want input 100 + output 400", fakes.budget.lastReserved.Tokens)
 	}
 }
 
@@ -120,9 +141,9 @@ func TestFinishComputesCostFromPriceTable(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 	// prices: 3 USD / 1M input, 15 USD / 1M output
-	wantCost := 0.001*3 + 0.002*15
-	if finished.CostUSD != wantCost {
-		t.Fatalf("cost = %v, want %v", finished.CostUSD, wantCost)
+	wantCost := money.MustFromUSD(0.001*3 + 0.002*15)
+	if finished.CostMicroUSD != wantCost {
+		t.Fatalf("cost = %v, want %v", finished.CostMicroUSD, wantCost)
 	}
 	if finished.Status != kernelstore.ModelCallCompleted || finished.FinishReason != "stop" {
 		t.Fatalf("finished call: %+v", finished)
@@ -216,7 +237,7 @@ func newFakeModelStore() *fakeModelStore {
 	return &fakeModelStore{
 		descriptors: map[string]kernelstore.ModelDescriptor{
 			"openai/gpt-4o": {ID: uuid.New(), TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o",
-				SupportsStreaming: true, InputPricePerMillion: 3, OutputPricePerMillion: 15, PriceRevision: "v1"},
+				SupportsStreaming: true, InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v1"},
 		},
 		callsByID: map[uuid.UUID]kernelstore.ModelCall{},
 	}
@@ -269,9 +290,10 @@ func (f *fakeModelStore) FinishModelCall(_ context.Context, in kernelstore.Finis
 		return kernelstore.ModelCall{}, kernelstore.ErrInvalidTransition
 	}
 	call.Status = in.Status
-	call.InputTokens, call.OutputTokens, call.CostUSD = in.InputTokens, in.OutputTokens, in.CostUSD
+	call.InputTokens, call.OutputTokens, call.CostMicroUSD = in.InputTokens, in.OutputTokens, in.CostMicroUSD
 	call.PriceRevision = in.PriceRevision
 	call.ProviderRequestID, call.FinishReason = in.ProviderRequestID, in.FinishReason
+	call.UsageCertainty = in.UsageCertainty
 	call.ResourceVersion++
 	call.UpdatedAt = time.Now()
 	f.callsByID[call.ID] = call
@@ -283,6 +305,19 @@ type fakeModelBudget struct {
 	reservedTokens int64
 	settledTokens  int64
 	settled        map[string]int64
+	lastReserved   kernelstore.TaskBudget
+}
+
+func (f *fakeModelBudget) ReserveTaskUsage(_ context.Context, in kernelstore.ReserveTaskUsageInput) error {
+	if f.exhausted {
+		return kernelstore.ErrBudgetExceeded
+	}
+	f.lastReserved = in.Amount
+	return nil
+}
+
+func (f *fakeModelBudget) ReleaseTaskUsageReservation(context.Context, string, uuid.UUID, string) error {
+	return nil
 }
 
 func (f *fakeModelBudget) GetTaskBudget(context.Context, string, uuid.UUID) (kernelstore.TaskBudgetStatus, error) {

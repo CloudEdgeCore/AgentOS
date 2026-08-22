@@ -79,10 +79,19 @@ jobs:
         run: |
           test "$(go run ./cmd/agentos version -json | jq -r .productVersion)" = "1.0.0.0"
           python3 -m compileall -q sdk/python/agentos_runtime adapters examples/agents
+          python3 -m unittest discover -s sdk/python/tests -v
           python3 -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheels" sdk/python
+
+      - name: Verify TypeScript SDK
+        run: |
+          npm --prefix sdk/typescript ci
+          npm --prefix sdk/typescript test
 
       - name: Vet
         run: go vet ./...
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 
       - name: Scan reachable Go vulnerabilities
         run: go tool govulncheck ./...

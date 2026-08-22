@@ -10,6 +10,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -77,7 +78,7 @@ func TestControllerAdmitsAndBindsResolvedAgentVersion(t *testing.T) {
 	if decision.AgentVersionID == nil || decision.AgentVersionID.String() != repository.versionID("agent@1") {
 		t.Fatalf("version was not bound correctly: %v", decision.AgentVersionID)
 	}
-	if decision.Budget == nil || decision.Budget.Tokens != 500 || decision.Budget.CostUSD != 2 ||
+	if decision.Budget == nil || decision.Budget.Tokens != 500 || decision.Budget.CostMicroUSD != money.MustFromUSD(2) ||
 		decision.Budget.ToolCalls != 10 || decision.Budget.WallSeconds != 60 {
 		t.Fatalf("task budget was not reserved: %+v", decision.Budget)
 	}
@@ -252,8 +253,8 @@ func TestControllerPassesNoBudgetForUnboundedTasks(t *testing.T) {
 func TestControllerRejectsTenantOverQuota(t *testing.T) {
 	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
 	quotas := &fakeQuotaStore{
-		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 100, CostUSD: 2}},
-		usage: store.TenantWindowUsage{TenantID: "tenant-a", Consumed: store.TaskBudget{Tokens: 90, CostUSD: 1}},
+		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 100, CostMicroUSD: money.MustFromUSD(2)}},
+		usage: store.TenantWindowUsage{TenantID: "tenant-a", Consumed: store.TaskBudget{Tokens: 90, CostMicroUSD: money.MustFromUSD(1)}},
 	}
 	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
 	WithTenantQuotas(quotas)(controller)
@@ -279,8 +280,8 @@ func TestControllerRejectsTenantOverQuota(t *testing.T) {
 func TestControllerAdmitsWithinTenantQuota(t *testing.T) {
 	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
 	quotas := &fakeQuotaStore{
-		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 1000, CostUSD: 10}},
-		usage: store.TenantWindowUsage{TenantID: "tenant-a", Consumed: store.TaskBudget{Tokens: 90, CostUSD: 1}},
+		quota: store.TenantQuota{TenantID: "tenant-a", WindowSeconds: 86400, Limits: store.TaskBudget{Tokens: 1000, CostMicroUSD: money.MustFromUSD(10)}},
+		usage: store.TenantWindowUsage{TenantID: "tenant-a", Consumed: store.TaskBudget{Tokens: 90, CostMicroUSD: money.MustFromUSD(1)}},
 	}
 	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
 	WithTenantQuotas(quotas)(controller)

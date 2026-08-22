@@ -1,10 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -18,12 +20,13 @@ import (
 // surface implemented; any other method panics, which is a test failure.
 type fakeSchedulingStore struct {
 	store.ControlStore
-	claims     []store.TaskClaim
-	scheduled  []uuid.UUID
-	deferred   []store.DeferTaskScheduleInput
-	released   int
-	poisonSpec bool
-	deferErr   error
+	claims      []store.TaskClaim
+	scheduled   []uuid.UUID
+	deferred    []store.DeferTaskScheduleInput
+	released    int
+	poisonSpec  bool
+	deferErr    error
+	scheduleErr error
 }
 
 func (f *fakeSchedulingStore) ClaimTasks(context.Context, store.ClaimTasksInput) ([]store.TaskClaim, error) {
@@ -44,6 +47,9 @@ func (f *fakeSchedulingStore) DeferTaskSchedule(_ context.Context, in store.Defe
 }
 
 func (f *fakeSchedulingStore) ScheduleTask(_ context.Context, in store.ScheduleTaskInput) (store.AttemptLease, error) {
+	if f.scheduleErr != nil {
+		return store.AttemptLease{}, f.scheduleErr
+	}
 	if f.poisonSpec {
 		// The first claim's task carries the poisoned spec; decode happens
 		// before ScheduleTask, so poisoning here simulates a commit failure.
@@ -51,6 +57,60 @@ func (f *fakeSchedulingStore) ScheduleTask(_ context.Context, in store.ScheduleT
 	}
 	f.scheduled = append(f.scheduled, in.TaskID)
 	return store.AttemptLease{}, nil
+}
+
+func TestControllerDefersAtomicCapacityRace(t *testing.T) {
+	claim := store.TaskClaim{Task: admittedTask("capacity-race", `{
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`), OwnerID: "scheduler-1", FencingToken: 7}
+	repository := &fakeSchedulingStore{claims: []store.TaskClaim{claim}, scheduleErr: store.ErrCapacityExhausted}
+	controller := NewController(repository, StaticPoolSource{{
+		ID: "pool-1", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-1",
+		Region: "cn-east", Ready: true, AvailableCPU: 100, AvailableMemory: 128, AvailableLLMSlots: 1,
+	}}, "scheduler-1", 10, time.Minute, time.Minute)
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 0 {
+		t.Fatalf("capacity race reconcile: processed=%d err=%v", processed, err)
+	}
+	if len(repository.deferred) != 1 || repository.released != 0 {
+		t.Fatalf("capacity race did not persist one deferral: deferred=%d released=%d", len(repository.deferred), repository.released)
+	}
+	var rejection []Rejection
+	if err := json.Unmarshal(repository.deferred[0].Rejection, &rejection); err != nil ||
+		len(rejection) != 1 || rejection[0].Reasons[0] != "CAPACITY_RESERVATION_RACE" {
+		t.Fatalf("capacity race rejection=%s err=%v", repository.deferred[0].Rejection, err)
+	}
+	if delay := time.Until(repository.deferred[0].Until); delay < 75*time.Millisecond || delay > 150*time.Millisecond {
+		t.Fatalf("capacity race delay=%s, want short bounded retry", delay)
+	}
+}
+
+func TestEqualScorePoolsUseStableTaskDistribution(t *testing.T) {
+	spec, err := workload.Decode([]byte(`{
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	pools := []RuntimePool{
+		{ID: "pool-a", RuntimeClass: "oci", RuntimeInstanceID: "worker-a", Region: "cn-east", Ready: true, AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 8},
+		{ID: "pool-b", RuntimeClass: "oci", RuntimeInstanceID: "worker-b", Region: "cn-east", Ready: true, AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 8},
+		{ID: "pool-c", RuntimeClass: "oci", RuntimeInstanceID: "worker-c", Region: "cn-east", Ready: true, AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 8},
+		{ID: "pool-d", RuntimeClass: "oci", RuntimeInstanceID: "worker-d", Region: "cn-east", Ready: true, AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 8},
+	}
+	seen := map[string]int{}
+	for i := 0; i < 128; i++ {
+		taskID := uuid.NewMD5(uuid.NameSpaceOID, []byte(fmt.Sprintf("task-%d", i)))
+		selected, err := selectForTask(spec, pools, taskID)
+		if err != nil {
+			t.Fatalf("select task %d: %v", i, err)
+		}
+		seen[selected.Placement.Pool.ID]++
+	}
+	if len(seen) != len(pools) {
+		t.Fatalf("equal-score distribution used %d/%d pools: %v", len(seen), len(pools), seen)
+	}
 }
 
 func (f *fakeSchedulingStore) GetAgentVersionByRef(context.Context, string, string) (store.AgentVersion, error) {
@@ -161,6 +221,34 @@ func TestSelectRejectsAmbiguousPoolIdentity(t *testing.T) {
 	}
 }
 
+func TestSelectRejectsNonFiniteCostAndOperatorDrains(t *testing.T) {
+	spec := workload.Spec{Placement: workload.Placement{
+		RuntimeClasses: []string{"oci"}, Region: "cn-east", CPU: 1, Memory: 1, LLMConcurrency: 1,
+		AvoidFailureDomains: []string{"zone-b"},
+	}}
+	base := RuntimePool{ID: "pool", RuntimeClass: "oci", RuntimeInstanceID: "worker", Region: "cn-east",
+		Ready: true, AvailableCPU: 10, AvailableMemory: 10, AvailableLLMSlots: 1}
+	for _, invalid := range []float64{math.NaN(), math.Inf(1), -1} {
+		pool := base
+		pool.CostWeight = invalid
+		if _, err := Select(spec, []RuntimePool{pool}); !errors.Is(err, ErrInvalidPoolSet) {
+			t.Fatalf("costWeight %v error = %v, want invalid pool", invalid, err)
+		}
+	}
+	for _, state := range []string{"CORDONED", "DRAINING"} {
+		pool := base
+		pool.Status = state
+		if _, err := Select(spec, []RuntimePool{pool}); !errors.Is(err, ErrNoPlacement) {
+			t.Fatalf("state %s error = %v, want no placement", state, err)
+		}
+	}
+	pool := base
+	pool.FailureDomain = "zone-b"
+	if _, err := Select(spec, []RuntimePool{pool}); !errors.Is(err, ErrNoPlacement) {
+		t.Fatalf("anti-affinity error = %v, want no placement", err)
+	}
+}
+
 // --- O6: no-placement claim release with backoff ---
 
 // TestControllerDefersTaskOnNoPlacement proves O6: when no pool can place an
@@ -192,6 +280,9 @@ func TestControllerDefersTaskOnNoPlacement(t *testing.T) {
 	}
 	if deferred.Until.Before(time.Now().Add(4*time.Second)) || deferred.Until.After(time.Now().Add(6*time.Second)) {
 		t.Fatalf("first deferral = %v, want ~5s backoff", deferred.Until)
+	}
+	if !json.Valid(deferred.Rejection) || !bytes.Contains(deferred.Rejection, []byte("REGION_MISMATCH")) {
+		t.Fatalf("placement rejection was not persisted: %s", deferred.Rejection)
 	}
 }
 

@@ -67,7 +67,10 @@ func prepareSecurity(t *testing.T) *pgxpool.Pool {
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
+		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
+		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
 		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
 		audit_events,
@@ -103,17 +106,17 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	if _, err := repository.TransitionTask(ctx, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted); err != nil {
+	if _, err := repository.TransitionTask(ctx, created.Task.TenantID, created.Task.ID, created.Task.ResourceVersion, domain.TaskAdmitted); err != nil {
 		t.Fatalf("admit task: %v", err)
 	}
 	run, err := repository.CreateRun(ctx, kernelstore.CreateRunInput{
-		ID: uuid.New(), TaskID: created.Task.ID, ExpectedTaskVersion: 2,
+		ID: uuid.New(), TenantID: created.Task.TenantID, TaskID: created.Task.ID, ExpectedTaskVersion: 2,
 	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 	owned, err := repository.AcquireAttempt(ctx, kernelstore.AcquireAttemptInput{
-		AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
+		TenantID: created.Task.TenantID, AttemptID: uuid.New(), LeaseID: uuid.New(), RunID: run.ID,
 		ExpectedRunVersion: run.ResourceVersion, RuntimeClass: "reference-go",
 		RuntimeInstanceID: "worker-1", TTL: time.Minute,
 	})
@@ -121,14 +124,14 @@ func TestFencingReplayRejectedAfterTakeover(t *testing.T) {
 		t.Fatalf("acquire attempt: %v", err)
 	}
 	starting, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
+		TenantID: created.Task.TenantID, AttemptID: owned.Attempt.ID, FencingToken: owned.Attempt.FencingToken,
 		ExpectedAttemptVersion: owned.Attempt.ResourceVersion, To: domain.AttemptStarting,
 	})
 	if err != nil {
 		t.Fatalf("start attempt: %v", err)
 	}
 	running, err := repository.TransitionAttempt(ctx, kernelstore.TransitionAttemptInput{
-		AttemptID: starting.ID, FencingToken: starting.FencingToken,
+		TenantID: created.Task.TenantID, AttemptID: starting.ID, FencingToken: starting.FencingToken,
 		ExpectedAttemptVersion: starting.ResourceVersion, To: domain.AttemptRunning,
 	})
 	if err != nil {

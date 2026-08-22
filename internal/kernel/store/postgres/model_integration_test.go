@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -20,7 +21,7 @@ func TestModelRegistryPersistenceAndImmutability(t *testing.T) {
 
 	registered, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 3, OutputPricePerMillion: 15, PriceRevision: "v1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v1",
 	})
 	if err != nil {
 		t.Fatalf("register descriptor: %v", err)
@@ -30,21 +31,21 @@ func TestModelRegistryPersistenceAndImmutability(t *testing.T) {
 	}
 	retried, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 3, OutputPricePerMillion: 15, PriceRevision: "v1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v1",
 	})
 	if err != nil || retried.ID != registered.ID {
 		t.Fatalf("idempotent re-registration: %+v err=%v", retried, err)
 	}
 	if _, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 30, OutputPricePerMillion: 150, PriceRevision: "v1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(30), OutputPriceMicroUSDPerMillion: money.MustFromUSD(150), PriceRevision: "v1",
 	}); !errors.Is(err, kernelstore.ErrModelSpecConflict) {
 		t.Fatalf("mutation of a registered identity: %v, want ErrModelSpecConflict", err)
 	}
 	// A new price revision is a new identity for the same model.
 	revised, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 3, OutputPricePerMillion: 15, PriceRevision: "v2",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v2",
 	})
 	if err != nil || revised.ID == registered.ID {
 		t.Fatalf("price revision must be a new registration: %+v err=%v", revised, err)
@@ -75,7 +76,7 @@ func TestModelCallLedgerIdempotencyAndStateMachine(t *testing.T) {
 	}
 	finished, err := repository.FinishModelCall(ctx, kernelstore.FinishModelCallInput{
 		TenantID: "tenant-a", ModelCallID: created.ModelCall.ID, ExpectedVersion: 1,
-		Status: kernelstore.ModelCallCompleted, InputTokens: 100, OutputTokens: 50, CostUSD: 0.001,
+		Status: kernelstore.ModelCallCompleted, InputTokens: 100, OutputTokens: 50, CostMicroUSD: money.MustFromUSD(0.001),
 		PriceRevision: "v1", ProviderRequestID: "req-1", FinishReason: "stop",
 	})
 	if err != nil || finished.Status != kernelstore.ModelCallCompleted || finished.ResourceVersion != 2 {
@@ -83,13 +84,13 @@ func TestModelCallLedgerIdempotencyAndStateMachine(t *testing.T) {
 	}
 	if _, err := repository.FinishModelCall(ctx, kernelstore.FinishModelCallInput{
 		TenantID: "tenant-a", ModelCallID: created.ModelCall.ID, ExpectedVersion: 1,
-		Status: kernelstore.ModelCallCompleted, InputTokens: 0, OutputTokens: 0, CostUSD: 0, PriceRevision: "v1",
+		Status: kernelstore.ModelCallCompleted, InputTokens: 0, OutputTokens: 0, CostMicroUSD: 0, PriceRevision: "v1",
 	}); !errors.Is(err, kernelstore.ErrVersionConflict) {
 		t.Fatalf("stale CAS: %v, want ErrVersionConflict", err)
 	}
 	if _, err := repository.FinishModelCall(ctx, kernelstore.FinishModelCallInput{
 		TenantID: "tenant-a", ModelCallID: created.ModelCall.ID, ExpectedVersion: 2,
-		Status: kernelstore.ModelCallFailed, InputTokens: 0, OutputTokens: 0, CostUSD: 0, PriceRevision: "v1",
+		Status: kernelstore.ModelCallFailed, InputTokens: 0, OutputTokens: 0, CostMicroUSD: 0, PriceRevision: "v1",
 	}); !errors.Is(err, kernelstore.ErrInvalidTransition) {
 		t.Fatalf("terminal transition: %v, want ErrInvalidTransition", err)
 	}
@@ -107,7 +108,7 @@ func TestModelGatewayHardStopOnTokenBudget(t *testing.T) {
 
 	if _, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 3, OutputPricePerMillion: 15, PriceRevision: "v1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v1",
 	}); err != nil {
 		t.Fatalf("register descriptor: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestModelGatewayFinishSettlesExactlyOnceAgainstRealLedger(t *testing.T) {
 
 	if _, err := repository.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
 		TenantID: "tenant-a", Provider: "openai", ModelName: "gpt-4o", SupportsStreaming: true,
-		InputPricePerMillion: 3, OutputPricePerMillion: 15, PriceRevision: "v1",
+		InputPriceMicroUSDPerMillion: money.MustFromUSD(3), OutputPriceMicroUSDPerMillion: money.MustFromUSD(15), PriceRevision: "v1",
 	}); err != nil {
 		t.Fatalf("register descriptor: %v", err)
 	}

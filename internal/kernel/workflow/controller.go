@@ -1,4 +1,4 @@
-// The v1.3 orchestrator controller. Reconcile is stateless and durable: all
+// The orchestrator controller. Reconcile is stateless and durable: all
 // state lives in PostgreSQL, so restarts (and concurrent orchestrator
 // instances) resume without losing dependency progress. Task creation is
 // idempotent per (workflow, step, attempt) and every step/workflow
@@ -14,13 +14,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/agentmetrics"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/errorcode"
 	"github.com/google/uuid"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+var ErrOutputContract = errors.New("workflow output contract violation")
 
 // TaskPipeline is the task surface the orchestrator drives. The kernel
 // postgres Store satisfies it; every step becomes an ordinary fenced Task.
@@ -37,6 +43,10 @@ type ResultReader interface {
 	Open(context.Context, string, kernelstore.ArtifactReference) (io.ReadCloser, error)
 }
 
+type workflowClaimRenewer interface {
+	RenewWorkflowClaim(context.Context, string, uuid.UUID, string, time.Duration) error
+}
+
 // Controller reconciles active workflows.
 type Controller struct {
 	workflows kernelstore.WorkflowStore
@@ -50,7 +60,7 @@ type Controller struct {
 	// placement queue nor the runtime fleet.
 	maxInFlight int
 	// claimLease bounds one instance's exclusive claim of a workflow
-	// (v1.3); zero reconciles without claiming (single-instance mode).
+	// Zero reconciles without claiming (single-instance mode).
 	claimLease time.Duration
 	// claimTokenBudget skips claiming workflows whose settled token usage
 	// already exceeds their token ceiling (they are budget-stopped).
@@ -86,10 +96,10 @@ func (c *Controller) WithParallelism(workers int) *Controller {
 	return c
 }
 
-// WithClaiming enables distributed work-claim sharding (v1.3): each
+// WithClaiming enables distributed work-claim sharding: each
 // reconcile claims a batch of workflows under a lease that expires when the
 // instance dies, so peers take over without double dispatch. A zero lease
-// keeps the v1.2 single-instance behavior (reconcile everything visible).
+// keeps the single-instance behavior (reconcile everything visible).
 func (c *Controller) WithClaiming(lease time.Duration, tokenBudget int64) *Controller {
 	if lease > 0 {
 		c.claimLease = lease
@@ -112,8 +122,8 @@ func (c *Controller) WithMaxInFlightSteps(limit int) *Controller {
 // Reconcile drives active workflows one round: dispatching ready steps,
 // observing task terminals, applying retries, propagating cancellation,
 // enforcing workflow budgets and finalizing workflows. In claiming mode
-// (v1.3) each instance leases its batch under an expiring claim; otherwise
-// it reconciles everything visible (v1.2 behavior). Retryable transaction
+// Each instance leases its batch under an expiring claim; otherwise it
+// reconciles everything visible. Retryable transaction
 // conflicts are retried with bounded backoff (ADR-002).
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 	var (
@@ -130,18 +140,21 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	agentmetrics.WorkflowClaims(ctx, len(active))
+	agentmetrics.QueueDepth(ctx, "orchestrator_claim_batch", int64(len(active)))
 	if len(active) == 0 {
 		return 0, nil
 	}
 	processed := 0
 	if c.parallel <= 1 || len(active) == 1 {
 		for _, workflow := range active {
-			ok, err := c.processWorkflow(ctx, workflow)
+			ok, err := c.processClaimedWorkflow(ctx, workflow)
 			if err != nil {
 				return processed, err
 			}
 			if ok {
 				processed++
+				agentmetrics.WorkflowOutcome(ctx, "progressed")
 			}
 		}
 		return processed, nil
@@ -163,10 +176,11 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-semaphore }()
-			ok, err := c.processWorkflow(ctx, workflow)
+			ok, err := c.processClaimedWorkflow(ctx, workflow)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
+				agentmetrics.WorkflowOutcome(ctx, "reconcile_error")
 				if batchErr == nil {
 					batchErr = err
 				}
@@ -174,11 +188,56 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 			}
 			if ok {
 				processed++
+				agentmetrics.WorkflowOutcome(ctx, "progressed")
 			}
 		}()
 	}
 	wg.Wait()
 	return processed, batchErr
+}
+
+func (c *Controller) processClaimedWorkflow(ctx context.Context, workflow kernelstore.Workflow) (bool, error) {
+	renewer, ok := c.workflows.(workflowClaimRenewer)
+	if !ok || c.claimLease <= 0 {
+		return c.processWorkflow(ctx, workflow)
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	renewErr := make(chan error, 1)
+	interval := c.claimLease / 3
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workCtx.Done():
+				return
+			case <-ticker.C:
+				if err := renewer.RenewWorkflowClaim(workCtx, workflow.TenantID, workflow.ID, c.owner, c.claimLease); err != nil {
+					select {
+					case renewErr <- err:
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	processed, err := c.processWorkflow(workCtx, workflow)
+	cancel()
+	select {
+	case claimErr := <-renewErr:
+		if err != nil {
+			return processed, errors.Join(err, claimErr)
+		}
+		return processed, fmt.Errorf("renew workflow claim: %w", claimErr)
+	default:
+		return processed, err
+	}
 }
 
 // processWorkflow advances one workflow; it reports whether state moved.
@@ -188,7 +247,8 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		return false, err
 	}
 	byName := make(map[string]kernelstore.WorkflowStep, len(steps))
-	for _, step := range steps {
+	for index := range steps {
+		step := steps[index]
 		byName[step.Name] = step
 	}
 	spec, err := decodeStoredSpec(workflow.Spec)
@@ -233,7 +293,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		return moved || done, nil
 	}
 
-	// Workflow deadline hard stop (v1.3). Persist the stop marker before any
+	// Workflow deadline hard stop. Persist the stop marker before any
 	// cancellation so another orchestrator can safely resume the drain.
 	if workflow.DeadlineExceededAt == nil && workflow.DeadlineAt != nil && !c.now().Before(*workflow.DeadlineAt) {
 		if _, err := c.workflows.MarkWorkflowDeadlineExceeded(ctx, workflow.TenantID, workflow.ID, workflow.ResourceVersion); err != nil {
@@ -245,14 +305,14 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		return true, nil
 	}
 	if workflow.DeadlineExceededAt != nil {
-		done, err := c.drainFailedWorkflow(ctx, workflow, steps, "WORKFLOW_DEADLINE_EXCEEDED")
+		done, err := c.drainFailedWorkflow(ctx, workflow, steps, errorcode.WorkflowDeadlineExceeded)
 		if err != nil {
 			return moved, err
 		}
 		return moved || done, nil
 	}
 
-	// Workflow budget hard stop (v1.3): once a ceiling is met, the workflow
+	// Workflow budget hard stop: once a ceiling is met, the workflow
 	// drains exactly like a cancellation - running steps finish or are
 	// cancelled, undispatched steps are skipped - and finalizes FAILED with
 	// WORKFLOW_BUDGET_EXHAUSTED. The durable marker (budget_exhausted_at)
@@ -275,7 +335,8 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 			inFlight++
 		}
 	}
-	for _, step := range steps {
+	for index := range steps {
+		step := steps[index]
 		if step.Status.Terminal() {
 			continue
 		}
@@ -293,6 +354,18 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 			inFlight++
 		}
 		moved = moved || changed
+		if changed {
+			// Keep dependency decisions in this reconcile round aligned with
+			// durable state instead of waiting for the next controller tick.
+			// Refresh only the changed row: rescanning and sorting the entire
+			// DAG per transition makes a 10k-step workflow quadratic.
+			latest, getErr := c.workflows.GetWorkflowStep(ctx, workflow.TenantID, workflow.ID, step.Name)
+			if getErr != nil {
+				return moved, getErr
+			}
+			steps[index] = latest
+			byName[latest.Name] = latest
+		}
 	}
 
 	// Finalize when every step is terminal.
@@ -346,7 +419,7 @@ func (c *Controller) advanceStep(ctx context.Context, workflow kernelstore.Workf
 		if declared == nil {
 			return false, fmt.Errorf("step %q missing from stored spec", step.Name)
 		}
-		if declared.RequiresApproval && step.DecidedBy == approvalRejected {
+		if declared.RequiresApproval && step.ApprovalDecision == approvalRejected {
 			_, err := c.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "APPROVAL_REJECTED"))
 			return true, err
 		}
@@ -418,6 +491,15 @@ func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Work
 			met = containsBounded(output, condition.OutputContains)
 		case condition.OutputEquals != "":
 			met = output == condition.OutputEquals
+		case condition.JSONPointer != "":
+			var upstream any
+			if err := json.Unmarshal([]byte(output), &upstream); err == nil {
+				actual, ok := resolveJSONPointer(upstream, condition.JSONPointer)
+				var expected any
+				if ok && json.Unmarshal(condition.EqualsJSON, &expected) == nil {
+					met = reflect.DeepEqual(actual, expected)
+				}
+			}
 		}
 		if !met {
 			_, err := c.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "CONDITION_NOT_MET"))
@@ -459,6 +541,8 @@ func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Work
 		ID: c.newID(), TenantID: workflow.TenantID, Namespace: workflow.Namespace,
 		AgentVersionRef: agentVersionRef, Goal: renderGoal(goal, dependencyOutputs),
 		Spec: mergedSpec, IdempotencyKey: fmt.Sprintf("workflow/%s/%s/%d", workflow.ID, step.Name, attempt),
+		WorkflowID: &workflow.ID, WorkflowStepID: &step.ID, WorkflowStepName: step.Name,
+		WorkflowAttempt: attempt, ParentTaskID: parentTaskID(step, byName),
 	})
 	if err != nil {
 		return false, fmt.Errorf("create task for step %q: %w", step.Name, err)
@@ -477,6 +561,18 @@ func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Work
 		return false, err
 	}
 	return true, nil
+}
+
+func parentTaskID(step kernelstore.WorkflowStep, byName map[string]kernelstore.WorkflowStep) *uuid.UUID {
+	if !step.IsDynamic || step.ParentStepName == "" {
+		return nil
+	}
+	parent, ok := byName[step.ParentStepName]
+	if !ok || parent.TaskID == nil {
+		return nil
+	}
+	id := *parent.TaskID
+	return &id
 }
 
 // stepDependencies returns the dependency names of one step: a dynamic
@@ -546,9 +642,25 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 	}
 	switch task.Phase {
 	case "SUCCEEDED":
-		summary, extractErr := c.extractResult(ctx, workflow.TenantID, task)
+		var outputContract *StepOutputContract
+		if declared := declaredStep(spec, step.Name); declared != nil {
+			outputContract = declared.Output
+		}
+		summary, extractErr := c.extractResult(ctx, workflow.TenantID, task, outputContract)
 		if extractErr != nil {
 			c.logger.Warn("workflow step result extraction failed", "step", step.Name, "error", extractErr)
+			if errors.Is(extractErr, ErrOutputContract) {
+				_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
+					TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
+					ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
+					FailureCode: errorcode.OutputContractViolation,
+				})
+				return true, err
+			}
+			// Result propagation is part of step success. Leave the step
+			// RUNNING so a later reconcile retries the artifact read; marking
+			// success here would release downstream dependencies with no data.
+			return false, nil
 		}
 		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
@@ -606,7 +718,7 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 // and records the durable stop marker when one is met. It reports whether
 // the stop was recorded this round.
 func (c *Controller) checkBudget(ctx context.Context, workflow kernelstore.Workflow) bool {
-	if workflow.BudgetMaxTasks == 0 && workflow.BudgetMaxTokens == 0 && workflow.BudgetMaxCostUSD == 0 {
+	if workflow.BudgetMaxTasks == 0 && workflow.BudgetMaxTokens == 0 && workflow.BudgetMaxCostMicroUSD == 0 {
 		return false
 	}
 	usage, err := c.workflows.WorkflowUsageSnapshot(ctx, workflow.TenantID, workflow.ID)
@@ -624,7 +736,7 @@ func (c *Controller) checkBudget(ctx context.Context, workflow kernelstore.Workf
 		return false
 	}
 	c.logger.Info("workflow budget exhausted", "workflow", workflow.ID,
-		"tasks", usage.Tasks, "tokens", usage.Tokens, "costUsd", usage.CostUSD)
+		"tasks", usage.Tasks, "tokens", usage.Tokens, "costUsd", usage.CostMicroUSD.USD())
 	return true
 }
 
@@ -633,7 +745,7 @@ func (c *Controller) checkBudget(ctx context.Context, workflow kernelstore.Workf
 // FAILED (WORKFLOW_BUDGET_EXHAUSTED) once nothing is running. A step that
 // already succeeded keeps its result.
 func (c *Controller) drainBudgetExhausted(ctx context.Context, workflow kernelstore.Workflow, steps []kernelstore.WorkflowStep) (bool, error) {
-	return c.drainFailedWorkflow(ctx, workflow, steps, "WORKFLOW_BUDGET_EXHAUSTED")
+	return c.drainFailedWorkflow(ctx, workflow, steps, errorcode.WorkflowBudgetExhausted)
 }
 
 // drainFailedWorkflow cancels active tasks, skips undispatched steps, and
@@ -776,7 +888,7 @@ func (c *Controller) cancelWorkflow(ctx context.Context, workflow kernelstore.Wo
 
 // extractResult reads the task result artifact and stores a bounded output
 // summary for conditions and downstream goals.
-func (c *Controller) extractResult(ctx context.Context, tenantID string, task kernelstore.Task) (json.RawMessage, error) {
+func (c *Controller) extractResult(ctx context.Context, tenantID string, task kernelstore.Task, contract *StepOutputContract) (json.RawMessage, error) {
 	if task.ResultRef == "" {
 		return nil, fmt.Errorf("succeeded task has no result artifact")
 	}
@@ -800,7 +912,36 @@ func (c *Controller) extractResult(ctx context.Context, tenantID string, task ke
 		return nil, fmt.Errorf("decode result document: %w", err)
 	}
 	output := document["output"]
-	encoded, err := json.Marshal(map[string]any{"output": boundedText(output, 4096)})
+	if contract != nil {
+		if contract.ContentType != "" && mediaType != "" && !strings.HasPrefix(mediaType, contract.ContentType) {
+			return nil, fmt.Errorf("%w: content type %q does not match %q", ErrOutputContract, mediaType, contract.ContentType)
+		}
+		var schemaDocument any
+		if err := json.Unmarshal(contract.Schema, &schemaDocument); err != nil {
+			return nil, fmt.Errorf("%w: invalid stored schema", ErrOutputContract)
+		}
+		compiler := jsonschema.NewCompiler()
+		if err := compiler.AddResource("workflow-output.json", schemaDocument); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrOutputContract, err)
+		}
+		compiled, err := compiler.Compile("workflow-output.json")
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrOutputContract, err)
+		}
+		if err := compiled.Validate(output); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrOutputContract, err)
+		}
+	}
+	encodedOutput, err := json.Marshal(output)
+	if err != nil || len(encodedOutput) > 64<<10 {
+		return nil, fmt.Errorf("%w: typed output exceeds 65536 bytes", ErrOutputContract)
+	}
+	summary := map[string]any{"output": output}
+	if contract != nil {
+		summary["contentType"] = firstNonEmpty(contract.ContentType, "application/json")
+		summary["schemaVersion"] = contract.SchemaVersion
+	}
+	encoded, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
 	}
@@ -851,13 +992,45 @@ func sortedKeys(values map[string]string) []string {
 }
 
 func resultSummaryOutput(raw json.RawMessage) string {
-	var summary struct {
-		Output string `json:"output"`
-	}
+	var summary map[string]json.RawMessage
 	if json.Unmarshal(raw, &summary) == nil {
-		return summary.Output
+		output := summary["output"]
+		var text string
+		if json.Unmarshal(output, &text) == nil {
+			return text
+		}
+		return string(output)
 	}
 	return ""
+}
+
+func resolveJSONPointer(document any, pointer string) (any, bool) {
+	if pointer == "" {
+		return document, true
+	}
+	if !strings.HasPrefix(pointer, "/") {
+		return nil, false
+	}
+	current := document
+	for _, rawToken := range strings.Split(pointer[1:], "/") {
+		token := strings.ReplaceAll(strings.ReplaceAll(rawToken, "~1", "/"), "~0", "~")
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[token]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func firstNonEmpty(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func containsBounded(haystack, needle string) bool {
@@ -865,23 +1038,6 @@ func containsBounded(haystack, needle string) bool {
 		haystack = haystack[:1<<20]
 	}
 	return len(needle) > 0 && strings.Contains(haystack, needle)
-}
-
-func boundedText(value any, limit int) string {
-	text := ""
-	switch typed := value.(type) {
-	case string:
-		text = typed
-	default:
-		encoded, err := json.Marshal(value)
-		if err == nil {
-			text = string(encoded)
-		}
-	}
-	if len(text) > limit {
-		return text[:limit]
-	}
-	return text
 }
 
 func skipStepInput(workflow kernelstore.Workflow, step kernelstore.WorkflowStep, code string) kernelstore.TransitionWorkflowStepInput {

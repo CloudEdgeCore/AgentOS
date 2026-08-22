@@ -1,4 +1,4 @@
-// v1.2 workflow orchestration endpoints of the Control API: publish a
+// Workflow orchestration endpoints of the Control API: publish a
 // workflow run, inspect it with its steps, record the durable cancellation
 // intent, and decide parked human-approval steps.
 package api
@@ -95,11 +95,11 @@ func (h *Handler) createWorkflow(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	steps := workflowSpec.StepInputs()
-	budgetTasks, budgetTokens, budgetCostUSD := workflowSpec.Budgets()
+	budgetTasks, budgetTokens, budgetCost := workflowSpec.Budgets()
 	result, err := h.workflows.CreateWorkflow(request.Context(), store.CreateWorkflowInput{
 		ID: h.newID(), TenantID: principal.TenantID, Namespace: namespace,
 		IdempotencyKey: idempotencyKey, Goal: body.Goal, Spec: body.Workflow, Steps: steps,
-		BudgetMaxTasks: budgetTasks, BudgetMaxTokens: budgetTokens, BudgetMaxCostUSD: budgetCostUSD,
+		BudgetMaxTasks: budgetTasks, BudgetMaxTokens: budgetTokens, BudgetMaxCostMicroUSD: budgetCost,
 		DeadlineAt: workflowSpec.Deadline,
 	})
 	if err != nil {
@@ -306,6 +306,15 @@ func (h *Handler) writeWorkflow(writer http.ResponseWriter, status int, target s
 		}
 		if step.DecidedBy != "" {
 			entry["decidedBy"] = step.DecidedBy
+			entry["approvalDecision"] = step.ApprovalDecision
+		}
+		if step.ParentStepName != "" {
+			entry["parentStepName"] = step.ParentStepName
+		}
+		if step.IsDynamic {
+			entry["isDynamic"] = true
+			entry["spawnDepth"] = step.SpawnDepth
+			entry["spawnKey"] = step.SpawnKey
 		}
 		encodedSteps = append(encodedSteps, entry)
 	}

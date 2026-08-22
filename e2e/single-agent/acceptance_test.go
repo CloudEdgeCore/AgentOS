@@ -199,6 +199,7 @@ func TestV11ThousandTaskPipeline(t *testing.T) {
 	t.Logf("v1.1 scale evidence: tasks=%d succeeded=%d failed=%d successRate=%.4f elapsed=%s throughput=%.1f tasks/s",
 		total, succeeded, failed, successRate, elapsed, float64(total)/elapsed.Seconds())
 	if successRate < 0.99 {
+		t.Logf("python runtime diagnostics: %s", stack.pythonOut.String())
 		t.Fatalf("success rate %.4f below the 99%% acceptance gate", successRate)
 	}
 }

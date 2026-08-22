@@ -607,6 +607,32 @@ paths:
                 $ref: '#/components/schemas/AuditExport'
         '401': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1/runtime-pools/{poolId}/status:
+    put:
+      operationId: updateRuntimePoolStatus
+      summary: Activate, cordon, or drain a runtime pool
+      parameters:
+        - name: poolId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [ACTIVE, CORDONED, DRAINING] }
+      responses:
+        '200': { description: Runtime pool status changed }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '428': { $ref: '#/components/responses/Problem' }
 components:
   securitySchemes:
     bearerAuth:
@@ -684,6 +710,11 @@ components:
               taskId: { type: string, format: uuid }
               failureCode: { type: string }
               decidedBy: { type: string }
+              approvalDecision: { type: string, enum: [approved, rejected] }
+              parentStepName: { type: string }
+              isDynamic: { type: boolean }
+              spawnDepth: { type: integer, minimum: 1 }
+              spawnKey: { type: string }
               resourceVersion: { type: integer, format: int64 }
     CreateTaskRequest:
       type: object

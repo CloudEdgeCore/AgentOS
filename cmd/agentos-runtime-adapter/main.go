@@ -71,6 +71,12 @@ func main() {
 			slog.Error("mTLS identity is required unless -dev-mode is explicit")
 			os.Exit(2)
 		}
+		for name, address := range map[string]string{"control": *controlAddress, "gateway": *gatewayAddress, "spawn": *spawnAddress, "mcp": *mcpListen} {
+			if strings.TrimSpace(address) != "" && !loopbackRPCAddress(address) {
+				slog.Error("plaintext development endpoint must be loopback-only", "endpoint", name, "address", address)
+				os.Exit(2)
+			}
+		}
 		credentials = insecure.NewCredentials()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -155,21 +161,46 @@ func main() {
 		defer func() { _ = httpServer.Close() }()
 		slog.Info("sandbox Agent MCP endpoint listening", "address", *mcpListen)
 	}
-	ticker := time.NewTicker(*pollInterval)
-	defer ticker.Stop()
+	idleDelay := *pollInterval
+	const maxIdlePoll = 5 * time.Second
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
 		processed, err := worker.RunOnce(ctx)
 		if err != nil && ctx.Err() == nil {
 			slog.Error("adapter runtime execution", "error", err)
 		}
 		if processed {
 			slog.Info("adapter runtime completed assignment", "runtimeInstanceId", *runtimeInstanceID)
+			idleDelay = *pollInterval
+			timer.Reset(0)
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+		if err != nil {
+			idleDelay = *pollInterval
+		} else if idleDelay < maxIdlePoll {
+			idleDelay *= 2
+			if idleDelay > maxIdlePoll {
+				idleDelay = maxIdlePoll
+			}
 		}
+		timer.Reset(idleDelay)
 	}
+}
+
+func loopbackRPCAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

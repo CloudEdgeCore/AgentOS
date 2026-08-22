@@ -8,6 +8,8 @@ on:
 permissions:
   contents: write
   id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -16,7 +18,25 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: agentos_test
+          POSTGRES_USER: agentos
+          POSTGRES_PASSWORD: agentos-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos -d agentos_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
+      AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
+      AGENTOS_E2E_PYTHON: python3
     steps:
       - name: Check out immutable tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -28,6 +48,16 @@ jobs:
         with:
           go-version: 1.26.6
           cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Verify release identity and source
         shell: bash
@@ -41,10 +71,17 @@ jobs:
 
       - name: Run GA gates
         run: |
+          docker run --detach --name agentos-release-nats --publish 4222:4222 nats:2.14.1-alpine@sha256:ea17b9b7f74279b9239cf65e5786c0133e9a7c353bf218d29004abf2e7a33181 --jetstream
           go vet ./...
+          go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
           go test -race -count=1 ./...
+          go test -race -tags=integration -count=1 -timeout 60m ./...
           go tool govulncheck ./...
           go build ./cmd/...
+          python3 -m unittest discover -s sdk/python/tests -v
+          python3 -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/python-wheel" sdk/python
+          npm --prefix sdk/typescript ci
+          npm --prefix sdk/typescript test
 
       - name: Install pinned supply-chain tools
         env:
@@ -52,6 +89,8 @@ jobs:
         run: |
           go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0
           go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.0
+          cargo +1.97.1 install cargo-cyclonedx --version 0.5.9 --locked
+          python3 -m pip install cyclonedx-bom==7.3.1
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
 
       - name: Build reproducible release archives
@@ -59,12 +98,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          commands=(agentos agentos-conformance agentos-control agentos-controller agentos-gateway agentos-migrate agentos-outbox agentos-pkg agentos-projector agentos-runtime-adapter agentos-runtime-control agentos-runtime-oci agentos-runtime-reference agentos-slo agentos-svid)
+          commands=(agentos agentos-conformance agentos-control agentos-controller agentos-gateway agentos-migrate agentos-orchestrator agentos-outbox agentos-pkg agentos-projector agentos-runtime-adapter agentos-runtime-control agentos-runtime-oci agentos-runtime-reference agentos-slo agentos-svid)
           platforms=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64)
           commit="$(git rev-parse HEAD)"
           build_time="$(git show -s --format=%cI HEAD)"
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           ldflags="-s -w -X github.com/CloudEdgeCore/AgentOS/internal/version.Commit=${commit} -X github.com/CloudEdgeCore/AgentOS/internal/version.BuildTime=${build_time}"
+          cargo +1.97.1 build --release --locked --bin agentos-runtime-wasm
           for platform in "${platforms[@]}"; do
             goos="${platform%-*}"
             goarch="${platform#*-}"
@@ -75,6 +115,9 @@ jobs:
               if [[ "$goos" == windows ]]; then suffix=".exe"; fi
               CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$ldflags" -o "$stage/${command}${suffix}" "./cmd/${command}"
             done
+            if [[ "$platform" == linux-amd64 ]]; then
+              cp target/release/agentos-runtime-wasm "$stage/agentos-runtime-wasm"
+            fi
             if [[ "$goos" == windows ]]; then
               (cd "$stage" && zip -q -9 -r "${GITHUB_WORKSPACE}/dist/agentos-${GITHUB_REF_NAME}-${platform}.zip" .)
             else
@@ -82,6 +125,7 @@ jobs:
             fi
           done
           python3 -m pip wheel --no-deps --wheel-dir dist sdk/python
+          npm --prefix sdk/typescript pack --pack-destination "$GITHUB_WORKSPACE/dist"
       - name: Generate SBOM, checksums, and keyless signature
         shell: bash
         env:
@@ -89,8 +133,21 @@ jobs:
         run: |
           set -euo pipefail
           cyclonedx-gomod mod -json -output-version 1.6 -output "dist/agentos-${GITHUB_REF_NAME}.cdx.json" .
-          (cd dist && sha256sum *.tar.gz *.zip *.whl *.cdx.json > checksums.txt)
+          cargo +1.97.1 cyclonedx --format json
+          rust_sbom="$(find runtime/wasm -maxdepth 1 -type f \( -name '*.cdx.json' -o -name 'bom.json' \) -print -quit)"
+          test -n "$rust_sbom"
+          mv "$rust_sbom" "dist/agentos-${GITHUB_REF_NAME}-rust.cdx.json"
+          npm --prefix sdk/typescript sbom --sbom-format cyclonedx > "dist/agentos-${GITHUB_REF_NAME}-typescript.cdx.json"
+          python3 -m venv "$RUNNER_TEMP/agentos-sbom-venv"
+          "$RUNNER_TEMP/agentos-sbom-venv/bin/pip" install cyclonedx-bom==7.3.1 dist/*.whl
+          "$RUNNER_TEMP/agentos-sbom-venv/bin/cyclonedx-py" environment --output-format JSON --output-file "dist/agentos-${GITHUB_REF_NAME}-python.cdx.json"
+          (cd dist && sha256sum *.tar.gz *.zip *.whl *.tgz *.cdx.json > checksums.txt)
           cosign sign-blob --yes --bundle "dist/checksums.txt.sigstore.json" "dist/checksums.txt"
+
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: dist/*
 
       - name: Publish immutable GitHub release
         shell: bash

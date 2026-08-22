@@ -1,4 +1,4 @@
-// The orchestrator's dynamic-spawn surface (v1.3): the runtime adapter calls
+// The orchestrator's guarded dynamic-spawn surface: the runtime adapter calls
 // SpawnStep when a sandboxed agent invokes the brokered agentos.task.spawn
 // system tool. All guards (recursion depth, dynamic-step caps, workflow
 // budgets, spawn idempotency) run inside the kernel store transaction; this
@@ -17,6 +17,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	workflowkernel "github.com/CloudEdgeCore/AgentOS/internal/kernel/workflow"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/agentmetrics"
 	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -35,7 +36,7 @@ type spawnService struct {
 
 type spawnRuntimeStore interface {
 	GetRuntimeAssignment(context.Context, string, uuid.UUID, int64) (kernelstore.RuntimeAssignment, error)
-	WorkflowLineage(context.Context, string, string) (uuid.UUID, string, int64, bool, error)
+	WorkflowLineage(context.Context, string, uuid.UUID) (uuid.UUID, string, int64, bool, error)
 }
 
 // SpawnStep creates one dynamic workflow step (or replays an identical
@@ -73,7 +74,7 @@ func (s *spawnService) SpawnStep(ctx context.Context, request *runtimev1.SpawnSt
 		!assignment.Lease.ExpiresAt.After(time.Now().UTC()) {
 		return nil, status.Error(codes.PermissionDenied, "attempt is not active for dynamic spawning")
 	}
-	lineageID, lineageStep, _, ok, err := s.runtime.WorkflowLineage(ctx, identity.GetTenantId(), assignment.Task.IdempotencyKey)
+	lineageID, lineageStep, _, ok, err := s.runtime.WorkflowLineage(ctx, identity.GetTenantId(), assignment.Task.ID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "resolve workflow lineage")
 	}
@@ -120,12 +121,18 @@ func (s *spawnService) SpawnStep(ctx context.Context, request *runtimev1.SpawnSt
 		IdempotencyKey: request.GetIdempotencyKey(), Arguments: []byte(request.GetArgumentsJson()),
 	})
 	if err != nil {
+		if code, ok := kernelstore.DenialCode(err); ok {
+			agentmetrics.SpawnOutcome(ctx, code)
+		} else {
+			agentmetrics.SpawnOutcome(ctx, "internal_error")
+		}
 		return spawnFailure(err)
 	}
 	outcome := "created"
 	if !result.Created {
 		outcome = "replayed"
 	}
+	agentmetrics.SpawnOutcome(ctx, outcome)
 	return &runtimev1.SpawnStepResponse{
 		Outcome: outcome, StepName: result.Step.Name, SpawnDepth: int32(result.Step.SpawnDepth),
 	}, nil

@@ -94,7 +94,7 @@ func (s *Service) TransitionAttempt(ctx context.Context, request *runtimev1.Tran
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	updated, err := s.store.TransitionAttempt(ctx, store.TransitionAttemptInput{
-		AttemptID: attemptID, FencingToken: identity.GetFencingToken(),
+		TenantID: identity.GetTenantId(), AttemptID: attemptID, FencingToken: identity.GetFencingToken(),
 		ExpectedAttemptVersion: request.GetExpectedAttemptVersion(), To: target,
 		FailureCode: request.GetFailureCode(), FailureMessage: request.GetFailureMessage(),
 	})
@@ -116,7 +116,7 @@ func (s *Service) Heartbeat(ctx context.Context, request *runtimev1.HeartbeatReq
 		return nil, status.Error(codes.InvalidArgument, "valid lease version, idempotency key, and bounded TTL are required")
 	}
 	lease, err := s.store.HeartbeatLease(ctx, store.HeartbeatLeaseInput{
-		AttemptID: attemptID, FencingToken: identity.GetFencingToken(),
+		TenantID: identity.GetTenantId(), AttemptID: attemptID, FencingToken: identity.GetFencingToken(),
 		ExpectedLeaseVersion: request.GetExpectedLeaseVersion(), TTL: ttl,
 	})
 	if err != nil {
@@ -254,10 +254,10 @@ func (s *Service) authorizePeer(ctx context.Context, tenantID, runtimeInstanceID
 	return nil
 }
 
-// workflowLineage renders the task's workflow origin token
-// (workflow_id/step_name/version) when the idempotency key names one.
+// workflowLineage renders the task's explicit workflow origin token
+// (workflow_id/step_name/version).
 func (s *Service) workflowLineage(ctx context.Context, assignment store.RuntimeAssignment) string {
-	workflowID, stepName, version, ok, err := s.store.WorkflowLineage(ctx, assignment.Task.TenantID, assignment.Task.IdempotencyKey)
+	workflowID, stepName, version, ok, err := s.store.WorkflowLineage(ctx, assignment.Task.TenantID, assignment.Task.ID)
 	if err != nil || !ok {
 		return ""
 	}

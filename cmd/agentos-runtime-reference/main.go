@@ -47,6 +47,16 @@ func main() {
 		os.Exit(2)
 	}
 	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
+	if !tlsConfigured && (!loopbackEndpoint(*controlAddress) ||
+		(strings.TrimSpace(*gatewayAddress) != "" && !loopbackEndpoint(*gatewayAddress)) ||
+		(strings.TrimSpace(*modelGatewayAddress) != "" && !loopbackEndpoint(*modelGatewayAddress))) {
+		slog.Error("plaintext development RPC endpoints must be loopback-only")
+		os.Exit(2)
+	}
+	if strings.TrimSpace(*mcpListen) != "" && !loopbackEndpoint(*mcpListen) {
+		slog.Error("sandbox MCP listener must be loopback-only", "listen", *mcpListen)
+		os.Exit(2)
+	}
 	controlCredentials, err := mtlsutil.ClientCredentials(tlsConfigured, *tlsCert, *tlsKey, *trustBundle)
 	if err != nil {
 		slog.Error("configure worker mTLS credentials", "error", err)
@@ -95,7 +105,7 @@ func main() {
 	var gatewayConnection *grpc.ClientConn
 	if strings.TrimSpace(*gatewayAddress) != "" {
 		gatewayConnection, err = grpc.NewClient(*gatewayAddress,
-			append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
+			append([]grpc.DialOption{grpc.WithTransportCredentials(controlCredentials)}, grpcx.ClientOptions()...)...)
 		if err != nil {
 			slog.Error("create Tool Gateway client", "error", err)
 			os.Exit(1)
@@ -106,7 +116,7 @@ func main() {
 	}
 	if strings.TrimSpace(*modelGatewayAddress) != "" {
 		modelConnection, err := grpc.NewClient(*modelGatewayAddress,
-			append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, grpcx.ClientOptions()...)...)
+			append([]grpc.DialOption{grpc.WithTransportCredentials(controlCredentials)}, grpcx.ClientOptions()...)...)
 		if err != nil {
 			slog.Error("create Model Gateway client", "error", err)
 			os.Exit(1)
@@ -163,4 +173,16 @@ func main() {
 		case <-ticker.C:
 		}
 	}
+}
+
+func loopbackEndpoint(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

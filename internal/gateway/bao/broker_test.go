@@ -16,10 +16,9 @@ import (
 
 // fakeBao simulates an OpenBao KV v2 endpoint.
 type fakeBao struct {
-	secrets   map[string]map[string]any
-	requests  atomic.Int64
-	token     string
-	failCount atomic.Int64
+	secrets  map[string]map[string]any
+	requests atomic.Int64
+	token    string
 }
 
 func (f *fakeBao) handler() http.Handler {

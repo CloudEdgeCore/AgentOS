@@ -463,6 +463,14 @@ type fakeBudgetStore struct {
 	settlements int
 }
 
+func (f *fakeBudgetStore) ReserveTaskUsage(context.Context, store.ReserveTaskUsageInput) error {
+	return nil
+}
+
+func (f *fakeBudgetStore) ReleaseTaskUsageReservation(context.Context, string, uuid.UUID, string) error {
+	return nil
+}
+
 func (f *fakeBudgetStore) GetTaskBudget(context.Context, string, uuid.UUID) (store.TaskBudgetStatus, error) {
 	return store.TaskBudgetStatus{Exhausted: f.exhausted}, nil
 }

@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/google/uuid"
 )
 
-// v1.2 Agent Orchestration: durable WorkflowRun and Step state. The
+// Agent Orchestration: durable WorkflowRun and Step state. The
 // orchestrator owns who executes when; the scheduler (unchanged) owns where
 // a Task runs. Workflows never bypass the Task pipeline — steps create
 // ordinary fenced Tasks.
@@ -106,47 +107,48 @@ type Workflow struct {
 	Status            WorkflowStatus
 	FailureCode       string
 	CancelRequestedAt *time.Time
-	// Budget ceilings (v1.3). Zero means the dimension is unbounded.
-	BudgetMaxTasks     int64
-	BudgetMaxTokens    int64
-	BudgetMaxCostUSD   float64
-	BudgetExhaustedAt  *time.Time
-	DeadlineAt         *time.Time
-	DeadlineExceededAt *time.Time
-	ResourceVersion    int64
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// Budget ceilings. Zero means the dimension is unbounded.
+	BudgetMaxTasks        int64
+	BudgetMaxTokens       int64
+	BudgetMaxCostMicroUSD money.MicroUSD
+	BudgetExhaustedAt     *time.Time
+	DeadlineAt            *time.Time
+	DeadlineExceededAt    *time.Time
+	ResourceVersion       int64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // WorkflowStep is one step of a workflow: a declared DAG node plus its
 // dispatch state. AttemptCount drives the single-step retry budget. Dynamic
-// steps (v1.3) carry their whole definition here — declared steps keep theirs
+// Dynamic steps carry their whole definition here — declared steps keep theirs
 // in the workflow document — with the spawning parent and depth lineage for
 // the recursion guard.
 type WorkflowStep struct {
-	ID              uuid.UUID
-	TenantID        string
-	WorkflowID      uuid.UUID
-	Name            string
-	Ordinal         int
-	Status          StepStatus
-	AttemptCount    int
-	TaskID          *uuid.UUID
-	ResultSummary   json.RawMessage
-	FailureCode     string
-	DecidedBy       string
-	DecidedAt       *time.Time
-	ParentStepName  string
-	SpawnDepth      int
-	IsDynamic       bool
-	SpawnKey        string
-	Goal            string
-	AgentVersionRef string
-	Spec            json.RawMessage
-	MaxAttempts     int
-	ResourceVersion int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID               uuid.UUID
+	TenantID         string
+	WorkflowID       uuid.UUID
+	Name             string
+	Ordinal          int
+	Status           StepStatus
+	AttemptCount     int
+	TaskID           *uuid.UUID
+	ResultSummary    json.RawMessage
+	FailureCode      string
+	DecidedBy        string
+	ApprovalDecision string
+	DecidedAt        *time.Time
+	ParentStepName   string
+	SpawnDepth       int
+	IsDynamic        bool
+	SpawnKey         string
+	Goal             string
+	AgentVersionRef  string
+	Spec             json.RawMessage
+	MaxAttempts      int
+	ResourceVersion  int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 var stepNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,63})$`)
@@ -182,12 +184,12 @@ type CreateWorkflowInput struct {
 	Goal           string
 	Spec           json.RawMessage
 	Steps          []CreateWorkflowStepInput
-	// Budget ceilings decoded from the workflow document (v1.3); zero leaves
+	// Budget ceilings decoded from the workflow document; zero leaves
 	// the dimension unbounded.
-	BudgetMaxTasks   int64
-	BudgetMaxTokens  int64
-	BudgetMaxCostUSD float64
-	DeadlineAt       *time.Time
+	BudgetMaxTasks        int64
+	BudgetMaxTokens       int64
+	BudgetMaxCostMicroUSD money.MicroUSD
+	DeadlineAt            *time.Time
 }
 
 // RequestHash fingerprints the tenant-scoped workflow definition so an
@@ -198,14 +200,14 @@ func (in CreateWorkflowInput) RequestHash() ([sha256.Size]byte, error) {
 		return [sha256.Size]byte{}, fmt.Errorf("tenant, goal, idempotency key, and steps are required")
 	}
 	encoded, err := json.Marshal(struct {
-		Goal            string                    `json:"goal"`
-		Spec            json.RawMessage           `json:"spec"`
-		Steps           []CreateWorkflowStepInput `json:"steps"`
-		BudgetMaxTasks  int64                     `json:"budgetMaxTasks"`
-		BudgetMaxTokens int64                     `json:"budgetMaxTokens"`
-		BudgetMaxCost   float64                   `json:"budgetMaxCostUsd"`
-		DeadlineAt      *time.Time                `json:"deadlineAt,omitempty"`
-	}{in.Goal, json.RawMessage(canonicalJSON(in.Spec)), in.Steps, in.BudgetMaxTasks, in.BudgetMaxTokens, in.BudgetMaxCostUSD, in.DeadlineAt})
+		Goal                  string                    `json:"goal"`
+		Spec                  json.RawMessage           `json:"spec"`
+		Steps                 []CreateWorkflowStepInput `json:"steps"`
+		BudgetMaxTasks        int64                     `json:"budgetMaxTasks"`
+		BudgetMaxTokens       int64                     `json:"budgetMaxTokens"`
+		BudgetMaxCostMicroUSD money.MicroUSD            `json:"budgetMaxCostMicroUsd"`
+		DeadlineAt            *time.Time                `json:"deadlineAt,omitempty"`
+	}{in.Goal, json.RawMessage(canonicalJSON(in.Spec)), in.Steps, in.BudgetMaxTasks, in.BudgetMaxTokens, in.BudgetMaxCostMicroUSD, in.DeadlineAt})
 	if err != nil {
 		return [sha256.Size]byte{}, fmt.Errorf("encode workflow request: %w", err)
 	}
@@ -264,7 +266,7 @@ type TransitionWorkflowStepInput struct {
 	FailureCode     string
 }
 
-// SpawnWorkflowStepInput creates one dynamic step (v1.3). SpawnKey is the
+// SpawnWorkflowStepInput creates one dynamic step. SpawnKey is the
 // brokered tool call's idempotency fingerprint: replaying the same spawn
 // returns the existing step instead of creating a second one. The guards are
 // the runtime policy resolved from the workflow document.
@@ -296,13 +298,15 @@ type SpawnWorkflowStepResult struct {
 // WorkflowUsage is the aggregated consumption of one workflow: tasks that
 // carry its idempotency prefix plus their settled usage.
 type WorkflowUsage struct {
-	Tasks            int64
-	Tokens           int64
-	CostUSD          float64
-	PendingOverage   bool
-	BudgetMaxTasks   int64
-	BudgetMaxTokens  int64
-	BudgetMaxCostUSD float64
+	Tasks                 int64
+	Tokens                int64
+	CostMicroUSD          money.MicroUSD
+	ReservedTokens        int64
+	ReservedCostMicroUSD  money.MicroUSD
+	PendingOverage        bool
+	BudgetMaxTasks        int64
+	BudgetMaxTokens       int64
+	BudgetMaxCostMicroUSD money.MicroUSD
 }
 
 // Exhausted reports whether any declared ceiling is met or exceeded.
@@ -310,10 +314,10 @@ func (u WorkflowUsage) Exhausted() bool {
 	if u.BudgetMaxTasks > 0 && u.Tasks >= u.BudgetMaxTasks {
 		return true
 	}
-	if u.BudgetMaxTokens > 0 && u.Tokens >= u.BudgetMaxTokens {
+	if u.BudgetMaxTokens > 0 && u.Tokens+u.ReservedTokens >= u.BudgetMaxTokens {
 		return true
 	}
-	if u.BudgetMaxCostUSD > 0 && u.CostUSD >= u.BudgetMaxCostUSD {
+	if u.BudgetMaxCostMicroUSD > 0 && u.CostMicroUSD+u.ReservedCostMicroUSD >= u.BudgetMaxCostMicroUSD {
 		return true
 	}
 	return false
@@ -357,17 +361,17 @@ func DenialCode(err error) (string, bool) {
 	return "", false
 }
 
-// SpawnGuards carries the v1.3 dynamic-orchestration runtime limits the
+// SpawnGuards carries the dynamic-orchestration runtime limits the
 // spawning path enforces. Zero disables a guard.
 type SpawnGuards struct {
-	Enabled            bool
-	MaxDynamicSteps    int64
-	MaxChildrenPerStep int64
-	MaxSpawnDepth      int
-	MaxWorkflowSteps   int64
-	MaxSpawnTasks      int64
-	MaxSpawnTokens     int64
-	MaxSpawnCostUSD    float64
+	Enabled              bool
+	MaxDynamicSteps      int64
+	MaxChildrenPerStep   int64
+	MaxSpawnDepth        int
+	MaxWorkflowSteps     int64
+	MaxSpawnTasks        int64
+	MaxSpawnTokens       int64
+	MaxSpawnCostMicroUSD money.MicroUSD
 }
 
 // RuntimePolicy is the dynamic-orchestration policy the controller resolves
@@ -376,21 +380,21 @@ type RuntimePolicy struct {
 	SpawnGuards SpawnGuards
 }
 
-// DecodeWorkflowRuntimePolicy extracts the v1.3 runtime policy from a stored
+// DecodeWorkflowRuntimePolicy extracts the runtime policy from a stored
 // workflow document. Unknown documents yield the zero policy (dynamic spawn
 // disabled).
 func DecodeWorkflowRuntimePolicy(spec json.RawMessage) RuntimePolicy {
 	var document struct {
 		Runtime struct {
 			Dynamic struct {
-				Enabled            bool    `json:"enabled"`
-				MaxDynamicSteps    int64   `json:"maxDynamicSteps"`
-				MaxChildrenPerStep int64   `json:"maxChildrenPerStep"`
-				MaxSpawnDepth      int     `json:"maxSpawnDepth"`
-				MaxWorkflowSteps   int64   `json:"maxWorkflowSteps"`
-				MaxSpawnTasks      int64   `json:"maxSpawnTasks"`
-				MaxSpawnTokens     int64   `json:"maxSpawnTokens"`
-				MaxSpawnCostUSD    float64 `json:"maxSpawnCostUsd"`
+				Enabled              bool           `json:"enabled"`
+				MaxDynamicSteps      int64          `json:"maxDynamicSteps"`
+				MaxChildrenPerStep   int64          `json:"maxChildrenPerStep"`
+				MaxSpawnDepth        int            `json:"maxSpawnDepth"`
+				MaxWorkflowSteps     int64          `json:"maxWorkflowSteps"`
+				MaxSpawnTasks        int64          `json:"maxSpawnTasks"`
+				MaxSpawnTokens       int64          `json:"maxSpawnTokens"`
+				MaxSpawnCostMicroUSD money.MicroUSD `json:"maxSpawnCostUsd"`
 			} `json:"dynamic"`
 		} `json:"runtime"`
 	}
@@ -402,7 +406,7 @@ func DecodeWorkflowRuntimePolicy(spec json.RawMessage) RuntimePolicy {
 		Enabled: dynamic.Enabled, MaxDynamicSteps: dynamic.MaxDynamicSteps,
 		MaxChildrenPerStep: dynamic.MaxChildrenPerStep, MaxSpawnDepth: dynamic.MaxSpawnDepth,
 		MaxWorkflowSteps: dynamic.MaxWorkflowSteps, MaxSpawnTasks: dynamic.MaxSpawnTasks,
-		MaxSpawnTokens: dynamic.MaxSpawnTokens, MaxSpawnCostUSD: dynamic.MaxSpawnCostUSD,
+		MaxSpawnTokens: dynamic.MaxSpawnTokens, MaxSpawnCostMicroUSD: dynamic.MaxSpawnCostMicroUSD,
 	}}
 }
 
@@ -424,6 +428,7 @@ type WorkflowStore interface {
 	// tenant scoping is enforced).
 	ListActiveWorkflows(context.Context, int) ([]Workflow, error)
 	ListWorkflowSteps(context.Context, string, uuid.UUID) ([]WorkflowStep, error)
+	GetWorkflowStep(context.Context, string, uuid.UUID, string) (WorkflowStep, error)
 	TransitionWorkflow(context.Context, TransitionWorkflowInput) (Workflow, error)
 	TransitionWorkflowStep(context.Context, TransitionWorkflowStepInput) (WorkflowStep, error)
 	DecideWorkflowStepApproval(context.Context, DecideWorkflowStepApprovalInput) (WorkflowStep, error)
@@ -434,11 +439,11 @@ type WorkflowStore interface {
 	// artifact URI so the orchestrator can open task result documents.
 	ArtifactMetadata(context.Context, string, string) ([]byte, int64, string, error)
 	// ClaimWorkflows leases active workflows to one orchestrator instance
-	// (v1.3): expired claims are stolen, so a dead instance's workflows are
+	// Expired claims are stolen, so a dead instance's workflows are
 	// taken over by its peers. Tenants are claimed round-robin.
 	ClaimWorkflows(context.Context, ClaimWorkflowsInput) ([]Workflow, error)
 	// SpawnWorkflowStep creates one dynamic step with all recursion, fan-out
-	// and budget guards applied in the same transaction (v1.3). A spawn_key
+	// and budget guards applied in the same transaction. A spawn_key
 	// replay returns the existing step.
 	SpawnWorkflowStep(context.Context, SpawnWorkflowStepInput) (SpawnWorkflowStepResult, error)
 	// MarkWorkflowBudgetExhausted records the durable budget-stop intent.

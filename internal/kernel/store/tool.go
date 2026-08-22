@@ -103,6 +103,9 @@ func (d ToolDescriptor) Validate() error {
 	if err := ValidateToolName(d.Name); err != nil {
 		return err
 	}
+	if strings.HasPrefix(strings.ToLower(d.Name), "agentos.") {
+		return fmt.Errorf("tool namespace agentos.* is reserved for kernel system tools")
+	}
 	if !d.SideEffectRisk.Valid() {
 		return fmt.Errorf("side effect risk must be one of none, low, high")
 	}

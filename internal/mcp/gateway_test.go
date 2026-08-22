@@ -113,6 +113,45 @@ func TestAdapterRejectsUnknownToolAndMalformedParams(t *testing.T) {
 	}
 }
 
+func TestLatestDescriptorUsesSemanticVersionOrdering(t *testing.T) {
+	descriptors := []store.ToolDescriptor{
+		{Name: "versioned", Version: "1.9.0"},
+		{Name: "versioned", Version: "1.10.0"},
+		{Name: "versioned", Version: "2.0.0"},
+		{Name: "versioned", Version: "10.0.0"},
+	}
+	latest, ok := latestDescriptor(descriptors, "versioned")
+	if !ok || latest.Version != "10.0.0" {
+		t.Fatalf("latest = %+v, %v; want 10.0.0", latest, ok)
+	}
+}
+
+func TestToolAdapterResolvesConcurrentExecutionIdentity(t *testing.T) {
+	registry := NewExecutionRegistry()
+	first, second := testIdentity, testIdentity
+	first.AttemptID, second.AttemptID = uuid.New(), uuid.New()
+	first.TenantID, second.TenantID = "tenant-a", "tenant-b"
+	closeFirst, closeSecond := registry.Open(first), registry.Open(second)
+	defer closeFirst()
+	defer closeSecond()
+
+	invoker := &fakeInvoker{descriptors: []store.ToolDescriptor{{Name: "echo", Version: "1.0.0"}}}
+	adapter := NewToolAdapter(invoker, registry)
+	params := json.RawMessage(`{"name":"echo","arguments":{}}`)
+	for _, identity := range []AttemptContext{first, second} {
+		ctx := context.WithValue(context.Background(), executionContextKey{}, identity.AttemptID.String())
+		if _, rpcErr := adapter.CallTool(ctx, params); rpcErr != nil {
+			t.Fatalf("call for %s: %v", identity.AttemptID, rpcErr)
+		}
+		if invoker.input.AttemptID != identity.AttemptID || invoker.input.TenantID != identity.TenantID {
+			t.Fatalf("identity = %+v; want attempt=%s tenant=%s", invoker.input, identity.AttemptID, identity.TenantID)
+		}
+	}
+	if result, rpcErr := adapter.CallTool(context.Background(), params); rpcErr != nil || result.(map[string]any)["isError"] != true {
+		t.Fatalf("production header-less call did not fail closed: result=%+v err=%v", result, rpcErr)
+	}
+}
+
 type fakeInvoker struct {
 	descriptors []store.ToolDescriptor
 	input       tool.InvokeInput

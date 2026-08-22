@@ -21,14 +21,23 @@ var ErrNoExecutionContext = errors.New("no open execution window for the reporte
 // most recently opened window also serves header-less calls, preserving the
 // single-assignment runtime behavior.
 type ExecutionRegistry struct {
-	mu        sync.RWMutex
-	current   *AttemptContext
-	byAttempt map[uuid.UUID]AttemptContext
+	mu                       sync.RWMutex
+	allowHeaderlessExecution bool
+	current                  *AttemptContext
+	byAttempt                map[uuid.UUID]AttemptContext
 }
 
-// NewExecutionRegistry builds an empty registry.
+// NewExecutionRegistry builds a production registry. Header-less execution
+// lookup is disabled: every shared-endpoint request must report its execution
+// id and resolve through ResolveExecution.
 func NewExecutionRegistry() *ExecutionRegistry {
 	return &ExecutionRegistry{byAttempt: map[uuid.UUID]AttemptContext{}}
+}
+
+// NewDevelopmentExecutionRegistry explicitly enables the single-execution
+// convenience fallback. It must only be used by loopback development setups.
+func NewDevelopmentExecutionRegistry() *ExecutionRegistry {
+	return &ExecutionRegistry{allowHeaderlessExecution: true, byAttempt: map[uuid.UUID]AttemptContext{}}
 }
 
 // Open registers the fenced identity for one assignment and returns the
@@ -59,7 +68,7 @@ func (r *ExecutionRegistry) close(attemptID uuid.UUID) {
 func (r *ExecutionRegistry) Resolve(context.Context) (AttemptContext, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.current == nil {
+	if !r.allowHeaderlessExecution || r.current == nil {
 		return AttemptContext{}, ErrNoActiveWindow
 	}
 	return *r.current, nil
