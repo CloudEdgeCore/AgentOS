@@ -104,6 +104,7 @@ func main() {
 	}
 	options = append(options, controlapi.WithAuditStore(repository))
 	options = append(options, controlapi.WithTenantQuotaStore(repository))
+	options = append(options, controlapi.WithWorkflowStore(repository))
 	options = append(options, controlapi.WithReadiness(pool.Ping))
 	if strings.TrimSpace(*auditSigningKey) != "" {
 		decoded, err := agentpkg.DecodePrivateKey(*auditSigningKey)
