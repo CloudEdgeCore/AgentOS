@@ -92,7 +92,8 @@ agentos conformance -endpoint http://127.0.0.1:8088
 Run the Python unit suite with:
 
 ```bash
-python -m unittest discover -s sdk/python/tests -v
+cd sdk/python
+python -m unittest discover -s tests -v
 ```
 
 This SDK is an agent-side runtime component, not a trusted control-plane
