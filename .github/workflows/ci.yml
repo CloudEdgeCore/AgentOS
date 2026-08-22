@@ -15,7 +15,10 @@ concurrency:
 jobs:
   kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The integration leg includes the v1.1 recovery and v1.2 workflow
+    # acceptance suites. Each suite can legitimately run for more than Go's
+    # default 10-minute package timeout under the race detector.
+    timeout-minutes: 75
     services:
       postgres:
         # pgvector image: the v0.1 Memory slice (ADR-009) requires the vector
@@ -101,7 +104,7 @@ jobs:
         run: cargo +1.97.1 run --bin component-fixture --locked -- --out target/conformance/agent.wasm
 
       - name: PostgreSQL integration tests with race detector
-        run: go test -race -tags=integration -count=1 ./...
+        run: go test -race -tags=integration -count=1 -timeout 60m ./...
 
       - name: Build control-plane commands
         run: go build ./cmd/...
