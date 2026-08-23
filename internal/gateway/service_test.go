@@ -104,6 +104,33 @@ func TestListToolsScopedToTenant(t *testing.T) {
 	}
 }
 
+// P1-02: the gRPC listing collapses multi-version descriptors to exactly one
+// entry per tool name — the latest granted version, in stable name order — so
+// downstream model-facing consumers never see two same-named tools.
+func TestListToolsCollapsesDuplicateToolNames(t *testing.T) {
+	invoker := &fakeInvoker{descriptors: []store.ToolDescriptor{
+		{TenantID: "tenant-a", Name: "weather", Version: "1.10.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+		{TenantID: "tenant-a", Name: "weather", Version: "2.0.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+		{TenantID: "tenant-a", Name: "weather", Version: "1.0.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+		{TenantID: "tenant-a", Name: "fs.read", Version: "0.9.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+	}}
+	client := newTestClient(t, invoker)
+	response, err := client.ListTools(context.Background(), &gatewayv1.ListToolsRequest{TenantId: "tenant-a"})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	tools := response.GetTools()
+	if len(tools) != 2 {
+		t.Fatalf("tools = %d entries, want one per name (2): %+v", len(tools), tools)
+	}
+	if tools[0].GetName() != "fs.read" || tools[0].GetVersion() != "0.9.0" {
+		t.Fatalf("first entry = %s@%s, want fs.read@0.9.0 in name order", tools[0].GetName(), tools[0].GetVersion())
+	}
+	if tools[1].GetName() != "weather" || tools[1].GetVersion() != "2.0.0" {
+		t.Fatalf("second entry = %s@%s, want the latest weather@2.0.0", tools[1].GetName(), tools[1].GetVersion())
+	}
+}
+
 var attemptID = uuid.MustParse("33333333-3333-3333-3333-333333333333")
 
 func invokeRequest(t *testing.T, approvalID string) *gatewayv1.InvokeToolRequest {

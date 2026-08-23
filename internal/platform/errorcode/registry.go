@@ -66,3 +66,64 @@ func All() []string {
 	sort.Strings(codes)
 	return codes
 }
+
+// Class is the public disposition of an error code (P3-04): it tells every
+// SDK, agent and operator what to do next without inspecting message text.
+// The stable code strings never change; the class is metadata carried
+// alongside them.
+type Class string
+
+const (
+	// Retryable: the same request may succeed after a bounded backoff
+	// (transient infrastructure state).
+	Retryable Class = "retryable"
+	// Terminal: retrying the identical request can never succeed.
+	Terminal Class = "terminal"
+	// UserActionRequired: only the caller (tenant/publisher) can change the
+	// outcome — by fixing the request, credentials, grants or budgets.
+	UserActionRequired Class = "user-action-required"
+	// OperatorActionRequired: only a platform operator can change the
+	// outcome (infrastructure or internal failure).
+	OperatorActionRequired Class = "operator-action-required"
+)
+
+var dispositions = map[string]Class{
+	Internal:                   OperatorActionRequired,
+	InvalidTask:                UserActionRequired,
+	InvalidWorkflow:            UserActionRequired,
+	ResourceVersionConflict:    Retryable,
+	IdempotencyConflict:        UserActionRequired,
+	AuthenticationRequired:     UserActionRequired,
+	PolicyDenied:               UserActionRequired,
+	TenantQuotaExceeded:        UserActionRequired,
+	BudgetExhausted:            UserActionRequired,
+	WallTimeExceeded:           Terminal,
+	ProviderUnavailable:        Retryable,
+	ProviderRejected:           Terminal,
+	ProviderStreamAborted:      Terminal,
+	ToolInvocationFailed:       Terminal,
+	OutputContractViolation:    UserActionRequired,
+	WorkflowDeadlineExceeded:   Terminal,
+	WorkflowBudgetExhausted:    UserActionRequired,
+	SpawnDisabled:              UserActionRequired,
+	SpawnCancelled:             Terminal,
+	SpawnDeadlineExceeded:      Terminal,
+	SpawnBudgetExhausted:       UserActionRequired,
+	SpawnDepthExceeded:         UserActionRequired,
+	SpawnFanoutExceeded:        UserActionRequired,
+	SpawnDynamicExceeded:       UserActionRequired,
+	SpawnTotalStepsExceeded:    UserActionRequired,
+	SpawnTaskLimitExceeded:     UserActionRequired,
+	SpawnTokenLimitExceeded:    UserActionRequired,
+	SpawnCostLimitExceeded:     UserActionRequired,
+	SpawnNameConflict:          UserActionRequired,
+	SpawnReconciliationPending: Retryable,
+}
+
+// ClassOf returns the public disposition of one error code. Every known code
+// has exactly one class; an unknown code reports not-ok so callers fail
+// closed instead of guessing a retry policy for an unrecognized string.
+func ClassOf(code string) (Class, bool) {
+	class, ok := dispositions[code]
+	return class, ok
+}

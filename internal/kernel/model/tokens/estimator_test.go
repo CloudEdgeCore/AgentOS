@@ -87,3 +87,33 @@ func TestForNameResolvesAndRejects(t *testing.T) {
 		t.Fatal("unknown tokenizer accepted, want rejection")
 	}
 }
+
+// P1-05: the tokenizer plug-in seam — a deployment registers an exact
+// per-provider tokenizer under a config-selectable name; built-in names are
+// reserved and duplicates are rejected so link order can never swap an
+// estimator silently.
+func TestRegisterInstallsPluginTokenizer(t *testing.T) {
+	exact := func(text string) int64 { return int64(len([]rune(text))) }
+	if err := Register("test-exact-plugin", exact); err != nil {
+		t.Fatalf("register plugin tokenizer: %v", err)
+	}
+	resolved, err := ForName("test-exact-plugin")
+	if err != nil {
+		t.Fatalf("resolve registered tokenizer: %v", err)
+	}
+	if resolved("abc中") != 4 {
+		t.Fatalf("registered tokenizer not returned verbatim: %d", resolved("abc中"))
+	}
+	if err := Register("test-exact-plugin", exact); err == nil {
+		t.Fatal("duplicate registration accepted")
+	}
+	if err := Register("heuristic", exact); err == nil {
+		t.Fatal("built-in name override accepted")
+	}
+	if err := Register("", exact); err == nil {
+		t.Fatal("empty name accepted")
+	}
+	if err := Register("nil-estimator", nil); err == nil {
+		t.Fatal("nil estimator accepted")
+	}
+}

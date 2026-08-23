@@ -147,7 +147,8 @@ func (w *Worker) resolveRuntime(agentVersionRef string, target agentversion.Runt
 		return w.runtime, nil
 	}
 	if binding, ok := w.bindings.ResolveBinding(agentVersionRef); ok {
-		return w.clientFor(binding, w.bindings.tlsConfigFor(agentVersionRef))
+		tlsConfig, identity := w.bindings.transportFor(agentVersionRef)
+		return w.clientFor(binding, tlsConfig, identity)
 	}
 	entrypoint := target.Entrypoint[0]
 	if IsLogicalEntrypoint(entrypoint) {
@@ -159,7 +160,7 @@ func (w *Worker) resolveRuntime(agentVersionRef string, target agentversion.Runt
 			agentVersionRef, entrypoint, err)
 	}
 	if parsed, err := url.Parse(entrypoint); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
-		return w.clientFor(RuntimeBinding{Endpoint: strings.TrimRight(entrypoint, "/")}, nil)
+		return w.clientFor(RuntimeBinding{Endpoint: strings.TrimRight(entrypoint, "/")}, nil, "")
 	}
 	return nil, fmt.Errorf("agent version %s entrypoint %q is neither bindable nor an absolute http(s) URL",
 		agentVersionRef, entrypoint)
@@ -176,12 +177,18 @@ func (w *Worker) endpointPolicy() EndpointPolicy {
 
 // clientFor builds (and caches) the Runtime Interface client of one
 // endpoint. A binding with TLS material gets a dedicated transport with the
-// pinned server name, private trust bundle and client certificate.
-func (w *Worker) clientFor(binding RuntimeBinding, tlsConfig *tls.Config) (*agent.Client, error) {
+// pinned server name, private trust bundle and client certificate. The
+// cache key carries the TLS material fingerprint (P1-03): two bindings that
+// share an endpoint and SNI but present different certificates are
+// different identities and never reuse one cached client.
+func (w *Worker) clientFor(binding RuntimeBinding, tlsConfig *tls.Config, identity string) (*agent.Client, error) {
 	endpoint := strings.TrimRight(binding.Endpoint, "/")
 	key := endpoint
 	if binding.TLSServerName != "" {
 		key += "|sni=" + binding.TLSServerName
+	}
+	if identity != "" {
+		key += "|tls=" + identity
 	}
 	if client, ok := w.clients[key]; ok {
 		return client, nil

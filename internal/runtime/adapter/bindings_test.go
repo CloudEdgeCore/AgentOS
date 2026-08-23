@@ -245,6 +245,53 @@ func TestWorkerFallsBackToPollingOnV1OnlyRuntime(t *testing.T) {
 	}
 }
 
+// P1-03: the worker's HTTP client cache keys include the TLS material
+// fingerprint. Two bindings that share an endpoint and SNI but present
+// different client certificates are different identities and must never
+// share a cached client; identical material reuses its own entry.
+func TestWorkerClientCacheSeparatesCertificateIdentities(t *testing.T) {
+	worker, err := NewWorker(&fakeControl{}, &memoryArtifacts{content: map[string][]byte{}},
+		"", "tenant-a", "adapter-1", time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caA, certA, keyA := writeTestCertMaterial(t)
+	_, certB, keyB := writeTestCertMaterial(t)
+	configA, identityA, err := (&BindingTLS{CAFile: caA, CertFile: certA, KeyFile: keyA}).load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configB, identityB, err := (&BindingTLS{CAFile: caA, CertFile: certB, KeyFile: keyB}).load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identityA == "" || identityA == identityB {
+		t.Fatalf("certificate identities collapsed: %q vs %q", identityA, identityB)
+	}
+	binding := RuntimeBinding{Endpoint: "https://runtime.internal:8443", TLSServerName: "runtime.internal"}
+	clientA, err := worker.clientFor(binding, configA, identityA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientB, err := worker.clientFor(binding, configB, identityB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientA == clientB {
+		t.Fatal("bindings sharing endpoint/SNI but not certificates reused one cached client")
+	}
+	reused, err := worker.clientFor(binding, configA, identityA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused != clientA {
+		t.Fatal("identical TLS material did not reuse its cached client")
+	}
+	if len(worker.clients) != 2 {
+		t.Fatalf("client cache holds %d entries, want 2", len(worker.clients))
+	}
+}
+
 func writeJSONResponse(writer http.ResponseWriter, status int, body any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
@@ -286,9 +333,53 @@ func TestLoadRuntimeBindingsRejectsRemotePlaintextUnlessAcknowledged(t *testing.
 	if _, err := LoadRuntimeBindings(loopback); err != nil {
 		t.Fatalf("loopback plaintext endpoint rejected under production policy: %v", err)
 	}
-	remoteTLS := writeBindingsFile(t, `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://runtime.internal:8443"}]}`)
+	// A production remote HTTPS binding carries its client identity (P1-04),
+	// so this fixture presents full mutual-TLS material.
+	caFile, certFile, keyFile := writeTestCertMaterial(t)
+	remoteTLS := writeBindingsFile(t, fmt.Sprintf(`{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://runtime.internal:8443",
+		"tls":{"caFile":"%s","certFile":"%s","keyFile":"%s"}}]}`,
+		filepath.ToSlash(caFile), filepath.ToSlash(certFile), filepath.ToSlash(keyFile)))
 	if _, err := LoadRuntimeBindings(remoteTLS); err != nil {
-		t.Fatalf("remote HTTPS endpoint rejected: %v", err)
+		t.Fatalf("remote HTTPS endpoint with client identity rejected: %v", err)
+	}
+}
+
+// P1-04: a production remote runtime binding must present a mutual-TLS
+// client certificate — server verification alone does not identify the
+// caller. Loopback endpoints and deployments that explicitly acknowledged
+// the development policy are exempt.
+func TestLoadRuntimeBindingsRequiresClientIdentityOnRemoteProduction(t *testing.T) {
+	caFile, certFile, keyFile := writeTestCertMaterial(t)
+	material := func(withCert bool) string {
+		if !withCert {
+			return `"tls":{"caFile":"` + filepath.ToSlash(caFile) + `"}`
+		}
+		return `"tls":{"caFile":"` + filepath.ToSlash(caFile) + `","certFile":"` + filepath.ToSlash(certFile) + `","keyFile":"` + filepath.ToSlash(keyFile) + `"}`
+	}
+	binding := func(tlsSection string) string {
+		separator := ""
+		if tlsSection != "" {
+			separator = ","
+		}
+		return writeBindingsFile(t, `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://runtime.internal:8443"`+separator+tlsSection+`}]}`)
+	}
+	if _, err := LoadRuntimeBindings(binding(``)); err == nil {
+		t.Fatal("remote production binding without any TLS section accepted")
+	}
+	if _, err := LoadRuntimeBindings(binding(material(false))); err == nil {
+		t.Fatal("remote production binding with server-only verification accepted")
+	}
+	if _, err := LoadRuntimeBindings(binding(material(true))); err != nil {
+		t.Fatalf("remote production binding with client identity rejected: %v", err)
+	}
+	// The explicit development acknowledgment exempts remote endpoints.
+	if _, err := LoadRuntimeBindingsFor(binding(``), EndpointPolicy{AllowPlaintextRemote: true}); err != nil {
+		t.Fatalf("development policy rejected a remote binding without client identity: %v", err)
+	}
+	// Loopback HTTPS never requires a client identity.
+	loopback := writeBindingsFile(t, `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://127.0.0.1:8443"}]}`)
+	if _, err := LoadRuntimeBindings(loopback); err != nil {
+		t.Fatalf("loopback HTTPS binding rejected: %v", err)
 	}
 }
 
@@ -296,13 +387,13 @@ func TestLoadRuntimeBindingsRejectsRemotePlaintextUnlessAcknowledged(t *testing.
 func TestLoadRuntimeBindingsValidatesDeploymentMetadata(t *testing.T) {
 	long := strings.Repeat("x", 257)
 	cases := map[string]string{
-		"oversized region":  `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","region":"` + long + `"}]}`,
-		"weight over bound": `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","weight":1001}]}`,
-		"negative weight":   `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","weight":-1}]}`,
+		"oversized region":   `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","region":"` + long + `"}]}`,
+		"weight over bound":  `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","weight":1001}]}`,
+		"negative weight":    `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","weight":-1}]}`,
 		"server name no tls": `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tlsServerName":"r.internal"}]}`,
-		"cert without key":  `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tls":{"certFile":"c.pem"}}]}`,
-		"empty tls section": `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tls":{}}]}`,
-		"missing ca file":   `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tls":{"caFile":"no-such-file.pem"}}]}`,
+		"cert without key":   `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tls":{"certFile":"c.pem"}}]}`,
+		"empty tls section":  `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tls":{}}]}`,
+		"missing ca file":    `{"bindings":[{"agentVersionRef":"a@1","endpoint":"https://r.internal","tls":{"caFile":"no-such-file.pem"}}]}`,
 	}
 	for name, content := range cases {
 		path := writeBindingsFile(t, content)
@@ -381,7 +472,7 @@ func TestLoadRuntimeBindingsLoadsTLSMaterial(t *testing.T) {
 		"endpoint": "https://runtime.internal:8443",
 		"tlsServerName": "runtime.internal",
 		"runtimePool": "pool-a", "runtimeClass": "remote", "region": "eu-1", "weight": 100,
-		"tls": {"caFile": "` + filepath.ToSlash(caFile) + `", "certFile": "` + filepath.ToSlash(certFile) + `", "keyFile": "` + filepath.ToSlash(keyFile) + `"}
+		"tls": {"caFile": "`+filepath.ToSlash(caFile)+`", "certFile": "`+filepath.ToSlash(certFile)+`", "keyFile": "`+filepath.ToSlash(keyFile)+`"}
 	}]}`)
 	bindings, err := LoadRuntimeBindings(path)
 	if err != nil {

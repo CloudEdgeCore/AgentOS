@@ -15,8 +15,10 @@
 package adapter
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -103,10 +105,15 @@ type BindingTLS struct {
 	KeyFile  string `json:"keyFile,omitempty"`
 }
 
-// resolved closes over the load-time state of one binding.
+// resolved closes over the load-time state of one binding. identity is the
+// stable fingerprint of the binding's TLS material (trust bundle plus client
+// certificate): two bindings that share an endpoint and SNI but present
+// different certificates are different transports and must never share a
+// cached HTTP client (P1-03).
 type resolvedBinding struct {
 	RuntimeBinding
 	tlsConfig *tls.Config
+	identity  string
 }
 
 type bindingFile struct {
@@ -122,9 +129,12 @@ type RuntimeBindings struct {
 
 // LoadRuntimeBindings reads a binding file with the production endpoint
 // policy. An empty path yields nil (no bindings configured). Endpoints must
-// be absolute http(s) URLs (remote endpoints require HTTPS) and references
-// must be name@version or name@* shapes; duplicate references are rejected
-// instead of silently overriding each other.
+// be absolute http(s) URLs (remote endpoints require HTTPS), references
+// must be name@version or name@* shapes, and duplicate references are
+// rejected instead of silently overriding each other. Under the production
+// policy a remote endpoint must also carry a mutual-TLS client certificate
+// identity (P1-04); loopback endpoints and deployments that load with the
+// explicitly acknowledged development policy are exempt.
 func LoadRuntimeBindings(path string) (*RuntimeBindings, error) {
 	return LoadRuntimeBindingsFor(path, EndpointPolicy{})
 }
@@ -159,11 +169,14 @@ func LoadRuntimeBindingsFor(path string, policy EndpointPolicy) (*RuntimeBinding
 		if err := binding.validateMetadata(); err != nil {
 			return nil, fmt.Errorf("runtime binding %q: %w", binding.AgentVersionRef, err)
 		}
-		tlsConfig, err := binding.TLS.load()
+		tlsConfig, identity, err := binding.TLS.load()
 		if err != nil {
 			return nil, fmt.Errorf("runtime binding %q: %w", binding.AgentVersionRef, err)
 		}
-		resolved := resolvedBinding{RuntimeBinding: binding, tlsConfig: tlsConfig}
+		if err := policy.validateTransportIdentity(binding); err != nil {
+			return nil, fmt.Errorf("runtime binding %q: %w", binding.AgentVersionRef, err)
+		}
+		resolved := resolvedBinding{RuntimeBinding: binding, tlsConfig: tlsConfig, identity: identity}
 		resolved.Endpoint = strings.TrimRight(binding.Endpoint, "/")
 		if version == "*" {
 			if previous, duplicate := seenWildcard[name]; duplicate {
@@ -212,33 +225,67 @@ func (b RuntimeBinding) validateMetadata() error {
 	return nil
 }
 
-// load reads the binding's certificate material into a TLS configuration.
-func (t *BindingTLS) load() (*tls.Config, error) {
+// validateTransportIdentity enforces the P1-04 workload-identity boundary:
+// a production remote runtime binding must present a mutual-TLS client
+// certificate. Loopback endpoints (co-located runtimes) and deployments
+// that explicitly acknowledged the development policy are exempt. Server
+// verification alone (a CA bundle) does not identify the caller; without a
+// client certificate any process that can reach the endpoint can impersonate
+// the runtime instance.
+func (p EndpointPolicy) validateTransportIdentity(binding RuntimeBinding) error {
+	if p.AllowPlaintextRemote {
+		return nil
+	}
+	parsed, err := url.Parse(strings.TrimRight(binding.Endpoint, "/"))
+	if err != nil || parsed.Scheme != "https" {
+		// Plaintext handling is Validate's job; nothing to add here.
+		return nil
+	}
+	if IsLoopbackHost(parsed.Hostname()) {
+		return nil
+	}
+	if binding.TLS == nil || binding.TLS.CertFile == "" {
+		return fmt.Errorf("remote production runtime endpoints require a client certificate identity (tls.certFile/keyFile); loopback endpoints and explicitly acknowledged development policies are exempt")
+	}
+	return nil
+}
+
+// load reads the binding's certificate material into a TLS configuration
+// and derives the stable identity fingerprint of that material: the trust
+// bundle bytes plus every client-certificate DER, hashed. Rotating either
+// side changes the fingerprint, which is what keeps the worker's HTTP
+// client cache from reusing one identity's transport for another.
+func (t *BindingTLS) load() (*tls.Config, string, error) {
 	if t == nil {
-		return nil, nil
+		return nil, "", nil
 	}
 	config := &tls.Config{MinVersion: tls.VersionTLS12}
+	identity := sha256.New()
 	if t.CAFile != "" {
 		bundle, err := os.ReadFile(t.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("read TLS trust bundle: %w", err)
+			return nil, "", fmt.Errorf("read TLS trust bundle: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(bundle) {
-			return nil, fmt.Errorf("TLS trust bundle %s contains no PEM certificates", t.CAFile)
+			return nil, "", fmt.Errorf("TLS trust bundle %s contains no PEM certificates", t.CAFile)
 		}
 		config.RootCAs = pool
+		_, _ = identity.Write(bundle)
 	}
 	if t.CertFile != "" && t.KeyFile != "" {
 		certificate, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
 		if err != nil {
-			return nil, fmt.Errorf("load TLS client certificate: %w", err)
+			return nil, "", fmt.Errorf("load TLS client certificate: %w", err)
+		}
+		for _, der := range certificate.Certificate {
+			_, _ = identity.Write(der)
 		}
 		config.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return &certificate, nil
 		}
 	}
-	return config, nil
+	return config, hex.EncodeToString(identity.Sum(nil)), nil
 }
 
 // Resolve returns the bound endpoint for one agent version reference: an
@@ -273,20 +320,31 @@ func (b *RuntimeBindings) ResolveBinding(agentVersionRef string) (RuntimeBinding
 // tlsConfigFor returns the load-time TLS configuration of the binding that
 // covers the reference (nil when the endpoint uses ambient TLS).
 func (b *RuntimeBindings) tlsConfigFor(agentVersionRef string) *tls.Config {
+	config, _ := b.transportFor(agentVersionRef)
+	return config
+}
+
+// transportFor returns the TLS configuration and its material fingerprint
+// for the binding that covers the reference. The fingerprint joins the
+// worker's HTTP client cache key so bindings that share an endpoint and SNI
+// but carry different certificates (or one certificate at different
+// rotation states) resolve to distinct clients instead of silently reusing
+// the wrong identity (P1-03).
+func (b *RuntimeBindings) transportFor(agentVersionRef string) (*tls.Config, string) {
 	if b == nil {
-		return nil
+		return nil, ""
 	}
 	if binding, ok := b.exact[agentVersionRef]; ok {
-		return binding.tlsConfig
+		return binding.tlsConfig, binding.identity
 	}
 	name, _, err := parseVersionRef(agentVersionRef)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	if binding, ok := b.wildcard[name]; ok {
-		return binding.tlsConfig
+		return binding.tlsConfig, binding.identity
 	}
-	return nil
+	return nil, ""
 }
 
 // ValidateEndpointOverride guards the explicit worker endpoint against

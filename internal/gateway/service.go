@@ -73,10 +73,17 @@ func (s *Service) ListTools(ctx context.Context, request *gatewayv1.ListToolsReq
 		}
 	}
 	response := &gatewayv1.ListToolsResponse{Tools: make([]*gatewayv1.ToolDescriptor, 0, len(descriptors))}
+	visible := make([]store.ToolDescriptor, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		if s.capabilities != nil && !freeze.Allow(descriptor.Name, descriptor.Version, descriptor.CreatedAt) {
 			continue
 		}
+		visible = append(visible, descriptor)
+	}
+	// P1-02: one entry per tool name — the latest granted version — so the
+	// model never sees two same-named tools and a bare-name invocation
+	// resolves to exactly what the listing advertised.
+	for _, descriptor := range tool.LatestVersionPerName(visible) {
 		response.Tools = append(response.Tools, &gatewayv1.ToolDescriptor{
 			Name: descriptor.Name, Version: descriptor.Version,
 			SideEffectRisk: string(descriptor.SideEffectRisk),

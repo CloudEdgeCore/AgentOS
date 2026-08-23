@@ -248,9 +248,11 @@ func TestToolServiceFreezesToolVersionsAtPublish(t *testing.T) {
 		t.Fatalf("bare grant invoke unversioned: %v, want PermissionDenied", err)
 	}
 
-	// Floating "name@*" grant: the newer version drifts in by design.
-	if seen := visible("weather@*"); !seen["1.0.0"] || !seen["2.0.0"] {
-		t.Fatalf("floating grant visibility = %v, want both versions", seen)
+	// Floating "name@*" grant: the newer version drifts in by design, and
+	// the listing still shows exactly one entry per name (P1-02) — the
+	// latest granted version, which is what a bare-name call resolves to.
+	if seen := visible("weather@*"); !seen["2.0.0"] || seen["1.0.0"] {
+		t.Fatalf("floating grant visibility = %v, want only the resolved latest 2.0.0", seen)
 	}
 	if err := invoke("weather@*", "2.0.0"); err != nil {
 		t.Fatalf("floating grant invoke 2.0.0: %v", err)

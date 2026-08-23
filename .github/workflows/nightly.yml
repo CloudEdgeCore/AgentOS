@@ -70,7 +70,10 @@ jobs:
           go test -run '^$' -fuzz '^FuzzConsumeOpenAIStream$' -fuzztime 60s ./internal/kernel/model/provider
 
       - name: Run mandatory live-model acceptance
-        run: go test -tags=integration -count=1 -run '^TestV11RealModel' -v ./e2e/single-agent/
+        # P0-02: the pattern must match both the v1.1 real-model suite and
+        # TestRealModelToolCalling (which has no V11 prefix), so the nightly
+        # log proves the real model→tool→model closed loop ran.
+        run: go test -tags=integration -count=1 -run '^(TestV11RealModel|TestRealModelToolCalling)' -v ./e2e/single-agent/
 
   firecracker-kvm:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'

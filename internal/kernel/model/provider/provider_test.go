@@ -620,4 +620,68 @@ func TestEncodeInvocationHonorsCapabilityProfile(t *testing.T) {
 	}
 }
 
+// P0-01: tool declarations must cross the wire in the OpenAI-compatible
+// function-tool shape — {"type":"function","function":{name,description,
+// parameters}} — because strict providers (vLLM, Qwen, DeepSeek, GLM, OpenAI)
+// reject or ignore a bare flat object in "tools". The internal
+// ToolDefinition stays flat; the conversion happens only here.
+func TestEncodeInvocationUsesFunctionToolWireFormat(t *testing.T) {
+	body, err := encodeInvocation(Invocation{
+		ModelName: "m",
+		Tools: []ToolDefinition{{
+			Name:        "weather.lookup",
+			Description: "look up weather",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var document struct {
+		Tools []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if len(document.Tools) != 1 {
+		t.Fatalf("tools = %d entries, want exactly one", len(document.Tools))
+	}
+	tool := document.Tools[0]
+	if tool.Type != "function" {
+		t.Fatalf("tool type = %q, want \"function\"", tool.Type)
+	}
+	if tool.Function.Name != "weather.lookup" || tool.Function.Description != "look up weather" {
+		t.Fatalf("function envelope lost name/description: %+v", tool.Function)
+	}
+	if !strings.Contains(string(tool.Function.Parameters), `"city"`) {
+		t.Fatalf("parameters schema not carried verbatim: %s", tool.Function.Parameters)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	encodedTool := raw["tools"]
+	var toolsArray []map[string]json.RawMessage
+	if err := json.Unmarshal(encodedTool, &toolsArray); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"type", "function"} {
+		if _, ok := toolsArray[0][key]; !ok {
+			t.Fatalf("wire tool missing %q field; strict OpenAI-compatible providers would reject: %s", key, encodedTool)
+		}
+	}
+	for _, forbidden := range []string{"name", "description", "parameters"} {
+		if _, ok := toolsArray[0][forbidden]; ok {
+			t.Fatalf("flat field %q leaked to the top level of the wire tool: %s", forbidden, encodedTool)
+		}
+	}
+}
+
 var _ atomic.Int64
