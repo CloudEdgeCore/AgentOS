@@ -37,6 +37,10 @@ jobs:
       AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
       AGENTOS_REAL_MODEL_URL: ${{ vars.AGENTOS_REAL_MODEL_URL }}
       AGENTOS_REAL_MODEL_NAME: ${{ vars.AGENTOS_REAL_MODEL_NAME }}
+      # Optional bearer token for keyed endpoints (vLLM behind an API gateway);
+      # unset/empty means a keyless endpoint. Held only in the fenced provider
+      # config; credential isolation is asserted by TestRealModelToolCalling.
+      AGENTOS_REAL_MODEL_KEY: ${{ secrets.AGENTOS_REAL_MODEL_KEY }}
       AGENTOS_CAPACITY_TASKS: "100000"
       AGENTOS_V13_SCALE_TEST: "1"
     steps:
