@@ -4,6 +4,7 @@ package postgres_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	kernelmoney "github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	kernelworkflow "github.com/CloudEdgeCore/AgentOS/internal/kernel/workflow"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -345,4 +347,132 @@ func TestV13RejectedTaskReleasesStepReservation(t *testing.T) {
 		t.Fatalf("after rejection step_reserved_tokens = %d, want 0", tokens)
 	}
 	assertReservationReconciles(t, ctx, pool, workflow.TenantID, workflow.ID)
+}
+
+// TestV13ReconcileBackfillsUnderivedStepReservationsAfterUpgrade closes the
+// P1-05 loop: it reconstructs the exact state the 000028 upgrade left behind —
+// a workflow with a thousand undispatched steps whose task-count slots were
+// restored but whose token/cost reservations were zeroed, because those
+// ceilings live inside the merged task spec and pure SQL cannot decode and
+// merge them. The controller's reconcile pass must re-derive every step's
+// reservation through the same default/overlay merge the dispatcher uses,
+// resync the ledger, and clear the flag, so that afterwards the reservation
+// invariant holds at the true nonzero total: ledger commitment = sum(step
+// commitment). While the flag is set, dynamic spawning stays paused fail-safe.
+func TestV13ReconcileBackfillsUnderivedStepReservationsAfterUpgrade(t *testing.T) {
+	clock := newFakeClock()
+	pool, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+
+	// A thousand declared steps inherit their token/cost ceiling from the
+	// workflow defaultTaskSpec through the shallow merge. The budget is absent
+	// from every per-step overlay, so it exists only in the merged spec — the
+	// reservation 000028 could not reconstruct without the Go merge path.
+	const steps = 1000
+	doc := kernelworkflow.WorkflowSpec{
+		DefaultTaskSpec: json.RawMessage(`{"budget":{"tokens":100,"costUsd":1}}`),
+		Steps:           make([]kernelworkflow.StepSpec, steps),
+	}
+	for index := range doc.Steps {
+		doc.Steps[index] = kernelworkflow.StepSpec{
+			Name: fmt.Sprintf("step-%04d", index), AgentVersionRef: "worker@1",
+			Goal: "declared", Spec: json.RawMessage(`{}`),
+		}
+	}
+	specJSON, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal workflow spec: %v", err)
+	}
+	stepInputs := doc.StepInputs()
+	if len(stepInputs) != steps {
+		t.Fatalf("StepInputs derived %d steps, want %d", len(stepInputs), steps)
+	}
+
+	workflow := createV13Workflow(t, ctx, repository, "tenant-recon", "reservation-backfill", func(in *kernelstore.CreateWorkflowInput) {
+		in.Spec = specJSON
+		in.Steps = stepInputs
+	})
+
+	// The derivation is byte-identical to reconcile's, so creation already
+	// reserves the true totals; this anchors the expected nonzero result.
+	const wantTokens = int64(steps) * 100
+	const wantCost = int64(steps) * 1_000_000
+	if _, tokens, cost := workflowReservation(t, ctx, pool, workflow.TenantID, workflow.ID); tokens != wantTokens || cost != wantCost {
+		t.Fatalf("post-create ledger = (%d tokens, %d cost), want (%d, %d)", tokens, cost, wantTokens, wantCost)
+	}
+	assertReservationReconciles(t, ctx, pool, workflow.TenantID, workflow.ID)
+
+	// Reproduce the 000028 upgrade state: task-count slots survived, but the
+	// token/cost reservations were left at zero on both the steps and the
+	// ledger aggregate, and the workflow is flagged for reconciliation.
+	if _, err := pool.Exec(ctx, `UPDATE workflow_steps SET reserved_tokens = 0, reserved_cost_micro_usd = 0
+		WHERE tenant_id = $1 AND workflow_id = $2 AND status IN ('PENDING','WAITING_APPROVAL')`,
+		workflow.TenantID, workflow.ID); err != nil {
+		t.Fatalf("simulate 000028 step zeroing: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflow_usage_ledgers SET step_reserved_tokens = 0, step_reserved_cost_micro_usd = 0
+		WHERE tenant_id = $1 AND workflow_id = $2`, workflow.TenantID, workflow.ID); err != nil {
+		t.Fatalf("simulate 000028 ledger zeroing: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workflows SET needs_budget_reconciliation = true
+		WHERE tenant_id = $1 AND id = $2`, workflow.TenantID, workflow.ID); err != nil {
+		t.Fatalf("flag workflow for reconciliation: %v", err)
+	}
+
+	spawn := func(name string, version int64) error {
+		_, err := repository.SpawnWorkflowStep(ctx, kernelstore.SpawnWorkflowStepInput{
+			WorkflowID: workflow.ID, TenantID: workflow.TenantID, WorkflowVersion: version,
+			ParentStepName: "step-0000", Name: name, Goal: "dynamic child", AgentVersionRef: "worker@1",
+			Spec:           json.RawMessage(`{"budget":{"tokens":100}}`),
+			Guards:         kernelstore.SpawnGuards{Enabled: true, MaxDynamicSteps: 10, MaxChildrenPerStep: 10, MaxSpawnDepth: 2, MaxWorkflowSteps: steps + 10},
+			IdempotencyKey: name, Arguments: json.RawMessage(`{}`),
+		})
+		return err
+	}
+
+	// While flagged, a genuinely new dynamic spawn is refused fail-safe rather
+	// than admitted against an understated commitment. The raw flag update did
+	// not bump resource_version, so the creation version still matches and the
+	// denial is the reconciliation guard, not a version conflict.
+	if err := spawn("blocked", workflow.ResourceVersion); !errors.Is(err, kernelstore.ErrSpawnDenied) {
+		t.Fatalf("spawn while reconciling = %v, want ErrSpawnDenied", err)
+	} else if code, _ := kernelstore.DenialCode(err); code != "SPAWN_RECONCILIATION_PENDING" {
+		t.Fatalf("spawn denial code = %q, want SPAWN_RECONCILIATION_PENDING", code)
+	}
+
+	report, err := repository.ReconcileWorkflowReservations(ctx, true)
+	if err != nil {
+		t.Fatalf("reconcile workflow reservations: %v", err)
+	}
+	if report.Flagged != 1 || report.Reconciled != 1 || report.StepsAdjusted != steps {
+		t.Fatalf("reconcile report = %+v, want 1 flagged / 1 reconciled / %d steps adjusted", report, steps)
+	}
+
+	// Acceptance: ledger commitment equals the sum of the per-step reservations,
+	// and it is the true derived total rather than the backfilled zero.
+	tasks, tokens, cost := workflowReservation(t, ctx, pool, workflow.TenantID, workflow.ID)
+	if tasks != int64(steps) || tokens != wantTokens || cost != wantCost {
+		t.Fatalf("post-reconcile ledger = (%d tasks, %d tokens, %d cost), want (%d, %d, %d)",
+			tasks, tokens, cost, steps, wantTokens, wantCost)
+	}
+	assertReservationReconciles(t, ctx, pool, workflow.TenantID, workflow.ID)
+
+	// The flag is cleared, so dynamic spawning resumes. Reconcile bumped the
+	// workflow's resource_version, so the resumed spawn reads the fresh one.
+	reloaded, err := repository.GetWorkflow(ctx, workflow.TenantID, workflow.ID)
+	if err != nil {
+		t.Fatalf("reload workflow: %v", err)
+	}
+	if reloaded.NeedsBudgetReconciliation {
+		t.Fatalf("needs_budget_reconciliation still set after reconcile")
+	}
+	if err := spawn("unblocked", reloaded.ResourceVersion); err != nil {
+		t.Fatalf("spawn after reconcile: %v", err)
+	}
+	assertReservationReconciles(t, ctx, pool, workflow.TenantID, workflow.ID)
+
+	// A second pass is a no-op: nothing remains flagged and no step is touched.
+	if report, err := repository.ReconcileWorkflowReservations(ctx, true); err != nil || report.Flagged != 0 || report.Reconciled != 0 {
+		t.Fatalf("idempotent reconcile = %+v err=%v, want zero flagged and reconciled", report, err)
+	}
 }

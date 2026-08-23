@@ -142,6 +142,17 @@ func (f *fakeInvoker) ListTools(context.Context, string) ([]store.ToolDescriptor
 	return f.descriptors, nil
 }
 
+func (f *fakeInvoker) GetToolDescriptor(_ context.Context, _, name, version string) (store.ToolDescriptor, error) {
+	for _, descriptor := range f.descriptors {
+		if descriptor.Name == name && (version == "" || descriptor.Version == version) {
+			return descriptor, nil
+		}
+	}
+	// A descriptor the test did not stage still resolves so the freeze can
+	// judge it; its zero CreatedAt sits at or before any publication time.
+	return store.ToolDescriptor{Name: name, Version: version}, nil
+}
+
 func newTestClient(t *testing.T, invoker ToolInvoker) gatewayv1.ToolGatewayServiceClient {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)

@@ -31,7 +31,17 @@ const (
 	SystemMemoryPut     = "agentos.memory.put"
 	SystemMemorySearch  = "agentos.memory.search"
 	SystemTaskSpawn     = "agentos.task.spawn"
-	systemToolsRevision = "v1.3"
+	systemToolsRevision = "v1.4"
+)
+
+// Bounds of the tool-contract surface an agent may attach to one model call:
+// the count and serialized size of the platform-generated schemas stay
+// bounded so a sandbox cannot inflate the provider request through the
+// broker.
+const (
+	maxModelTools       = 64
+	maxModelToolsBytes  = 256 << 10
+	toolNameMaxLenBytes = 256
 )
 
 // SpawnRequest is one dynamic-step spawn derived from the fenced identity:
@@ -131,6 +141,12 @@ type modelToolInput struct {
 	MaxOutputTokens int32           `json:"maxOutputTokens,omitempty"`
 	Temperature     *float64        `json:"temperature,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
+	// Tools names the tenant tools the model may call, as bare names
+	// ("weather") or pinned references ("weather@1.2.0"). Only names cross
+	// this boundary: the platform resolves each to the capability-filtered
+	// descriptor and generates the schema, so a sandbox cannot invent or
+	// widen a tool contract or attach a tool outside the AgentVersion grant.
+	Tools []string `json:"tools,omitempty"`
 }
 
 type memoryPutToolInput struct {
@@ -285,12 +301,19 @@ func (b *Broker) callModel(ctx context.Context, params json.RawMessage) (any, *E
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
+	tools, denial, rpcErr := b.resolveModelTools(ctx, identity, call.Tools)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	if denial != "" {
+		return toolErrorResult(denial), nil
+	}
 	output, invokeErr := b.models.InvokeStream(ctx, kernelmodel.InvokeInput{
 		TenantID: identity.TenantID, TaskID: taskID, RunID: runID, AttemptID: identity.AttemptID,
 		FencingToken: identity.FencingToken, AgentVersionRef: identity.AgentVersionRef,
 		ModelRef: call.ModelRef, IdempotencyKey: systemIdempotencyKey(identity, SystemModelInvoke, params),
 		Messages: messages, MaxOutputTokens: call.MaxOutputTokens, Temperature: call.Temperature,
-		Stream: call.Stream,
+		Stream: call.Stream, Tools: tools,
 	}, nil)
 	if invokeErr != nil {
 		document, _ := json.Marshal(map[string]any{
@@ -313,6 +336,74 @@ func (b *Broker) callModel(ctx context.Context, params json.RawMessage) (any, *E
 		"providerRequestId": output.Call.ProviderRequestID,
 	})
 	return textResult(document, false), nil
+}
+
+// resolveModelTools turns agent-supplied tool names into platform-generated
+// tool definitions. Every name must resolve to a descriptor the AgentVersion
+// is granted (the same capability-filtered registry tools/list exposes):
+// a bare name resolves to the latest granted version, a "name@version"
+// reference pins one exact version. The definition the model sees carries
+// the pinned name when a version was requested, so the model's tool_calls
+// refer back to the exact version the agent chose. Unknown or ungranted
+// names deny closed as a tool outcome (denial), protocol violations as a
+// params error (rpcErr).
+func (b *Broker) resolveModelTools(ctx context.Context, identity AttemptContext, requested []string) (tools []provider.ToolDefinition, denial string, rpcErr *Error) {
+	if len(requested) == 0 {
+		return nil, "", nil
+	}
+	if len(requested) > maxModelTools {
+		return nil, "", invalidParams(fmt.Sprintf("too many tools: at most %d per model call", maxModelTools))
+	}
+	descriptors, err := b.tools.listTools(ctx, identity)
+	if err != nil {
+		return nil, "", &Error{Code: codeInternalError, Message: "resolve tool registry"}
+	}
+	tools = make([]provider.ToolDefinition, 0, len(requested))
+	used := 0
+	for _, name := range requested {
+		if len(name) > toolNameMaxLenBytes {
+			return nil, "", invalidParams("tool name exceeds the length bound")
+		}
+		advertised, descriptor, ok := resolveToolReference(descriptors, name)
+		if !ok {
+			return nil, "tool is not granted to this AgentVersion or the pinned version is not registered: " + name, nil
+		}
+		definition := provider.ToolDefinition{
+			Name:        advertised,
+			Description: fmt.Sprintf("%s (version %s, sideEffectRisk %s)", descriptor.Name, descriptor.Version, descriptor.SideEffectRisk),
+			Parameters:  json.RawMessage(descriptor.ParamsSchema),
+		}
+		used += len(definition.Name) + len(definition.Description) + len(definition.Parameters)
+		if used > maxModelToolsBytes {
+			return nil, "", invalidParams("tool contracts exceed the size bound")
+		}
+		tools = append(tools, definition)
+	}
+	return tools, "", nil
+}
+
+// resolveToolReference resolves one agent-requested tool reference against
+// the granted descriptors. It returns the name advertised to the model (the
+// pinned "name@version" when a version was requested), the descriptor, and
+// whether the reference resolved.
+func resolveToolReference(descriptors []store.ToolDescriptor, reference string) (string, store.ToolDescriptor, bool) {
+	name, version, pinned := strings.Cut(reference, "@")
+	if strings.TrimSpace(name) == "" || (pinned && strings.TrimSpace(version) == "") {
+		return "", store.ToolDescriptor{}, false
+	}
+	if !pinned {
+		descriptor, ok := latestDescriptor(descriptors, name)
+		if !ok {
+			return "", store.ToolDescriptor{}, false
+		}
+		return descriptor.Name, descriptor, true
+	}
+	for _, descriptor := range descriptors {
+		if descriptor.Name == name && descriptor.Version == version {
+			return reference, descriptor, true
+		}
+	}
+	return "", store.ToolDescriptor{}, false
 }
 
 type brokerMessage struct {

@@ -264,6 +264,10 @@ func (i *countingInvoker) ListTools(context.Context, string) ([]store.ToolDescri
 	return nil, nil
 }
 
+func (i *countingInvoker) GetToolDescriptor(context.Context, string, string, string) (store.ToolDescriptor, error) {
+	return store.ToolDescriptor{}, nil
+}
+
 // fencedStore returns ErrFenced for every runtime mutation: any call that
 // reaches it with a stale token is already past validation and must fail.
 type fencedStore struct {

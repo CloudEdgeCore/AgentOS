@@ -79,6 +79,66 @@ func TestAgentVersionPublishResolveAndImmutability(t *testing.T) {
 	}
 }
 
+func TestAgentVersionNamespaceIsPartOfIdentity(t *testing.T) {
+	clock := newFakeClock()
+	_, repository := prepare(t, clock.Now)
+	ctx := context.Background()
+
+	// P1-07: the namespace is a k8s-style isolation boundary that is part of the
+	// publication identity. Two teams sharing one tenant may publish the same
+	// name@version in different namespaces without colliding.
+	spec := []byte(`{"runtimeClassPolicy":{"allowed":["oci"],"preferred":"oci"}}`)
+	defaultVersion, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "default",
+		Name: "shared-agent", Version: "1.0.0", Spec: spec,
+	})
+	if err != nil {
+		t.Fatalf("publish default namespace: %v", err)
+	}
+	teamVersion, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "team-a",
+		Name: "shared-agent", Version: "1.0.0", Spec: spec,
+	})
+	if err != nil {
+		t.Fatalf("publish team-a namespace: %v", err)
+	}
+	if teamVersion.Existing || teamVersion.AgentVersion.ID == defaultVersion.AgentVersion.ID {
+		t.Fatalf("second namespace collided with the first: %+v", teamVersion)
+	}
+
+	// The default namespace is elided in the canonical reference, so the two
+	// identities render and resolve distinctly.
+	if got := defaultVersion.AgentVersion.Ref(); got != "shared-agent@1.0.0" {
+		t.Fatalf("default namespace ref = %q, want elided form", got)
+	}
+	if got := teamVersion.AgentVersion.Ref(); got != "team-a/shared-agent@1.0.0" {
+		t.Fatalf("team-a ref = %q, want namespaced form", got)
+	}
+
+	byDefault, err := repository.GetAgentVersionByRef(ctx, "tenant-a", "shared-agent@1.0.0")
+	if err != nil || byDefault.ID != defaultVersion.AgentVersion.ID {
+		t.Fatalf("resolve default ref: %+v err=%v", byDefault, err)
+	}
+	byTeam, err := repository.GetAgentVersionByRef(ctx, "tenant-a", "team-a/shared-agent@1.0.0")
+	if err != nil || byTeam.ID != teamVersion.AgentVersion.ID {
+		t.Fatalf("resolve namespaced ref: %+v err=%v", byTeam, err)
+	}
+
+	// A namespace with no publication is not silently served from another.
+	if _, err := repository.GetAgentVersionByRef(ctx, "tenant-a", "team-b/shared-agent@1.0.0"); !errors.Is(err, kernelstore.ErrNotFound) {
+		t.Fatalf("empty namespace leaked a publication: %v", err)
+	}
+
+	// Re-publishing within one namespace with a different spec still conflicts:
+	// widening the identity did not weaken per-namespace immutability.
+	if _, err := repository.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: "tenant-a", Namespace: "team-a",
+		Name: "shared-agent", Version: "1.0.0", Spec: []byte(`{"runtimeClassPolicy":{"allowed":["microvm"]}}`),
+	}); !errors.Is(err, kernelstore.ErrAgentVersionConflict) {
+		t.Fatalf("expected per-namespace conflict, got %v", err)
+	}
+}
+
 func TestAgentVersionPersistsPackageSignatureEnvelope(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)

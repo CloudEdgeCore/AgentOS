@@ -18,7 +18,8 @@ import (
 const workflowColumns = `id, tenant_id, namespace, idempotency_key, goal, spec, status,
 	COALESCE(failure_code, ''), cancel_requested_at,
 	COALESCE(budget_max_tasks, 0), COALESCE(budget_max_tokens, 0), COALESCE(budget_max_cost_micro_usd, 0),
-	budget_exhausted_at, deadline_at, deadline_exceeded_at, resource_version, created_at, updated_at`
+	budget_exhausted_at, deadline_at, deadline_exceeded_at, resource_version, created_at, updated_at,
+	needs_budget_reconciliation`
 
 const workflowStepColumns = `id, tenant_id, workflow_id, name, ordinal, status, attempt_count, task_id,
 	result_summary, COALESCE(failure_code, ''), COALESCE(decided_by, ''), COALESCE(approval_decision, ''), decided_at,
@@ -33,7 +34,8 @@ func scanWorkflow(row pgx.Row) (kernelstore.Workflow, error) {
 		&workflow.Goal, &workflow.Spec, &workflow.Status, &workflow.FailureCode, &workflow.CancelRequestedAt,
 		&workflow.BudgetMaxTasks, &workflow.BudgetMaxTokens, &workflow.BudgetMaxCostMicroUSD,
 		&workflow.BudgetExhaustedAt, &workflow.DeadlineAt, &workflow.DeadlineExceededAt,
-		&workflow.ResourceVersion, &workflow.CreatedAt, &workflow.UpdatedAt)
+		&workflow.ResourceVersion, &workflow.CreatedAt, &workflow.UpdatedAt,
+		&workflow.NeedsBudgetReconciliation)
 	if err != nil {
 		return kernelstore.Workflow{}, classify(err)
 	}
@@ -188,7 +190,8 @@ func scanWorkflowRow(rows pgx.Rows) (kernelstore.Workflow, error) {
 		&workflow.Goal, &spec, &workflow.Status, &workflow.FailureCode, &workflow.CancelRequestedAt,
 		&workflow.BudgetMaxTasks, &workflow.BudgetMaxTokens, &workflow.BudgetMaxCostMicroUSD,
 		&workflow.BudgetExhaustedAt, &workflow.DeadlineAt, &workflow.DeadlineExceededAt,
-		&workflow.ResourceVersion, &workflow.CreatedAt, &workflow.UpdatedAt)
+		&workflow.ResourceVersion, &workflow.CreatedAt, &workflow.UpdatedAt,
+		&workflow.NeedsBudgetReconciliation)
 	workflow.Spec = spec
 	if err != nil {
 		return kernelstore.Workflow{}, classify(err)
@@ -755,6 +758,15 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnNameConflict, Message: "workflow step name already exists"}
 	} else if !errors.Is(err, kernelstore.ErrNotFound) {
 		return result, err
+	}
+
+	// A stale-low reservation total (P1-05) would let the budget checks below
+	// under-count the workflow's real commitment, so new dynamic spawns pause
+	// until the controller reconciles the pre-upgrade backlog. Idempotent
+	// replays returned above; only genuinely new steps reach this guard.
+	if workflow.NeedsBudgetReconciliation {
+		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnReconciliationPending,
+			Message: "workflow budget reconciliation is pending; retry once step reservations are reconciled"}
 	}
 
 	// Recursion guard: the spawning parent's depth bounds its children.

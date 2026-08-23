@@ -769,14 +769,15 @@ func (m *memoryStore) GetAgentVersion(_ context.Context, tenantID string, id uui
 }
 
 func (m *memoryStore) GetAgentVersionByRef(_ context.Context, tenantID, ref string) (store.AgentVersion, error) {
-	name, version, err := agentversion.ParseRef(ref)
+	namespace, name, version, err := agentversion.ParseRef(ref)
 	if err != nil {
 		return store.AgentVersion{}, store.ErrAgentVersionRefInvalid
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, candidate := range m.versions {
-		if candidate.TenantID == tenantID && candidate.Name == name && candidate.Version == version {
+		if candidate.TenantID == tenantID && candidate.Namespace == namespace &&
+			candidate.Name == name && candidate.Version == version {
 			return candidate, nil
 		}
 	}

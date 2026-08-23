@@ -54,6 +54,14 @@ class RealAgent:
         mcp = MCPClient(self.mcp_url, execution_id=execution_id)
         mcp.initialize()
 
+        # Discover the tenant tools the AgentVersion is granted and offer them
+        # to the model by NAME only. The platform (broker) resolves each name
+        # against the capability-filtered registry and generates the schema,
+        # so the model learns the real AgentOS tool surface without this
+        # process ever authoring or widening a tool contract (P0-01).
+        tool_names = self._discover_tools(mcp)
+        emit("tools.discovered", {"tools": tool_names})
+
         state = self._restored.pop(execution_id, None)
         resumed = state is not None and state.get("messages")
         messages: list[dict[str, Any]] = (
@@ -75,7 +83,7 @@ class RealAgent:
         while turns < self.max_turns:
             _check_cancel(stop_event)
             turns += 1
-            response = self._invoke_model(mcp, messages)
+            response = self._invoke_model(mcp, messages, tool_names)
             usage_totals["inputTokens"] += response.get("usage", {}).get("inputTokens", 0)
             usage_totals["outputTokens"] += response.get("usage", {}).get("outputTokens", 0)
             usage_totals["costUsd"] += response.get("costUsd", 0.0)
@@ -138,17 +146,43 @@ class RealAgent:
 
     # -- internals ---------------------------------------------------------------
 
-    def _invoke_model(self, mcp: MCPClient, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def _invoke_model(self, mcp: MCPClient, messages: list[dict[str, Any]], tool_names: list[str]) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "modelRef": self.model_ref,
+            "messages": messages,
+            "stream": True,
+        }
+        # Offer tools by NAME only. The broker resolves each name against the
+        # AgentVersion's capability-filtered registry and authors the schema;
+        # this process never submits a tool contract of its own (P0-01).
+        if tool_names:
+            arguments["tools"] = tool_names
         try:
-            return mcp.call_tool("agentos.model.invoke", {
-                "modelRef": self.model_ref,
-                "messages": messages,
-                "stream": True,
-            })
+            return mcp.call_tool("agentos.model.invoke", arguments)
         except MCPToolError as error:
             # Structured gateway outcomes (budget stop, provider failure) end
             # the run with the code as the failure reason.
             raise RuntimeError(f"model invocation failed: {error.payload.get('error', str(error))}") from error
+
+    def _discover_tools(self, mcp: MCPClient) -> list[str]:
+        """Return the tenant tool names to offer the model.
+
+        tools/list is already capability-filtered by the broker to the tools
+        this AgentVersion is granted. The brokered system tools (the model,
+        memory and task gateways, prefixed ``agentos.``) are excluded: they are
+        the agent's own plumbing, not tools the model should be prompted to
+        call, and the model-tool resolver only recognizes tenant tool names.
+        """
+        try:
+            descriptors = mcp.list_tools()
+        except (MCPToolError, MCPError):
+            return []
+        names: list[str] = []
+        for descriptor in descriptors:
+            name = descriptor.get("name", "")
+            if name and not name.startswith("agentos."):
+                names.append(name)
+        return names
 
     def _call_tool(self, mcp: MCPClient, call: dict[str, Any]) -> Any:
         name = call.get("name", "")

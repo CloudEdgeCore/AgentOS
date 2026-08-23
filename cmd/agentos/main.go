@@ -372,7 +372,7 @@ func runSubmit(args []string, stdout, stderr io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if _, _, err := agentversion.ParseRef(*agentRef); err != nil {
+	if _, _, _, err := agentversion.ParseRef(*agentRef); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*goal) == "" {

@@ -64,7 +64,7 @@ func TestAtomicCapacityReservationOneSlot(t *testing.T) {
 				ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 				RunID: uuid.New(), AttemptID: uuid.New(), LeaseID: uuid.New(),
 				RuntimePoolID: "one-slot", RuntimeClass: "oci", RuntimeInstanceID: "worker-one",
-				LeaseTTL: time.Minute, PoolCPUCapacity: 100, PoolMemoryCapacity: 128, PoolLLMCapacity: 1,
+				LeaseTTL: time.Minute,
 				RequestedCPU: 100, RequestedMemory: 128, RequestedLLMSlots: 1,
 			})
 			switch {

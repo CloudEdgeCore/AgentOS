@@ -1359,9 +1359,10 @@ func (h *Handler) admitPackage(body createAgentVersionRequest) error {
 	if err := h.packages.Verify(body.Package); err != nil {
 		return err
 	}
-	if body.Package.Manifest.AgentVersionRef != body.Name+"@"+body.Version {
+	publicationRef := agentversion.FormatRef(body.Namespace, body.Name, body.Version)
+	if body.Package.Manifest.AgentVersionRef != publicationRef {
 		return fmt.Errorf("%w: manifest signs %q but the publication is %q",
-			agentpkg.ErrPackageBindingMismatch, body.Package.Manifest.AgentVersionRef, body.Name+"@"+body.Version)
+			agentpkg.ErrPackageBindingMismatch, body.Package.Manifest.AgentVersionRef, publicationRef)
 	}
 	if !body.Package.Manifest.SpecDigest.Verify(body.Spec) {
 		return fmt.Errorf("%w: spec does not match the signed spec digest", agentpkg.ErrPackageBindingMismatch)
@@ -1752,7 +1753,7 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 }
 
 func validateCreateTask(body createTaskRequest) error {
-	if _, _, err := agentversion.ParseRef(body.AgentVersionRef); err != nil {
+	if _, _, _, err := agentversion.ParseRef(body.AgentVersionRef); err != nil {
 		return fmt.Errorf("agentVersionRef must be a canonical name@version reference: %v", err)
 	}
 	if strings.TrimSpace(body.Goal) == "" || len(body.Goal) > 16*1024 {
@@ -1778,8 +1779,8 @@ func validateCreateAgentVersion(body createAgentVersionRequest) error {
 	if err := agentversion.ValidateVersion(body.Version); err != nil {
 		return err
 	}
-	if strings.TrimSpace(body.Namespace) == "" || len(body.Namespace) > 255 {
-		return fmt.Errorf("namespace is required and must not exceed 255 bytes")
+	if err := agentversion.ValidateNamespace(body.Namespace); err != nil {
+		return err
 	}
 	if err := agentversion.ValidateSpec(body.Spec); err != nil {
 		return err

@@ -63,7 +63,6 @@ func scheduleOnPool(t *testing.T, ctx context.Context, repository *postgresstore
 		ClaimFencingToken: claim[0].FencingToken, ExpectedTaskVersion: task.ResourceVersion,
 		RunID: uuid.New(), AttemptID: uuid.New(), LeaseID: uuid.New(),
 		RuntimePoolID: poolID, RuntimeClass: "oci", RuntimeInstanceID: "worker-cap", LeaseTTL: time.Minute,
-		PoolCPUCapacity: 1 << 30, PoolMemoryCapacity: 1 << 30, PoolLLMCapacity: 1 << 20,
 		RequestedCPU: requestedCPU, RequestedMemory: 64, RequestedLLMSlots: 1,
 	})
 	return err

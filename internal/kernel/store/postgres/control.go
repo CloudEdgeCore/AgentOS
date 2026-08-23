@@ -528,15 +528,15 @@ func validateClaimInput(in kernelstore.ClaimTasksInput) error {
 }
 
 func validateScheduleInput(in kernelstore.ScheduleTaskInput) error {
+	// Pool capacity is enforced transactionally against the pool's capacity
+	// ledger row (reserveRuntimeCapacity), never against a caller-supplied
+	// snapshot: a scheduler-memory view can be stale and would either admit
+	// over-capacity placements or wrongly reject valid ones.
 	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.OwnerID) == "" ||
 		strings.TrimSpace(in.RuntimePoolID) == "" || strings.TrimSpace(in.RuntimeClass) == "" ||
 		strings.TrimSpace(in.RuntimeInstanceID) == "" || in.LeaseTTL <= 0 ||
-		in.PoolCPUCapacity < 0 || in.PoolMemoryCapacity < 0 || in.PoolLLMCapacity < 0 ||
 		in.RequestedCPU < 0 || in.RequestedMemory < 0 || in.RequestedLLMSlots < 0 {
 		return fmt.Errorf("schedule tenant, owner, runtime placement, and positive lease TTL are required")
-	}
-	if in.RequestedCPU > in.PoolCPUCapacity || in.RequestedMemory > in.PoolMemoryCapacity || in.RequestedLLMSlots > in.PoolLLMCapacity {
-		return kernelstore.ErrCapacityExhausted
 	}
 	return nil
 }

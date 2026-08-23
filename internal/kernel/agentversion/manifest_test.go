@@ -113,6 +113,11 @@ func TestManifestRuntimeAndCapabilityValidation(t *testing.T) {
 		"duplicate capability": func(manifest *Manifest) {
 			manifest.Spec.Capabilities.Tools = []string{"search@v1", "search@v1"}
 		},
+		"unsupported tool wildcard": func(manifest *Manifest) {
+			// A version-floating grant must be exactly "name@*"; a name wildcard
+			// carrying a version suffix is not a supported form (P1-08).
+			manifest.Spec.Capabilities.Tools = []string{"weather.*@1"}
+		},
 		"omitted capability class": func(manifest *Manifest) {
 			manifest.Spec.Capabilities.Secrets = nil
 		},
@@ -140,8 +145,17 @@ func TestManifestRuntimeAndCapabilityValidation(t *testing.T) {
 	}
 }
 
-func TestValidateSpecChecksPlatformFieldsWhenPresent(t *testing.T) {
+func TestManifestAcceptsSupportedCapabilityWildcards(t *testing.T) {
+	// P1-08: exact pins, the version-floating "name@*" form and name wildcards
+	// are all valid grant syntaxes.
 	manifest := validManifest()
+	manifest.Spec.Capabilities.Tools = []string{"weather@1.0.0", "search@*", "billing.*"}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("supported capability wildcards rejected: %v", err)
+	}
+}
+
+func TestValidateSpecChecksPlatformFieldsWhenPresent(t *testing.T) {	manifest := validManifest()
 	encoded, err := json.Marshal(manifest.Spec)
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)

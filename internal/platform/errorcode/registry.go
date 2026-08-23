@@ -35,6 +35,11 @@ const (
 	SpawnTokenLimitExceeded  = "SPAWN_TOKEN_LIMIT_EXCEEDED"
 	SpawnCostLimitExceeded   = "SPAWN_COST_LIMIT_EXCEEDED"
 	SpawnNameConflict        = "SPAWN_NAME_CONFLICT"
+	// SpawnReconciliationPending pauses dynamic spawning while a workflow's
+	// step budget reservations are being re-derived after an upgrade: the
+	// committed total is briefly understated, so admitting a new spawn could
+	// slip past a ceiling. The agent should retry once reconciliation clears.
+	SpawnReconciliationPending = "SPAWN_RECONCILIATION_PENDING"
 )
 
 var known = map[string]struct{}{
@@ -45,6 +50,7 @@ var known = map[string]struct{}{
 	SpawnCancelled: {}, SpawnDeadlineExceeded: {}, SpawnBudgetExhausted: {}, SpawnDepthExceeded: {},
 	SpawnFanoutExceeded: {}, SpawnDynamicExceeded: {}, SpawnTotalStepsExceeded: {}, SpawnTaskLimitExceeded: {},
 	SpawnTokenLimitExceeded: {}, SpawnCostLimitExceeded: {}, SpawnNameConflict: {},
+	SpawnReconciliationPending: {},
 }
 
 func Known(code string) bool {

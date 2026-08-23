@@ -2,10 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,4 +148,78 @@ func containsString(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// chattyRuntime emits a large event history (far beyond any socket buffer)
+// before succeeding, so a stalled SSE reader parks its server-side write.
+type chattyRuntime struct{}
+
+func (chattyRuntime) Run(_ context.Context, _ StartRequest, emit Emitter) (json.RawMessage, error) {
+	payload := json.RawMessage(`{"padding":"` + strings.Repeat("x", 4<<10) + `"}`)
+	for i := 0; i < 512; i++ {
+		if err := emit("agent.progress", payload); err != nil {
+			return nil, err
+		}
+	}
+	return json.RawMessage(`{"answer":"done"}`), nil
+}
+
+func (chattyRuntime) Checkpoint(context.Context, string) (Checkpoint, error) {
+	return Checkpoint{}, nil
+}
+
+func (chattyRuntime) Restore(context.Context, RestoreRequest) error { return nil }
+
+// TestHostSlowStreamClientDoesNotStallHostWrites pins the P1-01 fix: the
+// SSE handler snapshots under the read lock and writes outside it, so one
+// client that stops reading cannot block the emit/complete write lock every
+// other execution needs.
+func TestHostSlowStreamClientDoesNotStallHostWrites(t *testing.T) {
+	host, err := NewHost(chattyRuntime{}, HostOptions{Adapter: "go-native", MaxConcurrent: 64, EventLimit: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Start(context.Background(), startFixture("chatty")); err != nil {
+		t.Fatal(err)
+	}
+	// A raw connection that reads the response headers and then stalls.
+	stalled, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stalled.Close()
+	if _, err := stalled.Write([]byte("GET /v1/executions/chatty/events/stream?after=0 HTTP/1.1\r\nHost: agentos\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	header := make([]byte, 512)
+	if _, err := stalled.Read(header); err != nil {
+		t.Fatal(err)
+	}
+	// Give the stalled stream time to fill its socket buffers and park the
+	// server-side write under the pre-fix lock discipline.
+	time.Sleep(500 * time.Millisecond)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("healthy-%d", i)
+		if _, err := client.Start(context.Background(), startFixture(id)); err != nil {
+			t.Fatalf("start %s: %v", id, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+		result, err := client.WaitResult(ctx, id, time.Millisecond)
+		cancel()
+		if err != nil {
+			t.Fatalf("execution %s did not complete under a stalled stream peer: %v", id, err)
+		}
+		if result.Status != StatusSucceeded {
+			t.Fatalf("execution %s status = %s", id, result.Status)
+		}
+	}
 }

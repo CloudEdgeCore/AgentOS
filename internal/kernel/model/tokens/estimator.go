@@ -2,6 +2,18 @@
 // budget reservations. Estimates only guard the reservation envelope: the
 // provider-reported usage at Finish remains the authoritative settlement,
 // so every estimator errs on the high side.
+//
+// Envelope contract (P1-06). AgentOS reserves against a proven conservative
+// envelope, not an exact in-process tokenizer. The contract every estimator
+// upholds is a one-sided guarantee: for any input the reservation is at or
+// above the true token count a real tokenizer would report, never below it
+// (envelope_corpus_test.go pins this across Latin, CJK, JSON, tool-call,
+// reasoning, multilingual, and over-long inputs). An exact tokenizer
+// (tiktoken, Qwen, SentencePiece, HF) is a future per-provider plug-in
+// selected by Executor.Tokenizer(); registering one may only tighten the
+// envelope from above, so the budget invariant holds before and after. Until
+// one is registered the heuristic and conservative estimators are the
+// envelope, and an unrecognized tokenizer name fails safe to conservative.
 package tokens
 
 import (

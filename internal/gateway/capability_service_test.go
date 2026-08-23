@@ -26,6 +26,7 @@ func TestToolServiceEnforcesSecretCapability(t *testing.T) {
 	service := NewService(invoker, "tenant-a", authorizer)
 
 	denied := invokeRequest(t, "")
+	denied.ToolVersion = "1.0.0"
 	denied.SecretRef = "database/admin"
 	if _, err := service.InvokeTool(context.Background(), denied); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("undeclared secret: %v, want PermissionDenied", err)
@@ -35,6 +36,7 @@ func TestToolServiceEnforcesSecretCapability(t *testing.T) {
 	}
 
 	allowed := invokeRequest(t, "")
+	allowed.ToolVersion = "1.0.0"
 	allowed.SecretRef = "database/read"
 	if _, err := service.InvokeTool(context.Background(), allowed); err != nil {
 		t.Fatalf("declared secret: %v", err)
@@ -174,4 +176,91 @@ func (f *fakeMemoryInvoker) Search(_ context.Context, input memory.SearchInput) 
 		ContentType: "text/plain", Content: "ready", Sensitivity: "internal", ResourceVersion: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}}, nil
+}
+
+// freezeAuthorizer publishes one AgentVersion "agent@1" at publishedAt with the
+// given tool grants, so a test can exercise the P1-08 publish-time freeze.
+func freezeAuthorizer(t *testing.T, tools []string, publishedAt time.Time) *capability.Authorizer {
+	t.Helper()
+	spec, err := json.Marshal(agentversion.Spec{
+		Runtimes:     []agentversion.RuntimeTarget{{Class: "remote"}},
+		Capabilities: &agentversion.Capabilities{Tools: tools, Models: []string{}, Memory: []string{}, Secrets: []string{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer, err := capability.NewAuthorizer(gatewayVersionStore{version: store.AgentVersion{
+		TenantID: "tenant-a", Name: "agent", Version: "1", Spec: spec, CreatedAt: publishedAt,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorizer
+}
+
+// TestToolServiceFreezesToolVersionsAtPublish is the P1-08 acceptance: an
+// AgentVersion published before a newer tool version is registered keeps
+// resolving the version that existed at publication, unless its grant floats.
+func TestToolServiceFreezesToolVersionsAtPublish(t *testing.T) {
+	publishedAt := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	descriptors := []store.ToolDescriptor{
+		{TenantID: "tenant-a", Name: "weather", Version: "1.0.0", SideEffectRisk: store.ToolRiskLow,
+			Actions: []string{"read"}, ParamsSchema: json.RawMessage(`{"type":"object"}`),
+			CreatedAt: publishedAt.Add(-time.Hour)},
+		{TenantID: "tenant-a", Name: "weather", Version: "2.0.0", SideEffectRisk: store.ToolRiskLow,
+			Actions: []string{"read"}, ParamsSchema: json.RawMessage(`{"type":"object"}`),
+			CreatedAt: publishedAt.Add(time.Hour)}, // registered AFTER the AgentVersion
+	}
+	visible := func(grant string) map[string]bool {
+		service := NewService(&fakeInvoker{descriptors: descriptors}, "tenant-a", freezeAuthorizer(t, []string{grant}, publishedAt))
+		resp, err := service.ListTools(context.Background(), &gatewayv1.ListToolsRequest{TenantId: "tenant-a", AgentVersionRef: "agent@1"})
+		if err != nil {
+			t.Fatalf("ListTools(%q): %v", grant, err)
+		}
+		seen := map[string]bool{}
+		for _, descriptor := range resp.GetTools() {
+			seen[descriptor.GetVersion()] = true
+		}
+		return seen
+	}
+	invoke := func(grant, version string) error {
+		service := NewService(&fakeInvoker{descriptors: descriptors, result: tool.InvokeResult{Outcome: tool.OutcomeExecuted}},
+			"tenant-a", freezeAuthorizer(t, []string{grant}, publishedAt))
+		request := invokeRequest(t, "")
+		request.ToolName, request.ToolVersion = "weather", version
+		_, err := service.InvokeTool(context.Background(), request)
+		return err
+	}
+
+	// Bare grant: frozen to the publish-time version set.
+	if seen := visible("weather"); !seen["1.0.0"] || seen["2.0.0"] {
+		t.Fatalf("bare grant visibility = %v, want only 1.0.0", seen)
+	}
+	if err := invoke("weather", "1.0.0"); err != nil {
+		t.Fatalf("bare grant invoke 1.0.0: %v", err)
+	}
+	if err := invoke("weather", "2.0.0"); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("bare grant invoke 2.0.0: %v, want PermissionDenied (frozen out)", err)
+	}
+	// A freeze forces the caller to name the frozen version rather than let the
+	// store resolve its own latest.
+	if err := invoke("weather", ""); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("bare grant invoke unversioned: %v, want PermissionDenied", err)
+	}
+
+	// Floating "name@*" grant: the newer version drifts in by design.
+	if seen := visible("weather@*"); !seen["1.0.0"] || !seen["2.0.0"] {
+		t.Fatalf("floating grant visibility = %v, want both versions", seen)
+	}
+	if err := invoke("weather@*", "2.0.0"); err != nil {
+		t.Fatalf("floating grant invoke 2.0.0: %v", err)
+	}
+
+	// Pinned "name@version" grant: exactly that version, at any registration time.
+	if seen := visible("weather@2.0.0"); seen["1.0.0"] || !seen["2.0.0"] {
+		t.Fatalf("pinned grant visibility = %v, want only 2.0.0", seen)
+	}
+	if err := invoke("weather@2.0.0", "1.0.0"); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("pinned grant invoke 1.0.0: %v, want PermissionDenied", err)
+	}
 }

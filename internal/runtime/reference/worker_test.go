@@ -308,6 +308,15 @@ func (s *scriptedInvoker) ListTools(context.Context, string) ([]store.ToolDescri
 	return s.descriptors, nil
 }
 
+func (s *scriptedInvoker) GetToolDescriptor(_ context.Context, _, name, version string) (store.ToolDescriptor, error) {
+	for _, descriptor := range s.descriptors {
+		if descriptor.Name == name && (version == "" || descriptor.Version == version) {
+			return descriptor, nil
+		}
+	}
+	return store.ToolDescriptor{Name: name, Version: version}, nil
+}
+
 func newTestWorkerWithGateway(t *testing.T, repository store.RuntimeStore, instanceID string, invoker gateway.ToolInvoker) *Worker {
 	t.Helper()
 	worker := newTestWorker(t, repository, instanceID)
@@ -376,6 +385,10 @@ func (s *slowInvoker) InvokeTool(ctx context.Context, in tool.InvokeInput) (tool
 
 func (s *slowInvoker) ListTools(ctx context.Context, tenantID string) ([]store.ToolDescriptor, error) {
 	return s.inner.ListTools(ctx, tenantID)
+}
+
+func (s *slowInvoker) GetToolDescriptor(ctx context.Context, tenantID, name, version string) (store.ToolDescriptor, error) {
+	return s.inner.GetToolDescriptor(ctx, tenantID, name, version)
 }
 
 // TestWorkerRenewsLeaseDuringExecution proves the fencing fix: a workload

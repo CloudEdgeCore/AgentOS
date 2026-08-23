@@ -31,8 +31,10 @@ import (
 
 func main() {
 	controlAddress := flag.String("control-address", "127.0.0.1:9090", "Runtime Protocol control endpoint")
-	endpoint := flag.String("adapter-endpoint", "", "explicit loopback Agent Runtime Interface endpoint (overrides runtime bindings and manifest entrypoints)")
+	endpoint := flag.String("adapter-endpoint", "", "explicit Agent Runtime Interface endpoint (overrides runtime bindings and manifest entrypoints; plaintext HTTP must be loopback, remote endpoints must be HTTPS)")
 	runtimeBindings := flag.String("runtime-bindings", "", "JSON runtime binding file mapping agent version refs to Runtime Interface endpoints (empty disables)")
+	dedicatedEndpoint := flag.Bool("dedicated-endpoint", false, "acknowledge that -adapter-endpoint intentionally overrides runtime bindings (single-agent-version workers only)")
+	allowPlaintextRemote := flag.Bool("allow-plaintext-remote-runtime", false, "development escape hatch: permit plaintext HTTP Runtime Interface endpoints on non-loopback hosts (never enable in production)")
 	tenantID := flag.String("tenant", "", "tenant assigned to this worker")
 	runtimeInstanceID := flag.String("runtime-instance-id", "", "assigned runtime instance ID")
 	artifactRoot := flag.String("artifact-root", "", "content-addressed artifact directory")
@@ -61,23 +63,38 @@ func main() {
 	}
 	if strings.TrimSpace(*endpoint) != "" {
 		parsed, err := url.Parse(*endpoint)
-		if err != nil || parsed.Scheme != "http" || parsed.Hostname() == "" {
-			slog.Error("adapter endpoint must be an absolute HTTP loopback URL")
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+			slog.Error("adapter endpoint must be an absolute HTTP(S) URL")
 			os.Exit(2)
 		}
-		ip := net.ParseIP(parsed.Hostname())
-		if parsed.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			slog.Error("v1 adapter endpoint must be co-located on loopback", "endpoint", *endpoint)
-			os.Exit(2)
+		// Transport security boundary (P0-02): plaintext HTTP is tolerated
+		// only for a co-located loopback runtime; a remote Runtime Interface
+		// must be HTTPS with server verification (optionally pinned by the
+		// binding's TLS material).
+		if parsed.Scheme == "http" {
+			ip := net.ParseIP(parsed.Hostname())
+			if parsed.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+				slog.Error("plaintext adapter endpoint must be co-located on loopback; remote runtimes require HTTPS", "endpoint", *endpoint)
+				os.Exit(2)
+			}
 		}
 	}
 	if err := validateSandboxMCPListen(*mcpListen); err != nil {
 		slog.Error("invalid -mcp-listen", "error", err)
 		os.Exit(2)
 	}
-	bindings, err := runtimeadapter.LoadRuntimeBindings(*runtimeBindings)
+	bindings, err := runtimeadapter.LoadRuntimeBindingsFor(*runtimeBindings, runtimeadapter.EndpointPolicy{
+		AllowPlaintextRemote: *allowPlaintextRemote,
+	})
 	if err != nil {
 		slog.Error("load runtime bindings", "error", err)
+		os.Exit(2)
+	}
+	// A worker with runtime bindings serves multiple agent versions; an
+	// explicit endpoint would silently route every assignment to one
+	// endpoint. Only an acknowledged dedicated worker may combine them.
+	if err := runtimeadapter.ValidateEndpointOverride(strings.TrimSpace(*endpoint), bindings, *dedicatedEndpoint); err != nil {
+		slog.Error("invalid endpoint configuration", "error", err)
 		os.Exit(2)
 	}
 	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""

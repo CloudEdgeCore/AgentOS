@@ -118,6 +118,13 @@ func main() {
 	// overlaid with lease-derived instance liveness, so a pool whose worker
 	// stopped renewing its lease is rejected by placement.
 	poolSource := scheduler.NewLeaseAwarePoolSource(repository, repository, *poolHealthFreshness)
+	// StaticPoolSource bypasses the durable capacity ledger, so a production
+	// server must never be handed one; -dev-mode is the same acknowledgment
+	// that gates seeding the mutable registry from a file.
+	if err := scheduler.GuardProductionPoolSource(poolSource, *devMode); err != nil {
+		slog.Error("pool source guard", "error", err)
+		os.Exit(2)
+	}
 	schedulerController := scheduler.NewController(repository, poolSource, *controllerID+"/scheduler", 50, 30*time.Second, 30*time.Second)
 	// Tenant-consistent sharding (ADR-016): admission and scheduling must
 	// share the same shard so one instance owns a tenant's whole pipeline.
@@ -145,6 +152,16 @@ func main() {
 				slog.Warn("accounting drift detected", "taskLedger", report.TaskLedgerDrift,
 					"quotaReserved", report.QuotaReservedDrift, "modelLedger", report.ModelLedgerDrift,
 					"providerReceiptGaps", report.ProviderReceiptGaps, "repaired", report.Repaired)
+			}
+			// P1-05: drain the post-upgrade backlog of workflows whose step
+			// token/cost reservations 000028 could not re-derive in SQL. The
+			// spawn guard pauses dynamic spawning per workflow until its flag
+			// clears here, so this must run on the same audit cadence.
+			if reservations, reservationErr := repository.ReconcileWorkflowReservations(ctx, true); reservationErr != nil && ctx.Err() == nil {
+				slog.Error("workflow reservation reconciliation", "error", reservationErr)
+			} else if reservations.Reconciled > 0 {
+				slog.Info("workflow reservations reconciled", "workflows", reservations.Reconciled,
+					"stepsAdjusted", reservations.StepsAdjusted)
 			}
 			nextAccountingAudit = now.Add(*accountingInterval)
 		}

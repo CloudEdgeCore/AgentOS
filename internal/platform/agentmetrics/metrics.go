@@ -22,6 +22,7 @@ var instruments struct {
 	budgetEvents      metric.Int64Counter
 	accountingDrift   metric.Int64Counter
 	queueDepth        metric.Int64Histogram
+	firstTokenLatency metric.Float64Histogram
 }
 
 func initInstruments() {
@@ -35,6 +36,9 @@ func initInstruments() {
 		instruments.budgetEvents, _ = meter.Int64Counter("agentos.budget.events")
 		instruments.accountingDrift, _ = meter.Int64Counter("agentos.accounting.reconciliation.drift")
 		instruments.queueDepth, _ = meter.Int64Histogram("agentos.queue.depth")
+		instruments.firstTokenLatency, _ = meter.Float64Histogram("agentos.model.first_token_latency_ms",
+			metric.WithUnit("ms"),
+			metric.WithDescription("model streaming time-to-first-token, measured at the kernel invoker"))
 	})
 }
 
@@ -80,4 +84,12 @@ func AccountingDrift(ctx context.Context, ledger string, count int64) {
 func QueueDepth(ctx context.Context, queue string, depth int64) {
 	initInstruments()
 	instruments.queueDepth.Record(ctx, depth, metric.WithAttributes(attribute.String("queue", queue)))
+}
+
+// ModelFirstTokenLatency records streaming time-to-first-token in milliseconds,
+// attributed by provider only (bounded cardinality). Recorded at the kernel
+// invoker so it is captured regardless of any downstream delta consumer.
+func ModelFirstTokenLatency(ctx context.Context, provider string, ms float64) {
+	initInstruments()
+	instruments.firstTokenLatency.Record(ctx, ms, metric.WithAttributes(attribute.String("provider", provider)))
 }

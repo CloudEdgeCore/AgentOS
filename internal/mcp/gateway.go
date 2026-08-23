@@ -156,7 +156,13 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 	if err != nil {
 		return nil, &Error{Code: codeInternalError, Message: "resolve tool descriptor"}
 	}
-	descriptor, ok := latestDescriptor(descriptors, call.Name)
+	// A "name@version" reference pins one exact granted version (P1-08);
+	// a bare name resolves the latest granted version.
+	toolName, toolVersion := call.Name, ""
+	if name, version, pinned := strings.Cut(call.Name, "@"); pinned {
+		toolName, toolVersion = name, version
+	}
+	descriptor, ok := resolveToolVersion(descriptors, toolName, toolVersion)
 	if !ok {
 		return nil, invalidParams("unknown tool: " + call.Name)
 	}
@@ -171,7 +177,7 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 		TenantID: identity.TenantID, TaskID: identity.TaskID, RunID: identity.RunID,
 		AttemptID: identity.AttemptID, FencingToken: identity.FencingToken,
 		AgentVersionRef: identity.AgentVersionRef,
-		ToolName:        descriptor.Name, Action: action, Resource: resource,
+		ToolName:        descriptor.Name, ToolVersion: descriptor.Version, Action: action, Resource: resource,
 		Args: args, IdempotencyKey: mcpIdempotencyKey(identity, descriptor.Name, args),
 	})
 	if err != nil {
@@ -239,6 +245,22 @@ func latestDescriptor(descriptors []store.ToolDescriptor, name string) (store.To
 		}
 	}
 	return latest, found
+}
+
+// resolveToolVersion resolves a tool reference against the granted
+// descriptors: the latest granted version when no version is pinned, the
+// exact version when one is (a pinned reference to a version the agent is
+// not granted resolves to nothing).
+func resolveToolVersion(descriptors []store.ToolDescriptor, name, version string) (store.ToolDescriptor, bool) {
+	if version == "" {
+		return latestDescriptor(descriptors, name)
+	}
+	for _, descriptor := range descriptors {
+		if descriptor.Name == name && descriptor.Version == version {
+			return descriptor, true
+		}
+	}
+	return store.ToolDescriptor{}, false
 }
 
 func compareToolVersions(left, right string) int {
