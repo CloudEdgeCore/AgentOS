@@ -108,6 +108,9 @@ func TestThousandConcurrentTasksStableUnderLoad(t *testing.T) {
 	// to consume that artificial backlog. Keep the unclaimed assignment lease
 	// beyond the test's ten-minute convergence window; once a worker claims an
 	// assignment its normal 30-second heartbeat TTL takes over.
+	if err := store.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register load fixture pools: %v", err)
+	}
 	schedulerController := scheduler.NewController(store, pools, "load/scheduler", 50, time.Minute, 15*time.Minute)
 
 	var peakRunning atomic.Int64

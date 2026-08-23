@@ -282,6 +282,9 @@ func scheduleRuntimeTask(t *testing.T, ctx context.Context, repository *postgres
 		ID: "pool-cn-1", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-cn-1",
 		Region: "cn-east", Ready: true, AvailableCPU: 100_000, AvailableMemory: 1_000_000, AvailableLLMSlots: 1_000,
 	}}
+	if err := repository.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register fixture pools: %v", err)
+	}
 	if count, err := scheduler.NewController(repository, pools, "scheduler-"+key, 10, time.Minute, 30*time.Second).Reconcile(ctx); err != nil || count != 1 {
 		t.Fatalf("scheduler count=%d err=%v", count, err)
 	}

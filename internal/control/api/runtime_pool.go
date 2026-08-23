@@ -41,6 +41,7 @@ func (h *Handler) updateRuntimePoolStatus(writer http.ResponseWriter, request *h
 	}
 	state, err := h.runtimePools.UpdateRuntimePoolStatus(request.Context(), store.UpdateRuntimePoolStatusInput{
 		TenantID: principal.TenantID, PoolID: request.PathValue("poolID"), Status: body.Status, ExpectedVersion: expected,
+		OperatorSubject: principal.Subject,
 	})
 	if err != nil {
 		h.writeStoreProblem(writer, request, err, traceID)

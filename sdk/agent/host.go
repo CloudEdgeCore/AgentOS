@@ -275,6 +275,8 @@ func (h *Host) executionRoute(writer http.ResponseWriter, request *http.Request,
 		executionID, action = strings.TrimSuffix(remainder, ":checkpoint"), "checkpoint"
 	case strings.HasSuffix(remainder, ":restore"):
 		executionID, action = strings.TrimSuffix(remainder, ":restore"), "restore"
+	case strings.HasSuffix(remainder, "/events/stream"):
+		executionID, action = strings.TrimSuffix(remainder, "/events/stream"), "events/stream"
 	case strings.HasSuffix(remainder, "/events"):
 		executionID, action = strings.TrimSuffix(remainder, "/events"), "events"
 	case strings.HasSuffix(remainder, "/result"):
@@ -294,6 +296,8 @@ func (h *Host) executionRoute(writer http.ResponseWriter, request *http.Request,
 		h.checkpoint(writer, request, executionID)
 	case "restore":
 		h.restore(writer, request, executionID)
+	case "events/stream":
+		h.eventStream(writer, request, executionID)
 	case "events":
 		h.events(writer, request, executionID)
 	case "result":

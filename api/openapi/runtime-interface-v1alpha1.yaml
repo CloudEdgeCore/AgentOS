@@ -89,6 +89,30 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/EventList' }
         '404': { $ref: '#/components/responses/Problem' }
+  /v1alpha1/executions/{executionId}/events/stream:
+    get:
+      operationId: streamExecutionEvents
+      description: >
+        Additive streaming extension. One long-lived text/event-stream
+        connection replaces the Events/Result poll cycle: events after the
+        cursor are pushed as SSE frames ("event: event") and the terminal
+        frame ("event: result") carries the final Result, so no separate
+        result poll is needed. The cursor ("after") makes reconnection
+        lossless. Runtimes that implement only the frozen polling contract
+        answer 404 ROUTE_NOT_FOUND and clients fall back to polling.
+      parameters:
+        - { $ref: '#/components/parameters/ExecutionID' }
+        - name: after
+          in: query
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Server-sent event stream terminated by the result frame.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404': { $ref: '#/components/responses/Problem' }
   /v1alpha1/executions/{executionId}/result:
     get:
       operationId: getExecutionResult
@@ -182,6 +206,7 @@ components:
         executionId: { type: string }
         events: { type: array, items: { $ref: '#/components/schemas/Event' } }
         nextAfter: { type: integer, format: int64, minimum: 0 }
+        truncated: { type: boolean }
     Result:
       type: object
       additionalProperties: false

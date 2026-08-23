@@ -83,6 +83,9 @@ func TestControlPlanePipelineCapacityBaseline(t *testing.T) {
 		Region: "cn-east", DataResidency: "cn", Ready: true,
 		AvailableCPU: int64(taskCount * 100), AvailableMemory: int64(taskCount * 128), AvailableLLMSlots: taskCount,
 	}}
+	if err := store.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register capacity fixture pools: %v", err)
+	}
 	schedulerController := scheduler.NewController(store, pools, "capacity/scheduler", 50, time.Minute, 30*time.Minute)
 	scheduleWall := time.Now()
 	drainPhase(t, ctx, pool, schedulerController.Reconcile, "RUNNING", taskCount)

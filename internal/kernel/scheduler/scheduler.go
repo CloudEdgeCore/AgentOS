@@ -35,13 +35,23 @@ type RuntimePool struct {
 	Ready             bool     `json:"ready"`
 	// Status separates health from operator intent. Empty/ACTIVE accepts new
 	// work; CORDONED and DRAINING preserve existing leases but reject placement.
-	Status            string   `json:"status,omitempty"`
-	FailureDomain     string   `json:"failureDomain,omitempty"`
-	AvailableCPU      int64    `json:"availableCpuMillis"`
-	AvailableMemory   int64    `json:"availableMemoryMiB"`
-	AvailableLLMSlots int      `json:"availableLlmSlots"`
-	ArtifactRegions   []string `json:"artifactRegions"`
-	CostWeight        float64  `json:"costWeight"`
+	Status            string `json:"status,omitempty"`
+	FailureDomain     string `json:"failureDomain,omitempty"`
+	AvailableCPU      int64  `json:"availableCpuMillis"`
+	AvailableMemory   int64  `json:"availableMemoryMiB"`
+	AvailableLLMSlots int    `json:"availableLlmSlots"`
+	// CapacityLedgerMissing marks a pool whose durable capacity ledger was
+	// never registered by the operator. Such pools fail placement closed
+	// instead of being treated as fully idle. Zero (the default) keeps
+	// statically configured pools schedulable.
+	CapacityLedgerMissing bool     `json:"capacityLedgerMissing,omitempty"`
+	ArtifactRegions       []string `json:"artifactRegions"`
+	CostWeight            float64  `json:"costWeight"`
+	// Operators lists the operator subjects granted cordon/drain/activate
+	// authority on this pool. Usage visibility comes from TenantIDs; the
+	// two authorities are deliberately independent so a tenant of a shared
+	// pool cannot operate it.
+	Operators []string `json:"operators,omitempty"`
 }
 
 type ScoreComponent struct {
@@ -62,8 +72,12 @@ type Rejection struct {
 }
 
 type Result struct {
-	Placement Placement   `json:"placement"`
-	Rejected  []Rejection `json:"rejected"`
+	Placement Placement `json:"placement"`
+	// Candidates is the full score-ranked placement list. Placement is the
+	// first entry; the scheduler walks the remaining entries in order when
+	// a higher-ranked pool loses the transactional capacity reservation.
+	Candidates []Placement `json:"candidates"`
+	Rejected   []Rejection `json:"rejected"`
 }
 
 func Select(spec workload.Spec, pools []RuntimePool) (Result, error) {
@@ -116,6 +130,9 @@ func selectForTask(spec workload.Spec, pools []RuntimePool, taskID uuid.UUID) (R
 		if spec.Placement.DataResidency != "" && pool.DataResidency != spec.Placement.DataResidency {
 			rejected = append(rejected, "DATA_RESIDENCY_MISMATCH")
 		}
+		if pool.CapacityLedgerMissing {
+			rejected = append(rejected, "CAPACITY_LEDGER_MISSING")
+		}
 		if pool.AvailableCPU < spec.Placement.CPU {
 			rejected = append(rejected, "CPU_EXHAUSTED")
 		}
@@ -154,6 +171,7 @@ func selectForTask(spec workload.Spec, pools []RuntimePool, taskID uuid.UUID) (R
 		return candidates[i].Score > candidates[j].Score
 	})
 	result.Placement = candidates[0]
+	result.Candidates = candidates
 	sort.Slice(result.Rejected, func(i, j int) bool { return result.Rejected[i].PoolID < result.Rejected[j].PoolID })
 	return result, nil
 }
@@ -424,47 +442,35 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 		slog.Error("placement selection failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", err)
 		return false, nil
 	}
-	pool := selection.Placement.Pool
-	_, err = c.store.ScheduleTask(ctx, store.ScheduleTaskInput{
-		TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
-		ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
-		RunID: c.newID(), AttemptID: c.newID(), LeaseID: c.newID(), RuntimePoolID: pool.ID,
-		RuntimeClass: pool.RuntimeClass, RuntimeInstanceID: pool.RuntimeInstanceID, LeaseTTL: c.leaseTTL,
-		PoolCPUCapacity: pool.AvailableCPU, PoolMemoryCapacity: pool.AvailableMemory,
-		PoolLLMCapacity: pool.AvailableLLMSlots, RequestedCPU: spec.Placement.CPU,
-		RequestedMemory: spec.Placement.Memory, RequestedLLMSlots: spec.Placement.LLMConcurrency,
-	})
-	if err != nil {
+	// Walk the ranked candidates in order. A pool that filled between the
+	// read-only placement pass and the transactional reservation only
+	// eliminates itself; the next candidate is tried in the same reconcile
+	// pass. The task is deferred with the accumulated per-candidate
+	// diagnostics only after every candidate lost the race.
+	capacityRaces := append([]Rejection(nil), selection.Rejected...)
+	for _, candidate := range selection.Candidates {
+		pool := candidate.Pool
+		_, err = c.store.ScheduleTask(ctx, store.ScheduleTaskInput{
+			TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
+			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
+			RunID: c.newID(), AttemptID: c.newID(), LeaseID: c.newID(), RuntimePoolID: pool.ID,
+			RuntimeClass: pool.RuntimeClass, RuntimeInstanceID: pool.RuntimeInstanceID, LeaseTTL: c.leaseTTL,
+			PoolCPUCapacity: pool.AvailableCPU, PoolMemoryCapacity: pool.AvailableMemory,
+			PoolLLMCapacity: pool.AvailableLLMSlots, RequestedCPU: spec.Placement.CPU,
+			RequestedMemory: spec.Placement.Memory, RequestedLLMSlots: spec.Placement.LLMConcurrency,
+		})
+		if err == nil {
+			agentmetrics.SchedulerOutcome(ctx, "scheduled")
+			return true, nil
+		}
 		if store.IsRetryableTransaction(err) {
 			return false, err
 		}
 		if errors.Is(err, store.ErrCapacityExhausted) {
-			// The selected pool may fill between the read-only placement pass
-			// and the transactional reservation. Persist the same bounded
-			// backoff used for a no-fit decision instead of immediately
-			// reclaiming the task in a hot loop.
-			rejections := append(selection.Rejected, Rejection{
+			capacityRaces = append(capacityRaces, Rejection{
 				PoolID: pool.ID, Reasons: []string{"CAPACITY_RESERVATION_RACE"},
 			})
-			rejection, encodeErr := json.Marshal(rejections)
-			if encodeErr != nil {
-				return false, fmt.Errorf("encode capacity rejection: %w", encodeErr)
-			}
-			_, deferErr := c.store.DeferTaskSchedule(ctx, store.DeferTaskScheduleInput{
-				TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
-				ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
-				Until:     time.Now().UTC().Add(capacityBackoff(claim.Task.ScheduleRetryCount, claim.Task.ID)),
-				Rejection: rejection,
-			})
-			if deferErr != nil {
-				if store.IsRetryableTransaction(deferErr) {
-					return false, deferErr
-				}
-				_ = c.store.ReleaseTaskClaim(ctx, claim)
-				slog.Error("capacity deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
-			}
-			agentmetrics.SchedulerOutcome(ctx, "placement_deferred")
-			return false, nil
+			continue
 		}
 		// A stale claim or a per-task schedule failure: release and
 		// continue so one task cannot starve the batch.
@@ -473,8 +479,28 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 		agentmetrics.SchedulerOutcome(ctx, "schedule_failed")
 		return false, nil
 	}
-	agentmetrics.SchedulerOutcome(ctx, "scheduled")
-	return true, nil
+	// Every candidate lost the capacity race. Persist the same bounded
+	// backoff used before fallback existed instead of immediately
+	// reclaiming the task in a hot loop.
+	rejection, encodeErr := json.Marshal(capacityRaces)
+	if encodeErr != nil {
+		return false, fmt.Errorf("encode capacity rejection: %w", encodeErr)
+	}
+	_, deferErr := c.store.DeferTaskSchedule(ctx, store.DeferTaskScheduleInput{
+		TaskID: claim.Task.ID, TenantID: claim.Task.TenantID, OwnerID: claim.OwnerID,
+		ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
+		Until:     time.Now().UTC().Add(capacityBackoff(claim.Task.ScheduleRetryCount, claim.Task.ID)),
+		Rejection: rejection,
+	})
+	if deferErr != nil {
+		if store.IsRetryableTransaction(deferErr) {
+			return false, deferErr
+		}
+		_ = c.store.ReleaseTaskClaim(ctx, claim)
+		slog.Error("capacity deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
+	}
+	agentmetrics.SchedulerOutcome(ctx, "placement_deferred")
+	return false, nil
 }
 
 func newUUIDv7() uuid.UUID {

@@ -86,6 +86,9 @@ func TestMultiTenantStressQuotaIsolationAndRecovery(t *testing.T) {
 		Region: "cn-east", DataResidency: "cn", Ready: true,
 		AvailableCPU: int64(wantStressCapacity() * 100), AvailableMemory: int64(wantStressCapacity() * 128), AvailableLLMSlots: wantStressCapacity(),
 	}}
+	if err := store.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register stress fixture pools: %v", err)
+	}
 	schedulerController := scheduler.NewController(store, pools, "stress/scheduler", 50, time.Minute, 30*time.Minute)
 	recoveryController := recovery.NewController(store, 50, time.Minute)
 

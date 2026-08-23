@@ -21,6 +21,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+	runtimeadapter "github.com/CloudEdgeCore/AgentOS/internal/runtime/adapter"
 	"github.com/CloudEdgeCore/AgentOS/internal/version"
 	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 	"github.com/CloudEdgeCore/AgentOS/sdk/conformance"
@@ -162,7 +163,7 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 	directory := flags.String("dir", ".", "new Agent project directory")
 	name := flags.String("name", "", "Agent name (defaults to directory name)")
 	language := flags.String("adapter", "go", "go, python, langgraph, or a2a")
-	endpoint := flags.String("endpoint", "http://127.0.0.1:8088", "local Runtime Interface endpoint")
+	endpoint := flags.String("endpoint", "", "embed a concrete Runtime Interface endpoint in the manifest (legacy single-environment flow; empty writes an environment-independent logical binding reference)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -172,6 +173,15 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 	}
 	if err := agentversion.ValidateName(agentName); err != nil {
 		return err
+	}
+	// The default entrypoint is a logical binding reference, not a network
+	// address: deployment endpoints live in the operator's runtime binding
+	// file (see agentos-runtime-adapter -runtime-bindings), so one
+	// AgentVersion digest deploys unchanged across dev/staging/prod and
+	// regions. -endpoint preserves the legacy single-environment flow.
+	entrypoint := runtimeadapter.BindingScheme + agentName + "/remote"
+	if strings.TrimSpace(*endpoint) != "" {
+		entrypoint = strings.TrimRight(*endpoint, "/")
 	}
 	var runtimeABI, sourceName, source string
 	switch *language {
@@ -193,7 +203,7 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 			RuntimeClassPolicy: agentversion.RuntimeClassPolicy{Allowed: []string{"remote"}, Preferred: "remote"},
 			Runtimes: []agentversion.RuntimeTarget{{
 				Class: "remote", Interface: agentversion.RuntimeInterfaceV1,
-				RuntimeABI: runtimeABI, Entrypoint: []string{strings.TrimRight(*endpoint, "/")},
+				RuntimeABI: runtimeABI, Entrypoint: []string{entrypoint},
 			}},
 			Capabilities: &agentversion.Capabilities{
 				Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{},

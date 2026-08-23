@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
 	"github.com/google/uuid"
 )
 
@@ -146,9 +147,17 @@ type WorkflowStep struct {
 	AgentVersionRef  string
 	Spec             json.RawMessage
 	MaxAttempts      int
-	ResourceVersion  int64
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// Reserved* is the outstanding workflow budget reservation held by an
+	// undispatched or retrying step: the future Task's token/cost ceiling
+	// plus its task-count slot. It transfers to the task's own budget
+	// ledger at admission and returns to zero when the step reaches a
+	// terminal state without one.
+	ReservedTasks        int64
+	ReservedTokens       int64
+	ReservedCostMicroUSD money.MicroUSD
+	ResourceVersion      int64
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 var stepNamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,63})$`)
@@ -307,9 +316,19 @@ type WorkflowUsage struct {
 	BudgetMaxTasks        int64
 	BudgetMaxTokens       int64
 	BudgetMaxCostMicroUSD money.MicroUSD
+	// StepReserved* counts the workflow budget reservations still held by
+	// undispatched (or retrying) steps: the outstanding future commitment
+	// that exists before any task budget ledger does.
+	StepReservedTasks        int64
+	StepReservedTokens       int64
+	StepReservedCostMicroUSD money.MicroUSD
 }
 
-// Exhausted reports whether any declared ceiling is met or exceeded.
+// Exhausted reports whether any declared ceiling is met or exceeded by
+// created tasks and their settled or task-reserved usage. Step reservations
+// are excluded: a promise that exactly fills the budget must still run, and
+// over-promising is already impossible because spawn and creation reserve
+// inside their transactions.
 func (u WorkflowUsage) Exhausted() bool {
 	if u.BudgetMaxTasks > 0 && u.Tasks >= u.BudgetMaxTasks {
 		return true
@@ -321,6 +340,41 @@ func (u WorkflowUsage) Exhausted() bool {
 		return true
 	}
 	return false
+}
+
+// CommittedTasks returns the workflow's total task promise: created tasks
+// plus the task slots reserved by undispatched steps.
+func (u WorkflowUsage) CommittedTasks() int64 {
+	return u.Tasks + u.StepReservedTasks
+}
+
+// CommittedTokens returns settled plus task-reserved plus step-reserved
+// tokens: the workflow's total token commitment.
+func (u WorkflowUsage) CommittedTokens() int64 {
+	return u.Tokens + u.ReservedTokens + u.StepReservedTokens
+}
+
+// CommittedCostMicroUSD returns settled plus task-reserved plus
+// step-reserved cost: the workflow's total cost commitment.
+func (u WorkflowUsage) CommittedCostMicroUSD() money.MicroUSD {
+	return u.CostMicroUSD + u.ReservedCostMicroUSD + u.StepReservedCostMicroUSD
+}
+
+// TaskSpecBudgetReservation extracts the token and cost ceiling a merged
+// workflow step spec will reserve at admission. It mirrors the admission
+// controller's workload budget decode so the step reservation equals the
+// task ledger reservation that later replaces it.
+func TaskSpecBudgetReservation(spec json.RawMessage) (tokens int64, costMicroUSD money.MicroUSD) {
+	if len(spec) == 0 {
+		return 0, 0
+	}
+	var document struct {
+		Budget workload.Budget `json:"budget"`
+	}
+	if json.Unmarshal(spec, &document) != nil {
+		return 0, 0
+	}
+	return document.Budget.Tokens, document.Budget.CostMicroUSD
 }
 
 // SpawnKeyHash fingerprints the spawn arguments into the idempotent

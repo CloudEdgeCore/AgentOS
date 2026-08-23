@@ -31,6 +31,9 @@ func TestRuntimePoolCordonIsTenantScopedAndCASGuarded(t *testing.T) {
 	if response.Code != http.StatusOK || backend.input.TenantID != "tenant-a" || backend.input.PoolID != "pool-a" || backend.input.ExpectedVersion != 7 {
 		t.Fatalf("response=%d input=%+v body=%s", response.Code, backend.input, response.Body.String())
 	}
+	if backend.input.OperatorSubject != "operator" {
+		t.Fatalf("operator subject = %q, want the authenticated principal subject", backend.input.OperatorSubject)
+	}
 	if response.Header().Get("ETag") != `W/"8"` {
 		t.Fatalf("etag = %q", response.Header().Get("ETag"))
 	}

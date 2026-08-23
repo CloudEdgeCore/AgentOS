@@ -20,13 +20,15 @@ import (
 // surface implemented; any other method panics, which is a test failure.
 type fakeSchedulingStore struct {
 	store.ControlStore
-	claims      []store.TaskClaim
-	scheduled   []uuid.UUID
-	deferred    []store.DeferTaskScheduleInput
-	released    int
-	poisonSpec  bool
-	deferErr    error
-	scheduleErr error
+	claims            []store.TaskClaim
+	scheduled         []uuid.UUID
+	scheduledPools    []string
+	deferred          []store.DeferTaskScheduleInput
+	released          int
+	poisonSpec        bool
+	deferErr          error
+	scheduleErr       error
+	scheduleErrByPool map[string]error
 }
 
 func (f *fakeSchedulingStore) ClaimTasks(context.Context, store.ClaimTasksInput) ([]store.TaskClaim, error) {
@@ -47,6 +49,10 @@ func (f *fakeSchedulingStore) DeferTaskSchedule(_ context.Context, in store.Defe
 }
 
 func (f *fakeSchedulingStore) ScheduleTask(_ context.Context, in store.ScheduleTaskInput) (store.AttemptLease, error) {
+	f.scheduledPools = append(f.scheduledPools, in.RuntimePoolID)
+	if err, ok := f.scheduleErrByPool[in.RuntimePoolID]; ok {
+		return store.AttemptLease{}, err
+	}
 	if f.scheduleErr != nil {
 		return store.AttemptLease{}, f.scheduleErr
 	}
@@ -57,6 +63,72 @@ func (f *fakeSchedulingStore) ScheduleTask(_ context.Context, in store.ScheduleT
 	}
 	f.scheduled = append(f.scheduled, in.TaskID)
 	return store.AttemptLease{}, nil
+}
+
+// TestControllerFallsBackToNextCandidateOnCapacityRace proves a capacity
+// reservation loss on the top-ranked pool is retried on the next candidate
+// within the same reconcile pass instead of deferring the task.
+func TestControllerFallsBackToNextCandidateOnCapacityRace(t *testing.T) {
+	claim := store.TaskClaim{Task: admittedTask("fallback", `{
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`), OwnerID: "scheduler-1", FencingToken: 7}
+	repository := &fakeSchedulingStore{claims: []store.TaskClaim{claim},
+		scheduleErrByPool: map[string]error{"pool-a": store.ErrCapacityExhausted}}
+	// pool-a has more headroom and therefore outranks pool-b.
+	controller := NewController(repository, StaticPoolSource{
+		{ID: "pool-a", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-a",
+			Region: "cn-east", Ready: true, AvailableCPU: 4000, AvailableMemory: 8192, AvailableLLMSlots: 8},
+		{ID: "pool-b", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-b",
+			Region: "cn-east", Ready: true, AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 2},
+	}, "scheduler-1", 10, time.Minute, time.Minute)
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 1 {
+		t.Fatalf("fallback reconcile: processed=%d err=%v", processed, err)
+	}
+	if len(repository.scheduledPools) != 2 || repository.scheduledPools[0] != "pool-a" || repository.scheduledPools[1] != "pool-b" {
+		t.Fatalf("candidates tried in order = %v, want [pool-a pool-b]", repository.scheduledPools)
+	}
+	if len(repository.deferred) != 0 || repository.released != 0 {
+		t.Fatalf("fallback must not defer or release: deferred=%d released=%d", len(repository.deferred), repository.released)
+	}
+}
+
+// TestControllerDefersOnlyAfterEveryCandidateRaces proves the bounded
+// capacity backoff is applied once every ranked candidate lost the
+// reservation race, with per-candidate diagnostics preserved.
+func TestControllerDefersOnlyAfterEveryCandidateRaces(t *testing.T) {
+	claim := store.TaskClaim{Task: admittedTask("all-raced", `{
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`), OwnerID: "scheduler-1", FencingToken: 7}
+	repository := &fakeSchedulingStore{claims: []store.TaskClaim{claim},
+		scheduleErrByPool: map[string]error{"pool-a": store.ErrCapacityExhausted, "pool-b": store.ErrCapacityExhausted}}
+	controller := NewController(repository, StaticPoolSource{
+		{ID: "pool-a", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-a",
+			Region: "cn-east", Ready: true, AvailableCPU: 4000, AvailableMemory: 8192, AvailableLLMSlots: 8},
+		{ID: "pool-b", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-b",
+			Region: "cn-east", Ready: true, AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 2},
+	}, "scheduler-1", 10, time.Minute, time.Minute)
+
+	processed, err := controller.Reconcile(context.Background())
+	if err != nil || processed != 0 {
+		t.Fatalf("all-raced reconcile: processed=%d err=%v", processed, err)
+	}
+	if len(repository.scheduledPools) != 2 {
+		t.Fatalf("every candidate must be tried once, tried=%v", repository.scheduledPools)
+	}
+	if len(repository.deferred) != 1 {
+		t.Fatalf("deferrals = %d, want 1", len(repository.deferred))
+	}
+	var rejection []Rejection
+	if err := json.Unmarshal(repository.deferred[0].Rejection, &rejection); err != nil || len(rejection) != 2 {
+		t.Fatalf("rejection diagnostics = %s err=%v, want both raced pools", repository.deferred[0].Rejection, err)
+	}
+	for _, entry := range rejection {
+		if entry.Reasons[0] != "CAPACITY_RESERVATION_RACE" {
+			t.Fatalf("rejection for %s = %v, want CAPACITY_RESERVATION_RACE", entry.PoolID, entry.Reasons)
+		}
+	}
 }
 
 func TestControllerDefersAtomicCapacityRace(t *testing.T) {
@@ -365,5 +437,55 @@ func TestControllerIsolatesDeferralFailure(t *testing.T) {
 	}}, "scheduler-1", 10, time.Minute, time.Minute)
 	if _, err := controller2.Reconcile(context.Background()); !store.IsRetryableTransaction(err) {
 		t.Fatalf("Reconcile() error = %v, want retryable", err)
+	}
+}
+
+// TestSelectReturnsRankedCandidates proves Select exposes the full
+// score-ranked candidate list with Placement as its head, which the
+// controller walks in order on capacity-race fallback.
+func TestSelectReturnsRankedCandidates(t *testing.T) {
+	spec, err := workload.Decode([]byte(`{
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	result, err := Select(spec, []RuntimePool{
+		{ID: "pool-small", RuntimeClass: "oci", RuntimeInstanceID: "worker-s", Region: "cn-east", Ready: true, AvailableCPU: 200, AvailableMemory: 256, AvailableLLMSlots: 1},
+		{ID: "pool-large", RuntimeClass: "oci", RuntimeInstanceID: "worker-l", Region: "cn-east", Ready: true, AvailableCPU: 4000, AvailableMemory: 8192, AvailableLLMSlots: 8},
+	})
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(result.Candidates) != 2 {
+		t.Fatalf("candidates = %d, want every eligible pool ranked", len(result.Candidates))
+	}
+	if result.Placement.Pool.ID != result.Candidates[0].Pool.ID {
+		t.Fatalf("placement = %s, want the head of the ranked list %s", result.Placement.Pool.ID, result.Candidates[0].Pool.ID)
+	}
+	if result.Candidates[0].Score < result.Candidates[1].Score {
+		t.Fatalf("candidates must be score-descending: %v then %v", result.Candidates[0].Score, result.Candidates[1].Score)
+	}
+}
+
+// TestSelectFailsClosedOnMissingCapacityLedger proves a pool whose durable
+// capacity ledger was never registered is rejected with an explicit reason
+// instead of being treated as fully idle.
+func TestSelectFailsClosedOnMissingCapacityLedger(t *testing.T) {
+	spec, err := workload.Decode([]byte(`{
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	result, err := Select(spec, []RuntimePool{
+		{ID: "pool-unregistered", RuntimeClass: "oci", RuntimeInstanceID: "worker-u", Region: "cn-east",
+			Ready: true, AvailableCPU: 4000, AvailableMemory: 8192, AvailableLLMSlots: 8, CapacityLedgerMissing: true},
+	})
+	if !errors.Is(err, ErrNoPlacement) {
+		t.Fatalf("select error = %v, want ErrNoPlacement", err)
+	}
+	if len(result.Rejected) != 1 || result.Rejected[0].Reasons[0] != "CAPACITY_LEDGER_MISSING" {
+		t.Fatalf("rejections = %+v, want CAPACITY_LEDGER_MISSING", result.Rejected)
 	}
 }

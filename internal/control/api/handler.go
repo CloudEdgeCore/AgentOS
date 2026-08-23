@@ -1717,6 +1717,8 @@ func (h *Handler) writeStoreProblem(writer http.ResponseWriter, request *http.Re
 		h.writeProblem(writer, request, http.StatusConflict, "TASK_STATE_CONFLICT", "task lifecycle does not allow this operation", traceID)
 	case errors.Is(err, store.ErrAgentVersionConflict):
 		h.writeProblem(writer, request, http.StatusConflict, "AGENT_VERSION_CONFLICT", "agent version identity was already published with a different spec", traceID)
+	case errors.Is(err, store.ErrPoolOperatorDenied):
+		h.writeProblem(writer, request, http.StatusForbidden, "RUNTIME_POOL_OPERATOR_DENIED", "principal holds no operator grant for this runtime pool", traceID)
 	default:
 		h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be completed", traceID)
 	}

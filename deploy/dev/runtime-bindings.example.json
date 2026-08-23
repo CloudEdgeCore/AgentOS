@@ -1,0 +1,12 @@
+{
+  "bindings": [
+    {
+      "agentVersionRef": "hello-agent@0.1.0",
+      "endpoint": "http://127.0.0.1:8088"
+    },
+    {
+      "agentVersionRef": "fleet-agent@*",
+      "endpoint": "http://127.0.0.1:8090"
+    }
+  ]
+}

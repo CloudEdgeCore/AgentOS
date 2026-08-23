@@ -238,6 +238,9 @@ func scheduleReferenceTask(t *testing.T, ctx context.Context, store *postgressto
 		ID: "pool-sandbox", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-sandbox-1",
 		Region: "cn-east", Ready: true, AvailableCPU: 2000, AvailableMemory: 4096, AvailableLLMSlots: 4,
 	}}
+	if err := store.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register fixture pools: %v", err)
+	}
 	if count, err := scheduler.NewController(store, pools, "scheduler-"+key, 10, time.Minute, 30*time.Second).Reconcile(ctx); err != nil || count != 1 {
 		t.Fatalf("scheduler count=%d err=%v", count, err)
 	}
