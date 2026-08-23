@@ -769,11 +769,11 @@ func encodeTools(tools []ToolDefinition) []wireToolRequest {
 	}
 	converted := make([]wireToolRequest, 0, len(tools))
 	for _, tool := range tools {
+		// wireToolDefinition mirrors ToolDefinition field-for-field, so the
+		// conversion is a direct type conversion.
 		converted = append(converted, wireToolRequest{
-			Type: "function",
-			Function: wireToolDefinition{
-				Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters,
-			},
+			Type:     "function",
+			Function: wireToolDefinition(tool),
 		})
 	}
 	return converted
