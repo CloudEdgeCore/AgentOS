@@ -155,7 +155,8 @@ func TestManifestAcceptsSupportedCapabilityWildcards(t *testing.T) {
 	}
 }
 
-func TestValidateSpecChecksPlatformFieldsWhenPresent(t *testing.T) {	manifest := validManifest()
+func TestValidateSpecChecksPlatformFieldsWhenPresent(t *testing.T) {
+	manifest := validManifest()
 	encoded, err := json.Marshal(manifest.Spec)
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)

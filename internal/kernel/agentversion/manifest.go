@@ -161,7 +161,9 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-func (m Manifest) Ref() string { return FormatRef(m.Metadata.Namespace, m.Metadata.Name, m.Metadata.Version) }
+func (m Manifest) Ref() string {
+	return FormatRef(m.Metadata.Namespace, m.Metadata.Name, m.Metadata.Version)
+}
 
 // PromoteToV1 performs the only supported alpha-to-GA schema migration. The
 // v1 schema is otherwise wire-identical, so canonical identity changes solely

@@ -485,7 +485,7 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 			RunID: c.newID(), AttemptID: c.newID(), LeaseID: c.newID(), RuntimePoolID: pool.ID,
 			RuntimeClass: pool.RuntimeClass, RuntimeInstanceID: pool.RuntimeInstanceID, LeaseTTL: c.leaseTTL,
-			RequestedCPU: spec.Placement.CPU,
+			RequestedCPU:    spec.Placement.CPU,
 			RequestedMemory: spec.Placement.Memory, RequestedLLMSlots: spec.Placement.LLMConcurrency,
 		})
 		if err == nil {
