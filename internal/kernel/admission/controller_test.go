@@ -429,12 +429,12 @@ func (f *fakeControlStore) maxConcurrent() int {
 
 func newFakeWithVersion(tenantID, ref, spec string) *fakeControlStore {
 	repository := &fakeControlStore{versions: map[string]store.AgentVersion{}}
-	name, version, err := agentversion.ParseRef(ref)
+	namespace, name, version, err := agentversion.ParseRef(ref)
 	if err != nil {
 		panic(err)
 	}
 	repository.versions[tenantID+"/"+ref] = store.AgentVersion{
-		ID: uuid.New(), TenantID: tenantID, Name: name, Version: version,
+		ID: uuid.New(), TenantID: tenantID, Namespace: namespace, Name: name, Version: version,
 		Spec: json.RawMessage(spec), ResourceVersion: 1,
 	}
 	return repository

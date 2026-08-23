@@ -175,6 +175,71 @@ func TestBrokerModelInvokeEnforcesGrantAndFencing(t *testing.T) {
 	}
 }
 
+func TestBrokerModelInvokeGeneratesToolSchemaAndPinsVersion(t *testing.T) {
+	// Two granted versions of one tool with DISTINCT parameter schemas. The
+	// agent supplies only tool NAMES; the broker must attach the registry's
+	// schema (P0-01: never trust an agent-submitted contract) and honor a
+	// pinned "name@version" reference (P1-08).
+	descriptors := []store.ToolDescriptor{
+		{Name: "weather", Version: "1.0.0", SideEffectRisk: "low", ParamsSchema: []byte(`{"type":"object","properties":{"city":{"type":"string"}}}`)},
+		{Name: "weather", Version: "1.2.0", SideEffectRisk: "low", ParamsSchema: []byte(`{"type":"object","properties":{"city":{"type":"string"},"unit":{"type":"string"}}}`)},
+	}
+	models := &fakeModelBroker{output: kernelmodel.InvokeOutput{
+		Call:      store.ModelCall{ID: uuid.New(), TenantID: "tenant-1", ModelRef: "fake/agent-model", Status: store.ModelCallCompleted},
+		Content:   "ok",
+		ToolCalls: []provider.ToolCall{{ID: "call-1", Name: "weather", Arguments: `{"city":"上海"}`}},
+	}}
+	broker := newBrokerForTest(t, brokerTestContext(), models, nil, descriptors)
+
+	invoke := func(t *testing.T, tools []string) map[string]any {
+		t.Helper()
+		result, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
+			"name": SystemModelInvoke,
+			"arguments": map[string]any{
+				"modelRef": "fake/agent-model",
+				"messages": []map[string]any{{"role": "user", "content": "weather?"}},
+				"tools":    tools,
+			},
+		}))
+		if rpcErr != nil {
+			t.Fatalf("call: %v", rpcErr)
+		}
+		return decodeToolJSON(t, result)
+	}
+
+	// Bare name resolves the latest granted version; the model sees the
+	// platform schema, never a contract this process authored.
+	payload := invoke(t, []string{"weather"})
+	if len(models.input.Tools) != 1 {
+		t.Fatalf("tools attached = %d, want 1", len(models.input.Tools))
+	}
+	if got := models.input.Tools[0]; got.Name != "weather" || string(got.Parameters) != string(descriptors[1].ParamsSchema) {
+		t.Fatalf("bare tool = %+v, want latest-version schema %s", got, descriptors[1].ParamsSchema)
+	}
+	// The loop closes: the model's tool_calls surface back to the agent.
+	calls, ok := payload["toolCalls"].([]any)
+	if !ok || len(calls) != 1 || calls[0].(map[string]any)["name"] != "weather" {
+		t.Fatalf("tool calls not surfaced to agent: %#v", payload["toolCalls"])
+	}
+
+	// Pinned reference resolves the exact older version and advertises the
+	// pinned name, so the model's tool_calls refer back to that version.
+	invoke(t, []string{"weather@1.0.0"})
+	if got := models.input.Tools[0]; got.Name != "weather@1.0.0" || string(got.Parameters) != string(descriptors[0].ParamsSchema) {
+		t.Fatalf("pinned tool = %+v, want weather@1.0.0 with its own schema", got)
+	}
+
+	// A pinned version that is not registered denies as a tool outcome.
+	if payload := invoke(t, []string{"weather@9.9.9"}); payload["error"] == nil || !strings.Contains(payload["error"].(string), "weather@9.9.9") {
+		t.Fatalf("expected pinned-miss denial, got %#v", payload)
+	}
+
+	// A name the AgentVersion is not granted denies too (fails closed).
+	if payload := invoke(t, []string{"secrets.exfiltrate"}); payload["error"] == nil || !strings.Contains(payload["error"].(string), "secrets.exfiltrate") {
+		t.Fatalf("expected ungranted denial, got %#v", payload)
+	}
+}
+
 func TestBrokerModelInvokeReportsProviderFailure(t *testing.T) {
 	models := &fakeModelBroker{
 		output: kernelmodel.InvokeOutput{Call: store.ModelCall{ID: uuid.New(), Status: store.ModelCallFailed, FinishReason: "provider_rejected"}},

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -149,6 +150,80 @@ func TestToolAdapterResolvesConcurrentExecutionIdentity(t *testing.T) {
 	}
 	if result, rpcErr := adapter.CallTool(context.Background(), params); rpcErr != nil || result.(map[string]any)["isError"] != true {
 		t.Fatalf("production header-less call did not fail closed: result=%+v err=%v", result, rpcErr)
+	}
+}
+
+// P1-01: the idempotency key must bind the resolved tool version — the same
+// arguments against weather@1.0 and weather@2.0 are different side effects
+// and must never share replay semantics, while identical calls to the same
+// version stay deterministic replays.
+func TestMCPIdempotencyKeyBindsToolVersion(t *testing.T) {
+	args := json.RawMessage(`{"path":"a.txt"}`)
+	keyV1 := mcpIdempotencyKey(testIdentity, "weather", "1.0.0", args)
+	keyV1Again := mcpIdempotencyKey(testIdentity, "weather", "1.0.0", args)
+	keyV2 := mcpIdempotencyKey(testIdentity, "weather", "2.0.0", args)
+	if keyV1 != keyV1Again {
+		t.Fatalf("identical calls must share the key: %q vs %q", keyV1, keyV1Again)
+	}
+	if keyV1 == keyV2 {
+		t.Fatalf("different tool versions collapsed onto one idempotency key %q", keyV1)
+	}
+	// The version participates even under reordered-but-equivalent argument
+	// documents, because canonicalization only normalizes formatting.
+	keyV2Reordered := mcpIdempotencyKey(testIdentity, "weather", "2.0.0", json.RawMessage(`{"path" : "a.txt"}`))
+	if keyV2 != keyV2Reordered {
+		t.Fatalf("canonical arguments not stable across formatting: %q vs %q", keyV2, keyV2Reordered)
+	}
+	if len(keyV1) > 128 {
+		t.Fatalf("idempotency key exceeds the 128-byte bound: %d", len(keyV1))
+	}
+}
+
+// P1-02: tools/list shows exactly one entry per tool name even when several
+// versions are granted (a floating "name@*" grant or a publish-time freeze
+// over multiple registered versions), and that entry is the same latest
+// version a bare-name invocation resolves to.
+func TestAdapterListsOneEntryPerToolName(t *testing.T) {
+	invoker := &fakeInvoker{descriptors: []store.ToolDescriptor{
+		{Name: "weather", Version: "1.0.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "weather", Version: "2.0.0", ParamsSchema: json.RawMessage(`{"type":"object","properties":{"city":{}}}`)},
+		{Name: "weather", Version: "1.10.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "fs.read", Version: "0.9.0", ParamsSchema: json.RawMessage(`{"type":"object"}`)},
+	}}
+	adapter := NewToolAdapter(invoker, StaticIdentity{Context: testIdentity})
+
+	result, rpcErr := adapter.ListTools(context.Background(), nil)
+	if rpcErr != nil {
+		t.Fatalf("ListTools: %v", rpcErr)
+	}
+	tools := result.(map[string]any)["tools"].([]map[string]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools/list returned %d entries, want one per name (2): %+v", len(tools), tools)
+	}
+	if tools[0]["name"] != "fs.read" {
+		t.Fatalf("listing is not in deterministic name order: %+v", tools)
+	}
+	if tools[1]["name"] != "weather" {
+		t.Fatalf("weather entry missing: %+v", tools)
+	}
+	description := tools[1]["description"].(string)
+	if !strings.Contains(description, "version 2.0.0") {
+		t.Fatalf("listed entry must be the resolved latest version 2.0.0, got %q", description)
+	}
+
+	// A bare-name call resolves to exactly the listed version.
+	if _, rpcErr := adapter.CallTool(context.Background(), json.RawMessage(`{"name":"weather","arguments":{"city":"paris"}}`)); rpcErr != nil {
+		t.Fatalf("CallTool: %v", rpcErr)
+	}
+	if invoker.input.ToolVersion != "2.0.0" {
+		t.Fatalf("bare-name call resolved %q, want the listed 2.0.0", invoker.input.ToolVersion)
+	}
+	// An explicit pin still reaches an older granted version.
+	if _, rpcErr := adapter.CallTool(context.Background(), json.RawMessage(`{"name":"weather@1.0.0","arguments":{}}`)); rpcErr != nil {
+		t.Fatalf("pinned CallTool: %v", rpcErr)
+	}
+	if invoker.input.ToolVersion != "1.0.0" {
+		t.Fatalf("explicit pin resolved %q, want 1.0.0", invoker.input.ToolVersion)
 	}
 }
 

@@ -272,8 +272,12 @@ func TestCheckpointCadenceCannotStarveTerminalResultPolling(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker.pollInterval = 25 * time.Millisecond
+	runtimeClient, err := agent.NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
 	executionID := uuid.NewString()
-	if _, err := worker.runtime.Start(context.Background(), agent.StartRequest{
+	if _, err := runtimeClient.Start(context.Background(), agent.StartRequest{
 		ExecutionID: executionID, AgentVersionRef: "delayed@1", Goal: "finish",
 		Input: json.RawMessage(`{}`), Capabilities: agent.CapabilityGrant{
 			Tools: []string{}, Models: []string{}, Memory: []string{}, Secrets: []string{}, ChildAgents: []string{},
@@ -284,7 +288,7 @@ func TestCheckpointCadenceCannotStarveTerminalResultPolling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	checkpoints := 0
-	result, _, err := worker.wait(ctx, executionID, 10*time.Millisecond, func() error {
+	result, _, err := worker.wait(ctx, runtimeClient, executionID, 10*time.Millisecond, func() error {
 		checkpoints++
 		return nil
 	})

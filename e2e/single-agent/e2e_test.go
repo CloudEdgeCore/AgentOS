@@ -81,6 +81,13 @@ var e2eLiveModel struct {
 	url      string
 }
 
+// e2eExposeLiveTools, when set alongside e2eLiveModel, publishes the weather
+// tool into the live-model manifest (P1-04) so a real model discovers and
+// calls it, and registers a second, never-granted tool to prove capability
+// filtering keeps that tool off the model's surface. Default false so the
+// plain live-answer test (TestV11RealAgentAgainstLiveModel) is unaffected.
+var e2eExposeLiveTools bool
+
 func e2ePython(t *testing.T) string {
 	t.Helper()
 	name := os.Getenv("AGENTOS_E2E_PYTHON")
@@ -319,9 +326,16 @@ func newE2EEnv(t *testing.T, schema string, providerLatency time.Duration, lease
 	modelGateway := kernelmodel.NewGateway(env.policyEngine, repository, repository, repository)
 	registry := provider.NewRegistry()
 	if e2eLiveModel.url != "" {
-		if err := registry.Register(provider.Config{
+		liveConfig := provider.Config{
 			Name: e2eLiveModel.provider, BaseURL: e2eLiveModel.url, TimeoutMs: 300000, MaxAttempts: 2,
-		}); err != nil {
+		}
+		// Keyed endpoints (vLLM behind a bearer) exercise credential isolation:
+		// the key is held only in the fenced provider config and must never
+		// surface in any agent-visible artifact. Keyless endpoints leave it unset.
+		if key := os.Getenv("AGENTOS_REAL_MODEL_KEY"); key != "" {
+			liveConfig.APIKey = key
+		}
+		if err := registry.Register(liveConfig); err != nil {
 			t.Fatalf("register live provider: %v", err)
 		}
 	} else if err := registry.Register(provider.Config{
@@ -386,6 +400,18 @@ func newE2EEnv(t *testing.T, schema string, providerLatency time.Duration, lease
 		ParamsSchema: []byte(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
 	}); err != nil {
 		t.Fatalf("register tool descriptor: %v", err)
+	}
+	if e2eExposeLiveTools {
+		// A second tool the AgentVersion is NOT granted. Capability filtering
+		// must keep it out of the model's tools/list surface, and the authorizer
+		// must reject it even if a call were somehow attempted (P1-04 权限生效).
+		if _, err := repository.RegisterToolDescriptor(ctx, kernelstore.RegisterToolDescriptorInput{
+			TenantID: e2eTenant, Name: "payments.charge", Version: "1.0.0", SideEffectRisk: kernelstore.ToolRiskHigh,
+			Actions: []string{"invoke"}, ResourcePatterns: []string{"payments:*"},
+			ParamsSchema: []byte(`{"type":"object","properties":{"amount":{"type":"number"}},"required":["amount"]}`),
+		}); err != nil {
+			t.Fatalf("register ungranted tool descriptor: %v", err)
+		}
 	}
 	return env
 }
@@ -580,11 +606,13 @@ func publishVersion(ctx context.Context, t *testing.T, env *e2eEnv, entrypoint s
 	return published.AgentVersion.ID
 }
 
-// e2eManifestTools keeps the weather tool out of live-model manifests: the
-// live model answers directly and the deterministic webhook is not running
-// as its backend there.
+// e2eManifestTools decides the tool surface the published AgentVersion grants.
+// The scripted fake always exposes the weather tool. A live model exposes it
+// only when e2eExposeLiveTools is set (the P1-04 tool-calling test): the plain
+// live-answer test leaves it off so the model answers directly and does not
+// depend on the deterministic webhook backend.
 func e2eManifestTools() []string {
-	if e2eLiveModel.url != "" {
+	if e2eLiveModel.url != "" && !e2eExposeLiveTools {
 		return []string{}
 	}
 	return []string{"weather.lookup"}

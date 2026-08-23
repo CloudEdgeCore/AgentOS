@@ -32,6 +32,16 @@ message ChatMessage {
   repeated ChatToolCall tool_calls = 4;
 }
 
+// ToolDefinition declares one callable tool to the model: the platform (not
+// the sandbox) generates the schema from the granted tool registry, so a
+// sandboxed agent cannot invent or widen tool contracts.
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  // parameters_json is the JSON Schema of the tool's input contract.
+  string parameters_json = 3;
+}
+
 message InvokeRequest {
   AttemptIdentity identity = 1;
   string task_id = 2;
@@ -43,6 +53,8 @@ message InvokeRequest {
   bool stream = 8;
   optional double temperature = 9;
   int32 max_output_tokens = 10;
+  // tools are the granted, platform-described tools the model may call.
+  repeated ToolDefinition tools = 11;
 }
 
 // InvokeResponse is one streamed chunk: a content delta, a model-requested

@@ -105,9 +105,6 @@ type ScheduleTaskInput struct {
 	RuntimeClass        string
 	RuntimeInstanceID   string
 	LeaseTTL            time.Duration
-	PoolCPUCapacity     int64
-	PoolMemoryCapacity  int64
-	PoolLLMCapacity     int
 	RequestedCPU        int64
 	RequestedMemory     int64
 	RequestedLLMSlots   int

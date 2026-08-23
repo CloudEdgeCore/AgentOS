@@ -72,35 +72,44 @@ func (h *Host) eventStream(writer http.ResponseWriter, request *http.Request, ex
 	defer keepalive.Stop()
 	cursor := after
 	for {
+		// Snapshot under the read lock, write outside it: a slow client
+		// stalls only its own connection, never the emit/complete write
+		// lock of the host (or of any other execution).
+		var page []Event
+		terminal := false
+		var result Result
 		h.mu.RLock()
 		state := h.executions[executionID]
+		if state != nil {
+			for _, event := range state.events {
+				if event.Sequence <= cursor {
+					continue
+				}
+				if len(page) >= maxEventsPerPage {
+					break
+				}
+				page = append(page, Event{
+					Sequence: event.Sequence, Type: event.Type,
+					Payload: clonePayload(event.Payload), OccurredAt: event.OccurredAt,
+				})
+			}
+			terminal = state.status != StatusAccepted && state.status != StatusRunning
+			result = state.result
+		}
+		h.mu.RUnlock()
 		if state == nil {
-			h.mu.RUnlock()
 			return
 		}
-		delivered := 0
-		for _, event := range state.events {
-			if event.Sequence <= cursor {
-				continue
-			}
-			if delivered >= maxEventsPerPage {
-				break
-			}
-			event.Payload = clonePayload(event.Payload)
+		for _, event := range page {
 			if err := writeSSEFrame(writer, "event", event); err != nil {
-				h.mu.RUnlock()
 				return
 			}
 			cursor = event.Sequence
-			delivered++
 		}
-		terminal := state.status != StatusAccepted && state.status != StatusRunning
-		result := state.result
-		h.mu.RUnlock()
 		if err := controller.Flush(); err != nil {
 			return
 		}
-		if terminal && delivered == 0 {
+		if terminal && len(page) == 0 {
 			result.Output = clonePayload(result.Output)
 			_ = writeSSEFrame(writer, "result", result)
 			_ = controller.Flush()

@@ -38,7 +38,7 @@ func (s *Store) CreateAgentVersion(ctx context.Context, in kernelstore.CreateAge
 			package_key_id, package_signature, package_manifest_digest,
 			resource_version, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11)
-		ON CONFLICT (tenant_id, name, version) DO NOTHING
+		ON CONFLICT (tenant_id, namespace, name, version) DO NOTHING
 		RETURNING `+agentVersionColumns,
 		in.ID.String(), in.TenantID, in.Namespace, in.Name, in.Version,
 		normalized, digest[:], keyID, signature, manifestDigest, now,
@@ -69,13 +69,13 @@ func (s *Store) CreateAgentVersion(ctx context.Context, in kernelstore.CreateAge
 	}
 
 	existing, err := scanAgentVersion(tx.QueryRow(ctx, `SELECT `+agentVersionColumns+`
-		FROM agent_versions WHERE tenant_id = $1 AND name = $2 AND version = $3
-		FOR UPDATE`, in.TenantID, in.Name, in.Version))
+		FROM agent_versions WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND version = $4
+		FOR UPDATE`, in.TenantID, in.Namespace, in.Name, in.Version))
 	if err != nil {
 		return result, classify(err)
 	}
 	if subtle.ConstantTimeCompare(existing.SpecDigest[:], digest[:]) != 1 {
-		return result, fmt.Errorf("%w: tenant=%s name=%s version=%s", kernelstore.ErrAgentVersionConflict, in.TenantID, in.Name, in.Version)
+		return result, fmt.Errorf("%w: tenant=%s namespace=%s name=%s version=%s", kernelstore.ErrAgentVersionConflict, in.TenantID, in.Namespace, in.Name, in.Version)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, classify(err)
@@ -93,7 +93,7 @@ func (s *Store) GetAgentVersion(ctx context.Context, tenantID string, id uuid.UU
 }
 
 func (s *Store) GetAgentVersionByRef(ctx context.Context, tenantID, ref string) (kernelstore.AgentVersion, error) {
-	name, version, err := agentversion.ParseRef(ref)
+	namespace, name, version, err := agentversion.ParseRef(ref)
 	if err != nil {
 		return kernelstore.AgentVersion{}, fmt.Errorf("%w: %v", kernelstore.ErrAgentVersionRefInvalid, err)
 	}
@@ -101,21 +101,21 @@ func (s *Store) GetAgentVersionByRef(ctx context.Context, tenantID, ref string) 
 		return kernelstore.AgentVersion{}, kernelstore.ErrNotFound
 	}
 	versionRow, err := scanAgentVersion(s.pool.QueryRow(ctx, `SELECT `+agentVersionColumns+`
-		FROM agent_versions WHERE tenant_id = $1 AND name = $2 AND version = $3`,
-		tenantID, name, version))
+		FROM agent_versions WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND version = $4`,
+		tenantID, namespace, name, version))
 	return versionRow, classify(err)
 }
 
 // resolveAgentVersionID resolves a canonical reference inside a transaction
 // and returns nil when the referenced publication does not exist.
 func resolveAgentVersionID(ctx context.Context, tx pgx.Tx, tenantID, ref string) (*uuid.UUID, error) {
-	name, version, err := agentversion.ParseRef(ref)
+	namespace, name, version, err := agentversion.ParseRef(ref)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", kernelstore.ErrAgentVersionRefInvalid, err)
 	}
 	var id string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM agent_versions
-		WHERE tenant_id = $1 AND name = $2 AND version = $3`, tenantID, name, version).Scan(&id)
+		WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND version = $4`, tenantID, namespace, name, version).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

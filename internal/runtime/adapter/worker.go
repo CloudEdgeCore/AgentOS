@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -69,8 +70,9 @@ type Worker struct {
 	window            ExecutionWindow
 	// bindings resolve logical manifest entrypoints (agentos-binding://…)
 	// to concrete deployment endpoints, keeping mutable endpoint state out
-	// of immutable AgentVersions. RunOnce is serial per worker, so the
-	// resolved client is swapped before each assignment.
+	// of immutable AgentVersions. The resolved client is assignment-local:
+	// resolveRuntime never mutates shared worker state, so a future
+	// concurrent RunOnce cannot misroute another assignment's client.
 	bindings   *RuntimeBindings
 	httpClient *http.Client
 	clients    map[string]*agent.Client
@@ -87,7 +89,8 @@ func (w *Worker) WithExecutionWindow(window ExecutionWindow) *Worker {
 // WithRuntimeBindings attaches the deployment's runtime binding table. When
 // set, assignments whose manifest entrypoint is a logical binding reference
 // (or whose version ref has an explicit binding) resolve through it; the
-// worker's constructor endpoint remains the highest-priority override.
+// worker's constructor endpoint remains the highest-priority override - a
+// dedicated-worker configuration ValidateEndpointOverride guards.
 func (w *Worker) WithRuntimeBindings(bindings *RuntimeBindings) *Worker {
 	w.bindings = bindings
 	return w
@@ -108,8 +111,17 @@ func NewWorker(
 	}
 	// An empty endpoint is valid when runtime bindings resolve every
 	// assignment; resolveRuntime fails closed on unresolvable entrypoints.
+	// The production endpoint policy applies at construction: a plaintext
+	// constructor endpoint must be loopback (co-located runtime) and a
+	// remote endpoint must be HTTPS.
 	var client *agent.Client
 	if strings.TrimSpace(endpoint) != "" {
+		if err := (EndpointPolicy{}).Validate(endpoint); err != nil {
+			return nil, err
+		}
+		if err := refuseInsecureTransport(httpClient, strings.TrimRight(endpoint, "/")); err != nil {
+			return nil, err
+		}
 		var err error
 		client, err = agent.NewClient(endpoint, httpClient)
 		if err != nil {
@@ -128,37 +140,118 @@ func NewWorker(
 // per-worker override), then a runtime binding for the agent version
 // (exact ref or name wildcard), then a concrete http(s) entrypoint embedded
 // in the manifest. A logical binding entrypoint with no covering binding
-// fails closed — an unresolved deployment reference must never silently
+// fails closed - an unresolved deployment reference must never silently
 // fall through to another agent's endpoint.
 func (w *Worker) resolveRuntime(agentVersionRef string, target agentversion.RuntimeTarget) (*agent.Client, error) {
 	if w.runtime != nil && w.endpoint != "" {
 		return w.runtime, nil
 	}
-	if endpoint, ok := w.bindings.Resolve(agentVersionRef); ok {
-		return w.clientFor(endpoint)
+	if binding, ok := w.bindings.ResolveBinding(agentVersionRef); ok {
+		tlsConfig, identity := w.bindings.transportFor(agentVersionRef)
+		return w.clientFor(binding, tlsConfig, identity)
 	}
 	entrypoint := target.Entrypoint[0]
 	if IsLogicalEntrypoint(entrypoint) {
 		return nil, fmt.Errorf("agent version %s declares logical entrypoint %q but no runtime binding resolves it",
 			agentVersionRef, entrypoint)
 	}
+	if err := w.endpointPolicy().Validate(entrypoint); err != nil {
+		return nil, fmt.Errorf("agent version %s entrypoint %q violates the runtime endpoint policy: %w",
+			agentVersionRef, entrypoint, err)
+	}
 	if parsed, err := url.Parse(entrypoint); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
-		return w.clientFor(strings.TrimRight(entrypoint, "/"))
+		return w.clientFor(RuntimeBinding{Endpoint: strings.TrimRight(entrypoint, "/")}, nil, "")
 	}
 	return nil, fmt.Errorf("agent version %s entrypoint %q is neither bindable nor an absolute http(s) URL",
 		agentVersionRef, entrypoint)
 }
 
-func (w *Worker) clientFor(endpoint string) (*agent.Client, error) {
-	if client, ok := w.clients[endpoint]; ok {
+// endpointPolicy is the policy manifest entrypoints are validated against:
+// the binding table's policy when one is loaded, otherwise production.
+func (w *Worker) endpointPolicy() EndpointPolicy {
+	if w.bindings != nil {
+		return w.bindings.policy
+	}
+	return EndpointPolicy{}
+}
+
+// clientFor builds (and caches) the Runtime Interface client of one
+// endpoint. A binding with TLS material gets a dedicated transport with the
+// pinned server name, private trust bundle and client certificate. The
+// cache key carries the TLS material fingerprint (P1-03): two bindings that
+// share an endpoint and SNI but present different certificates are
+// different identities and never reuse one cached client.
+func (w *Worker) clientFor(binding RuntimeBinding, tlsConfig *tls.Config, identity string) (*agent.Client, error) {
+	endpoint := strings.TrimRight(binding.Endpoint, "/")
+	key := endpoint
+	if binding.TLSServerName != "" {
+		key += "|sni=" + binding.TLSServerName
+	}
+	if identity != "" {
+		key += "|tls=" + identity
+	}
+	if client, ok := w.clients[key]; ok {
 		return client, nil
 	}
-	client, err := agent.NewClient(endpoint, w.httpClient)
+	httpClient := w.httpClient
+	if tlsConfig != nil || binding.TLSServerName != "" {
+		httpClient = pinnedHTTPClient(w.httpClient, tlsConfig, binding.TLSServerName)
+	}
+	if err := refuseInsecureTransport(httpClient, endpoint); err != nil {
+		return nil, err
+	}
+	client, err := agent.NewClient(endpoint, httpClient)
 	if err != nil {
 		return nil, err
 	}
-	w.clients[endpoint] = client
+	w.clients[key] = client
 	return client, nil
+}
+
+// pinnedHTTPClient clones the base client's transport with the binding's
+// TLS configuration (verification name, trust bundle, client certificate).
+func pinnedHTTPClient(base *http.Client, tlsConfig *tls.Config, serverName string) *http.Client {
+	if base == nil {
+		base = &http.Client{}
+	}
+	transport, ok := base.Transport.(*http.Transport)
+	if ok {
+		transport = transport.Clone()
+	} else {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	}
+	config := tlsConfig
+	if config == nil {
+		config = &tls.Config{}
+	}
+	if serverName != "" {
+		config = config.Clone()
+		config.ServerName = serverName
+	}
+	transport.TLSClientConfig = config
+	return &http.Client{Transport: transport, Timeout: base.Timeout}
+}
+
+// refuseInsecureTransport fails closed when an HTTPS endpoint would be
+// dialed through a transport with certificate verification disabled: an
+// intercepted (man-in-the-middle) runtime endpoint must never be accepted.
+// The default transport verifies server certificates and is always allowed.
+func refuseInsecureTransport(httpClient *http.Client, endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" {
+		return nil
+	}
+	if httpClient == nil {
+		return nil
+	}
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		return nil
+	}
+	if transport.TLSClientConfig != nil && transport.TLSClientConfig.InsecureSkipVerify {
+		return fmt.Errorf("runtime endpoint %s refuses a transport with TLS verification disabled", endpoint)
+	}
+	return nil
 }
 
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
@@ -188,7 +281,6 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return w.fail(ctx, assignment.GetIdentity(), assignment.GetAttemptVersion(), "adapter_endpoint_unresolved", err)
 	}
-	w.runtime = runtimeClient
 	identity := assignment.GetIdentity()
 	taskID, runID, attemptID, err := parseAssignmentIdentity(assignment)
 	if err != nil {
@@ -239,7 +331,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		if checkpointPolicy.Mode != agentversion.CheckpointLogical {
 			return w.fail(ctx, identity, version, "adapter_restore_failed", fmt.Errorf("checkpoint resume is disabled by the AgentVersion manifest"))
 		}
-		if err := w.restore(executionCtx, assignment, target, checkpointPolicy); err != nil {
+		if err := w.restore(executionCtx, runtimeClient, assignment, target, checkpointPolicy); err != nil {
 			return w.fail(ctx, identity, version, "adapter_restore_failed", err)
 		}
 	}
@@ -248,17 +340,17 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		Goal: assignment.GetGoal(), Input: json.RawMessage(assignment.GetWorkloadSpecJson()),
 		Capabilities: capabilities,
 	}
-	if _, err := w.runtime.Start(executionCtx, start); err != nil {
+	if _, err := runtimeClient.Start(executionCtx, start); err != nil {
 		if keeper.Cancelled() {
 			return true, nil
 		}
 		return w.fail(ctx, identity, version, "adapter_start_failed", err)
 	}
 	checkpointSequence := 0
-	result, events, err := w.wait(executionCtx, identity.GetAttemptId(),
+	result, events, err := w.wait(executionCtx, runtimeClient, identity.GetAttemptId(),
 		time.Duration(checkpointPolicy.IntervalSeconds)*time.Second, func() error {
 			checkpointSequence++
-			nextVersion, checkpointErr := w.commitLogicalCheckpoint(executionCtx, assignment, target,
+			nextVersion, checkpointErr := w.commitLogicalCheckpoint(executionCtx, runtimeClient, assignment, target,
 				checkpointPolicy, version, fmt.Sprintf("checkpoint-%d", checkpointSequence))
 			if checkpointErr == nil {
 				version = nextVersion
@@ -267,7 +359,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		})
 	if err != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = w.runtime.Stop(stopCtx, identity.GetAttemptId())
+		_, _ = runtimeClient.Stop(stopCtx, identity.GetAttemptId())
 		stopCancel()
 		if keeper.Cancelled() {
 			return true, nil
@@ -285,7 +377,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 	if checkpointPolicy.Mode == agentversion.CheckpointLogical {
-		version, err = w.commitLogicalCheckpoint(executionCtx, assignment, target, checkpointPolicy, version, "checkpoint-final")
+		version, err = w.commitLogicalCheckpoint(executionCtx, runtimeClient, assignment, target, checkpointPolicy, version, "checkpoint-final")
 		if err != nil {
 			return w.fail(ctx, identity, version, "adapter_checkpoint_failed", err)
 		}
@@ -384,14 +476,16 @@ func parseAssignmentIdentity(assignment *runtimev1.Assignment) (uuid.UUID, uuid.
 // wait observes one execution to its terminal state. Stream-capable
 // runtimes hold a single long-lived event-stream connection (one HTTP
 // request instead of a poll cycle, with the terminal frame carrying the
-// result); v1-only runtimes fall back to the frozen polling endpoints
-// mid-flight, resuming from the stream cursor without event loss.
-func (w *Worker) wait(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error) (agent.Result, []agent.Event, error) {
-	streamed := w.waitStreaming(ctx, executionID, checkpointInterval, checkpoint)
+// result); a stream that drops mid-flight reconnects from the last consumed
+// sequence (bounded attempts, no event loss or duplication) and finally
+// falls back to the frozen v1 polling endpoints for v1-only runtimes,
+// resuming from the stream cursor.
+func (w *Worker) wait(ctx context.Context, client *agent.Client, executionID string, checkpointInterval time.Duration, checkpoint func() error) (agent.Result, []agent.Event, error) {
+	streamed := w.waitStreaming(ctx, client, executionID, checkpointInterval, checkpoint)
 	if !streamed.unsupported {
 		return streamed.result, streamed.events, streamed.err
 	}
-	return w.waitPolling(ctx, executionID, checkpointInterval, checkpoint, streamed.events, streamed.after)
+	return w.waitPolling(ctx, client, executionID, checkpointInterval, checkpoint, streamed.events, streamed.after)
 }
 
 type streamOutcome struct {
@@ -402,26 +496,77 @@ type streamOutcome struct {
 	err         error
 }
 
-func (w *Worker) waitStreaming(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error) streamOutcome {
+// streamReconnects bounds mid-flight stream reconnects before the worker
+// degrades to polling; streamReconnectBase/Max bound the backoff between
+// attempts.
+const (
+	streamReconnects    = 3
+	streamReconnectBase = 250 * time.Millisecond
+	streamReconnectMax  = 2 * time.Second
+)
+
+func (w *Worker) waitStreaming(ctx context.Context, client *agent.Client, executionID string, checkpointInterval time.Duration, checkpoint func() error) streamOutcome {
+	var events []agent.Event
+	var after int64
+	for attempt := 0; ; attempt++ {
+		attempted := w.streamOnce(ctx, client, executionID, checkpointInterval, checkpoint, &events, &after)
+		if !attempted.retry {
+			return attempted.outcome
+		}
+		if attempt >= streamReconnects {
+			// The stream keeps dropping: hand the cursor and the events
+			// collected so far to the polling fallback.
+			return streamOutcome{events: events, after: after, unsupported: true}
+		}
+		delay := streamReconnectBase << attempt
+		if delay > streamReconnectMax {
+			delay = streamReconnectMax
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return streamOutcome{events: events, after: after, err: ctx.Err()}
+		case <-timer.C:
+		}
+	}
+}
+
+// streamAttempt is the outcome of one stream connection attempt; retry says
+// whether the worker may reconnect from the cursor.
+type streamAttempt struct {
+	outcome streamOutcome
+	retry   bool
+}
+
+// streamOnce holds one stream connection to its terminal frame. A dropped
+// connection is retryable from the cursor; the events already collected and
+// their last sequence carry across attempts.
+func (w *Worker) streamOnce(ctx context.Context, client *agent.Client, executionID string, checkpointInterval time.Duration, checkpoint func() error, events *[]agent.Event, after *int64) streamAttempt {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	outcome := make(chan streamOutcome, 1)
+	done := make(chan streamAttempt, 1)
 	go func() {
-		var events []agent.Event
-		var after int64
-		result, err := w.runtime.StreamEvents(streamCtx, executionID, 0, func(event agent.Event) error {
-			if len(events) >= maxCollectedEvents {
+		result, err := client.StreamEvents(streamCtx, executionID, *after, func(event agent.Event) error {
+			if len(*events) >= maxCollectedEvents {
 				return fmt.Errorf("runtime event history exceeds %d events", maxCollectedEvents)
 			}
-			events = append(events, event)
-			after = event.Sequence
+			*events = append(*events, event)
+			*after = event.Sequence
 			return nil
 		})
-		if errors.Is(err, agent.ErrStreamingUnsupported) {
-			outcome <- streamOutcome{events: events, after: after, unsupported: true}
-			return
+		switch {
+		case errors.Is(err, agent.ErrStreamingUnsupported):
+			done <- streamAttempt{outcome: streamOutcome{events: *events, after: *after, unsupported: true}}
+		case err != nil && ctx.Err() == nil:
+			// A mid-flight disconnect resumes from the cursor without
+			// re-delivering consumed events (they are observations, never
+			// side-effect triggers, so a replay would be safe - but the
+			// cursor keeps the history exact).
+			done <- streamAttempt{outcome: streamOutcome{events: *events, after: *after, err: err}, retry: true}
+		default:
+			done <- streamAttempt{outcome: streamOutcome{result: result, events: *events, err: err}}
 		}
-		outcome <- streamOutcome{result: result, events: events, err: err}
 	}()
 	var checkpointTicker *time.Ticker
 	var checkpointTick <-chan time.Time
@@ -433,21 +578,21 @@ func (w *Worker) waitStreaming(ctx context.Context, executionID string, checkpoi
 	for {
 		select {
 		case <-ctx.Done():
-			return streamOutcome{err: ctx.Err()}
+			return streamAttempt{outcome: streamOutcome{err: ctx.Err()}}
 		case <-checkpointTick:
 			if checkpoint == nil {
-				return streamOutcome{err: fmt.Errorf("periodic checkpoint callback is not configured")}
+				return streamAttempt{outcome: streamOutcome{err: fmt.Errorf("periodic checkpoint callback is not configured")}}
 			}
 			if err := checkpoint(); err != nil {
-				return streamOutcome{err: fmt.Errorf("periodic checkpoint: %w", err)}
+				return streamAttempt{outcome: streamOutcome{err: fmt.Errorf("periodic checkpoint: %w", err)}}
 			}
-		case done := <-outcome:
-			return done
+		case result := <-done:
+			return result
 		}
 	}
 }
 
-func (w *Worker) waitPolling(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error, events []agent.Event, after int64) (agent.Result, []agent.Event, error) {
+func (w *Worker) waitPolling(ctx context.Context, client *agent.Client, executionID string, checkpointInterval time.Duration, checkpoint func() error, events []agent.Event, after int64) (agent.Result, []agent.Event, error) {
 	pollDelay := w.pollInterval
 	if pollDelay <= 0 {
 		pollDelay = defaultPollInterval
@@ -478,7 +623,7 @@ func (w *Worker) waitPolling(ctx context.Context, executionID string, checkpoint
 			// adaptive poll delay postpone result observation forever.
 			continue
 		}
-		list, err := w.runtime.Events(ctx, executionID, after)
+		list, err := client.Events(ctx, executionID, after)
 		if err != nil {
 			return agent.Result{}, nil, err
 		}
@@ -487,7 +632,7 @@ func (w *Worker) waitPolling(ctx context.Context, executionID string, checkpoint
 			return agent.Result{}, nil, fmt.Errorf("runtime event history exceeds %d events", maxCollectedEvents)
 		}
 		after = list.NextAfter
-		result, terminal, err := w.runtime.Result(ctx, executionID)
+		result, terminal, err := client.Result(ctx, executionID)
 		if err != nil {
 			return agent.Result{}, nil, err
 		}
@@ -511,13 +656,14 @@ func (w *Worker) waitPolling(ctx context.Context, executionID string, checkpoint
 
 func (w *Worker) commitLogicalCheckpoint(
 	ctx context.Context,
+	client *agent.Client,
 	assignment *runtimev1.Assignment,
 	target agentversion.RuntimeTarget,
 	policy agentversion.CheckpointPolicy,
 	version int64,
 	operation string,
 ) (int64, error) {
-	checkpoint, err := w.runtime.Checkpoint(ctx, assignment.GetIdentity().GetAttemptId())
+	checkpoint, err := client.Checkpoint(ctx, assignment.GetIdentity().GetAttemptId())
 	if err != nil {
 		return version, err
 	}
@@ -549,7 +695,7 @@ func (w *Worker) commitLogicalCheckpoint(
 	return committed.GetAttemptVersion(), nil
 }
 
-func (w *Worker) restore(ctx context.Context, assignment *runtimev1.Assignment, target agentversion.RuntimeTarget, policy agentversion.CheckpointPolicy) error {
+func (w *Worker) restore(ctx context.Context, client *agent.Client, assignment *runtimev1.Assignment, target agentversion.RuntimeTarget, policy agentversion.CheckpointPolicy) error {
 	checkpoint := assignment.GetResumeCheckpoint()
 	if checkpoint.GetAgentVersionRef() != assignment.GetAgentVersionRef() ||
 		checkpoint.GetRuntimeClass() != assignment.GetRuntimeClass() ||
@@ -576,7 +722,7 @@ func (w *Worker) restore(ctx context.Context, assignment *runtimev1.Assignment, 
 	if sdkCheckpoint.SchemaVersion != policy.SchemaVersion {
 		return fmt.Errorf("checkpoint logical schema does not match the AgentVersion manifest")
 	}
-	_, err = w.runtime.Restore(ctx, agent.RestoreRequest{
+	_, err = client.Restore(ctx, agent.RestoreRequest{
 		ExecutionID: assignment.GetIdentity().GetAttemptId(), Checkpoint: sdkCheckpoint,
 	})
 	return err

@@ -133,7 +133,6 @@ func TestNoPlacementDeferralGatesClaimsAndResetsOnSchedule(t *testing.T) {
 		ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: deferred.ResourceVersion,
 		RunID: uuid.New(), AttemptID: uuid.New(), LeaseID: uuid.New(),
 		RuntimePoolID: "pool-1", RuntimeClass: "oci", RuntimeInstanceID: "worker-1", LeaseTTL: time.Minute,
-		PoolCPUCapacity: 1000, PoolMemoryCapacity: 1024, PoolLLMCapacity: 1,
 		RequestedCPU: 100, RequestedMemory: 128, RequestedLLMSlots: 1,
 	})
 	if err != nil {

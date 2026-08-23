@@ -115,9 +115,16 @@ type Workflow struct {
 	BudgetExhaustedAt     *time.Time
 	DeadlineAt            *time.Time
 	DeadlineExceededAt    *time.Time
-	ResourceVersion       int64
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	// NeedsBudgetReconciliation is set when a step's token/cost reservation may
+	// be understated relative to its derived task spec — e.g. after the 000028
+	// upgrade backfilled task-count slots but could not re-derive merged specs
+	// in pure SQL. While set, dynamic spawning is paused (a stale-low commitment
+	// could slip a spawn past a ceiling); the controller's reconcile loop
+	// re-derives the reservations and clears the flag.
+	NeedsBudgetReconciliation bool
+	ResourceVersion           int64
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 // WorkflowStep is one step of a workflow: a declared DAG node plus its

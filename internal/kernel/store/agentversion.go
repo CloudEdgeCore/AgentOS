@@ -46,8 +46,10 @@ type AgentVersion struct {
 	PackageSignature *PackageSignature
 }
 
-// Ref returns the canonical "name@version" reference used by tasks.
-func (v AgentVersion) Ref() string { return v.Name + "@" + v.Version }
+// Ref returns the canonical reference used by tasks. The default namespace is
+// elided so historical "name@version" references are unchanged; any other
+// namespace is written as "namespace/name@version" (P1-07).
+func (v AgentVersion) Ref() string { return agentversion.FormatRef(v.Namespace, v.Name, v.Version) }
 
 type CreateAgentVersionInput struct {
 	ID               uuid.UUID
@@ -68,8 +70,11 @@ type CreateAgentVersionResult struct {
 // document and its immutable digest.
 func (in CreateAgentVersionInput) ValidateAndHash() (json.RawMessage, [sha256.Size]byte, error) {
 	var zero [sha256.Size]byte
-	if strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.Namespace) == "" {
-		return nil, zero, fmt.Errorf("tenant and namespace are required")
+	if strings.TrimSpace(in.TenantID) == "" {
+		return nil, zero, fmt.Errorf("tenant is required")
+	}
+	if err := agentversion.ValidateNamespace(in.Namespace); err != nil {
+		return nil, zero, err
 	}
 	if err := agentversion.ValidateName(in.Name); err != nil {
 		return nil, zero, err

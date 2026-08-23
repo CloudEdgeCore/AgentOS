@@ -12,7 +12,6 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
-	"golang.org/x/mod/semver"
 )
 
 // AttemptContext is the fenced execution identity an MCP call is bound to.
@@ -86,13 +85,18 @@ type versionedToolLister interface {
 // ToolAdapter exposes a Tool Gateway as an MCP tools server. Mapping rules
 // (documented, v0.1):
 //   - MCP tool name is the descriptor name; version and risk ride in the
-//     description, and calls resolve the latest registered version.
+//     description, and calls resolve the latest granted version. tools/list
+//     shows exactly one entry per name (P1-02): the resolved default version,
+//     so the model never sees two same-named tools, while an explicit
+//     "name@version" reference still pins any granted older version.
 //   - action defaults to the descriptor's first declared action ("invoke"
 //     when none), resource to the first resource pattern ("tool:<name>"
 //     when none).
-//   - the idempotency key is derived deterministically from the attempt and
-//     the canonical arguments, so identical calls replay instead of repeating
-//     an external side effect (at-least-once + idempotent consumer).
+//   - the idempotency key is derived deterministically from the attempt, the
+//     resolved tool version and the canonical arguments, so identical calls
+//     replay instead of repeating an external side effect while different
+//     versions of one tool never share replay semantics (at-least-once +
+//     idempotent consumer).
 type ToolAdapter struct {
 	invoker  ToolInvoker
 	identity IdentityResolver
@@ -115,8 +119,12 @@ func (a *ToolAdapter) ListTools(ctx context.Context, params json.RawMessage) (an
 	if err != nil {
 		return nil, &Error{Code: codeInternalError, Message: "list tools"}
 	}
+	// P1-02: the model-facing listing shows exactly one entry per name —
+	// the same latest granted version a bare-name call resolves to — while
+	// CallTool still accepts explicit "name@version" pins of older granted
+	// versions.
 	tools := make([]map[string]any, 0, len(descriptors))
-	for _, descriptor := range descriptors {
+	for _, descriptor := range tool.LatestVersionPerName(descriptors) {
 		tools = append(tools, map[string]any{
 			"name":        descriptor.Name,
 			"description": fmt.Sprintf("%s (version %s, sideEffectRisk %s)", descriptor.Name, descriptor.Version, descriptor.SideEffectRisk),
@@ -156,7 +164,13 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 	if err != nil {
 		return nil, &Error{Code: codeInternalError, Message: "resolve tool descriptor"}
 	}
-	descriptor, ok := latestDescriptor(descriptors, call.Name)
+	// A "name@version" reference pins one exact granted version (P1-08);
+	// a bare name resolves the latest granted version.
+	toolName, toolVersion := call.Name, ""
+	if name, version, pinned := strings.Cut(call.Name, "@"); pinned {
+		toolName, toolVersion = name, version
+	}
+	descriptor, ok := resolveToolVersion(descriptors, toolName, toolVersion)
 	if !ok {
 		return nil, invalidParams("unknown tool: " + call.Name)
 	}
@@ -171,8 +185,8 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 		TenantID: identity.TenantID, TaskID: identity.TaskID, RunID: identity.RunID,
 		AttemptID: identity.AttemptID, FencingToken: identity.FencingToken,
 		AgentVersionRef: identity.AgentVersionRef,
-		ToolName:        descriptor.Name, Action: action, Resource: resource,
-		Args: args, IdempotencyKey: mcpIdempotencyKey(identity, descriptor.Name, args),
+		ToolName:        descriptor.Name, ToolVersion: descriptor.Version, Action: action, Resource: resource,
+		Args: args, IdempotencyKey: mcpIdempotencyKey(identity, descriptor.Name, descriptor.Version, args),
 	})
 	if err != nil {
 		return toolErrorResult("TOOL_INVOCATION_FAILED"), nil
@@ -214,10 +228,15 @@ func toolErrorResult(message string) map[string]any {
 	return textResult(text, true)
 }
 
-// mcpIdempotencyKey derives a deterministic key from the attempt identity and
-// the canonical arguments, so identical MCP calls replay instead of repeating
-// external side effects.
-func mcpIdempotencyKey(identity AttemptContext, toolName string, args json.RawMessage) string {
+// mcpIdempotencyKey derives a deterministic key from the attempt identity,
+// the resolved tool version, and the canonical arguments, so identical MCP
+// calls replay instead of repeating an external side effect (P1-01). The
+// tool version is folded into the digest: the same arguments against two
+// versions of one tool must never share idempotency semantics, because the
+// tool_calls unique scope is (tenant, attempt, tool_name, idempotency_key)
+// and a bare-name call can resolve to a different version than an earlier
+// pinned call within the same attempt.
+func mcpIdempotencyKey(identity AttemptContext, toolName, toolVersion string, args json.RawMessage) string {
 	var document any
 	if err := json.Unmarshal(args, &document); err != nil {
 		document = args
@@ -226,27 +245,40 @@ func mcpIdempotencyKey(identity AttemptContext, toolName string, args json.RawMe
 	if err != nil {
 		canonical = args
 	}
-	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("mcp/%s/%s/%s", identity.AttemptID, toolName, hex.EncodeToString(digest[:]))
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(toolName))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(toolVersion))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(canonical)
+	return fmt.Sprintf("mcp/%s/%s/%s", identity.AttemptID, toolName, hex.EncodeToString(digest.Sum(nil)))
 }
 
 func latestDescriptor(descriptors []store.ToolDescriptor, name string) (store.ToolDescriptor, bool) {
 	var latest store.ToolDescriptor
 	found := false
 	for _, descriptor := range descriptors {
-		if descriptor.Name == name && (!found || compareToolVersions(descriptor.Version, latest.Version) > 0) {
+		if descriptor.Name == name && (!found || tool.CompareToolVersions(descriptor.Version, latest.Version) > 0) {
 			latest, found = descriptor, true
 		}
 	}
 	return latest, found
 }
 
-func compareToolVersions(left, right string) int {
-	canonicalLeft, canonicalRight := "v"+left, "v"+right
-	if semver.IsValid(canonicalLeft) && semver.IsValid(canonicalRight) {
-		return semver.Compare(canonicalLeft, canonicalRight)
+// resolveToolVersion resolves a tool reference against the granted
+// descriptors: the latest granted version when no version is pinned, the
+// exact version when one is (a pinned reference to a version the agent is
+// not granted resolves to nothing).
+func resolveToolVersion(descriptors []store.ToolDescriptor, name, version string) (store.ToolDescriptor, bool) {
+	if version == "" {
+		return latestDescriptor(descriptors, name)
 	}
-	return strings.Compare(left, right)
+	for _, descriptor := range descriptors {
+		if descriptor.Name == name && descriptor.Version == version {
+			return descriptor, true
+		}
+	}
+	return store.ToolDescriptor{}, false
 }
 
 func firstOr(values []string, fallback string) string {

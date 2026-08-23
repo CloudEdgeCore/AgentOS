@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
@@ -74,12 +75,28 @@ func (s *ModelInvocationService) Invoke(request *modelv1.InvokeRequest, stream m
 	if len(request.GetMessages()) == 0 {
 		return status.Error(codes.InvalidArgument, "at least one message is required")
 	}
+	tools, err := protoTools(request.GetTools())
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	// Defense in depth (P0-01): the broker resolves tool names against the
+	// AgentVersion's capability grants, but the gateway re-authorizes every
+	// tool a caller attaches so a compromised runtime worker cannot widen
+	// the tool surface at the execution boundary.
+	if s.capabilities != nil {
+		for _, tool := range tools {
+			if err := s.capabilities.Authorize(stream.Context(), request.GetIdentity().GetTenantId(), request.GetAgentVersionRef(),
+				capability.Tool, tool.Name); err != nil {
+				return status.Error(codes.PermissionDenied, err.Error())
+			}
+		}
+	}
 	input := model.InvokeInput{
 		TenantID: request.GetIdentity().GetTenantId(), TaskID: taskID, RunID: runID, AttemptID: attemptID,
 		FencingToken: request.GetIdentity().GetFencingToken(), AgentVersionRef: request.GetAgentVersionRef(),
 		ModelRef: request.GetModelRef(), IdempotencyKey: request.GetIdempotencyKey(),
 		Messages: protoMessages(request.GetMessages()), Stream: request.GetStream(),
-		MaxOutputTokens: request.GetMaxOutputTokens(),
+		MaxOutputTokens: request.GetMaxOutputTokens(), Tools: tools,
 	}
 	if request.Temperature != nil {
 		temperature := request.GetTemperature()
@@ -116,6 +133,41 @@ func (s *ModelInvocationService) Invoke(request *modelv1.InvokeRequest, stream m
 		PriceRevision: output.Call.PriceRevision, FinishReason: output.Call.FinishReason,
 		ProviderRequestId: output.Call.ProviderRequestID, Content: output.Content,
 	}})
+}
+
+// protoTools converts the wire tool definitions into provider definitions.
+// The broker already generated these schemas from the capability-filtered
+// registry, so this boundary only re-validates structure defensively: every
+// tool needs a name and, when present, a syntactically valid JSON Schema
+// document. The name is re-authorized against the AgentVersion grant by the
+// caller; this function does not widen the surface.
+func protoTools(tools []*modelv1.ToolDefinition) ([]provider.ToolDefinition, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	converted := make([]provider.ToolDefinition, 0, len(tools))
+	seen := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		name := tool.GetName()
+		if name == "" {
+			return nil, errors.New("tool definition requires a name")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, errors.New("tool " + name + " is declared more than once")
+		}
+		seen[name] = struct{}{}
+		var parameters json.RawMessage
+		if schema := tool.GetParametersJson(); schema != "" {
+			if !json.Valid([]byte(schema)) {
+				return nil, errors.New("tool " + name + " parameters are not valid JSON")
+			}
+			parameters = json.RawMessage(schema)
+		}
+		converted = append(converted, provider.ToolDefinition{
+			Name: name, Description: tool.GetDescription(), Parameters: parameters,
+		})
+	}
+	return converted, nil
 }
 
 func protoMessages(messages []*modelv1.ChatMessage) []provider.Message {

@@ -28,6 +28,7 @@ const maxArgsBytes = 64 << 10
 type ToolInvoker interface {
 	InvokeTool(context.Context, tool.InvokeInput) (tool.InvokeResult, error)
 	ListTools(context.Context, string) ([]store.ToolDescriptor, error)
+	GetToolDescriptor(ctx context.Context, tenantID, name, version string) (store.ToolDescriptor, error)
 }
 
 // Service is the fenced gRPC surface of the Tool Gateway. Development mode
@@ -59,17 +60,30 @@ func (s *Service) ListTools(ctx context.Context, request *gatewayv1.ListToolsReq
 	if err != nil {
 		return nil, rpcError(err)
 	}
-	response := &gatewayv1.ListToolsResponse{Tools: make([]*gatewayv1.ToolDescriptor, 0, len(descriptors))}
-	for _, descriptor := range descriptors {
-		if s.capabilities != nil {
-			if err := s.capabilities.Authorize(ctx, request.GetTenantId(), request.GetAgentVersionRef(),
-				capability.Tool, descriptor.Name, descriptor.Name+"@"+descriptor.Version); err != nil {
-				if errors.Is(err, capability.ErrDenied) {
-					continue
-				}
-				return nil, status.Error(codes.Internal, "agent capability lookup failed")
+	var freeze capability.ToolFreeze
+	if s.capabilities != nil {
+		freeze, err = s.capabilities.ToolFreeze(ctx, request.GetTenantId(), request.GetAgentVersionRef())
+		if err != nil {
+			if errors.Is(err, capability.ErrDenied) {
+				// A portable AgentVersion that fails to resolve or declares no
+				// capabilities sees an empty registry, never the full one.
+				return &gatewayv1.ListToolsResponse{}, nil
 			}
+			return nil, status.Error(codes.Internal, "agent capability lookup failed")
 		}
+	}
+	response := &gatewayv1.ListToolsResponse{Tools: make([]*gatewayv1.ToolDescriptor, 0, len(descriptors))}
+	visible := make([]store.ToolDescriptor, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if s.capabilities != nil && !freeze.Allow(descriptor.Name, descriptor.Version, descriptor.CreatedAt) {
+			continue
+		}
+		visible = append(visible, descriptor)
+	}
+	// P1-02: one entry per tool name — the latest granted version — so the
+	// model never sees two same-named tools and a bare-name invocation
+	// resolves to exactly what the listing advertised.
+	for _, descriptor := range tool.LatestVersionPerName(visible) {
 		response.Tools = append(response.Tools, &gatewayv1.ToolDescriptor{
 			Name: descriptor.Name, Version: descriptor.Version,
 			SideEffectRisk: string(descriptor.SideEffectRisk),
@@ -91,13 +105,29 @@ func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1.InvokeToolR
 		return nil, status.Errorf(codes.InvalidArgument, "tool arguments exceed %d bytes", maxArgsBytes)
 	}
 	if s.capabilities != nil {
-		candidates := []string{request.GetToolName()}
-		if request.GetToolVersion() != "" {
-			candidates = append(candidates, request.GetToolName()+"@"+request.GetToolVersion())
-		}
-		if err := s.capabilities.Authorize(ctx, request.GetIdentity().GetTenantId(), request.GetAgentVersionRef(),
-			capability.Tool, candidates...); err != nil {
+		freeze, err := s.capabilities.ToolFreeze(ctx, request.GetIdentity().GetTenantId(), request.GetAgentVersionRef())
+		if err != nil {
 			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
+		if freeze.Enforced() {
+			// The platform pins tool versions for portable publications, so an
+			// authoritative invocation must name the exact version the frozen
+			// registry advertised. An empty version would let the store resolve
+			// its own latest and defeat the freeze; a compromised adapter that
+			// forges a newer version is caught by the freeze check below.
+			if request.GetToolVersion() == "" {
+				return nil, status.Error(codes.PermissionDenied,
+					"the platform freezes tool versions; invoke a specific name@version")
+			}
+			descriptor, err := s.invoker.GetToolDescriptor(ctx, request.GetIdentity().GetTenantId(),
+				request.GetToolName(), request.GetToolVersion())
+			if err != nil {
+				return nil, rpcError(err)
+			}
+			if !freeze.Allow(descriptor.Name, descriptor.Version, descriptor.CreatedAt) {
+				return nil, status.Error(codes.PermissionDenied,
+					"tool version is frozen out for this AgentVersion; pin it at publish or grant name@* to float")
+			}
 		}
 		if request.GetSecretRef() != "" {
 			if err := s.capabilities.Authorize(ctx, request.GetIdentity().GetTenantId(), request.GetAgentVersionRef(),

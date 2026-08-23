@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,7 +179,7 @@ func TestInvokerOmittedOutputLimitUsesBoundedReservation(t *testing.T) {
 	if _, err := invoker.Invoke(context.Background(), input); err != nil {
 		t.Fatalf("invoke: %v", err)
 	}
-	want := estimateInputTokens(input.Messages, tokens.Heuristic) + defaultMaxOutputTokens
+	want := estimateInputTokens(input.Messages, input.Tools, tokens.Heuristic) + defaultMaxOutputTokens
 	if got := env.budget.lastReserved.Tokens; got != want {
 		t.Fatalf("reserved tokens = %d, want bounded default %d", got, want)
 	}
@@ -332,5 +334,103 @@ func TestInvokerStreamingDescriptorFallback(t *testing.T) {
 	}
 	if output.Content != "plain" || len(deltas) != 0 {
 		t.Fatalf("fallback content=%q deltas=%v", output.Content, deltas)
+	}
+}
+
+// TestInvokerStreamBudgetGuardStopsMidStream proves P1-03 acceptance item 3:
+// the budget ceiling trips DURING the stream (not at Finish). The reservation
+// is far below the first delta's estimate, so the guarded settle exhausts the
+// budget, the provider call is cancelled, and the ledger row finishes STOPPED
+// with ErrBudgetExhausted — a runaway stream cannot outrun the ceiling.
+func TestInvokerStreamBudgetGuardStopsMidStream(t *testing.T) {
+	env := newInvokerEnv(t, streamReply(strings.Repeat("token ", 400), " and more", " and yet more"))
+	env.budget.reservedTokens = 100 // below one mid-stream settle increment (128)
+	invoker := NewInvoker(env.gateway, env.registry)
+
+	_, err := invoker.InvokeStream(context.Background(), invokeInput(), func(string) {})
+	if !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("mid-stream guard err = %v, want ErrBudgetExhausted", err)
+	}
+	if !env.budget.exhausted {
+		t.Fatal("ledger must be marked exhausted by the mid-stream settle")
+	}
+	// The final row settles STOPPED, not COMPLETED: the guard cut the stream.
+	stopped := false
+	for _, call := range env.store.callsByID {
+		if call.Status == kernelstore.ModelCallStopped {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatal("no model call finished STOPPED after the mid-stream budget stop")
+	}
+}
+
+// TestInvokerStreamSettlesWithoutDeltaConsumer proves P1-03 acceptance item 4:
+// ledger settlement is driven entirely by the kernel invoker, never by a
+// downstream delta consumer. Passing a nil onDelta is the exact seam the MCP
+// broker uses today (internal/mcp/broker.go), and it is also what a client
+// disconnect looks like from here — the settlement is identical to the
+// delta-consuming path (exactly 150, COMPLETED).
+func TestInvokerStreamSettlesWithoutDeltaConsumer(t *testing.T) {
+	env := newInvokerEnv(t, streamReply("Hel", "lo ", "world"))
+	invoker := NewInvoker(env.gateway, env.registry)
+
+	output, err := invoker.InvokeStream(context.Background(), invokeInput(), nil)
+	if err != nil {
+		t.Fatalf("invoke stream (nil consumer): %v", err)
+	}
+	if output.Content != "Hello world" {
+		t.Fatalf("content = %q, want assembled stream even with no consumer", output.Content)
+	}
+	if got := env.budget.settledTokens; got != 150 {
+		t.Fatalf("settled tokens = %d, want exactly 150 independent of any consumer", got)
+	}
+	if output.Call.Status != kernelstore.ModelCallCompleted {
+		t.Fatalf("status = %s, want COMPLETED", output.Call.Status)
+	}
+}
+
+// TestInvokerReceiptRecordsResolvedRoute proves P2-10: the model-call audit
+// receipt pins the physical deployment identity the logical modelRef resolved
+// to (provider + wire model) plus a content-addressed route revision, so a
+// call is reproducible against the exact route that served it. Endpoints and
+// credentials never appear.
+func TestInvokerReceiptRecordsResolvedRoute(t *testing.T) {
+	env := newInvokerEnv(t, completionReply("routed", 10, 5))
+	invoker := NewInvoker(env.gateway, env.registry)
+
+	if _, err := invoker.Invoke(context.Background(), invokeInput()); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if len(env.receipts.written) != 1 {
+		t.Fatalf("receipts = %d, want 1", len(env.receipts.written))
+	}
+	var receipt struct {
+		ModelRef           string `json:"modelRef"`
+		RouteRevision      string `json:"routeRevision"`
+		ProviderDeployment struct {
+			Provider  string `json:"provider"`
+			WireModel string `json:"wireModel"`
+		} `json:"providerDeployment"`
+	}
+	if err := json.Unmarshal(env.receipts.written[0].Response, &receipt); err != nil {
+		t.Fatalf("decode receipt: %v", err)
+	}
+	if receipt.ProviderDeployment.Provider != "fake" || receipt.ProviderDeployment.WireModel != "agent-model" {
+		t.Fatalf("resolved route = %+v, want provider=fake wireModel=agent-model", receipt.ProviderDeployment)
+	}
+	if len(receipt.RouteRevision) != 16 {
+		t.Fatalf("route revision = %q, want a 16-char content hash", receipt.RouteRevision)
+	}
+	// The revision is content-addressed: same logical ref + same physical route
+	// must reproduce the same revision (a repoint would change it).
+	want := sha256.Sum256([]byte(receipt.ModelRef + "|fake|agent-model"))
+	if receipt.RouteRevision != hex.EncodeToString(want[:])[:16] {
+		t.Fatalf("route revision %q is not the content hash of the resolved route", receipt.RouteRevision)
+	}
+	if strings.Contains(string(env.receipts.written[0].Response), env.endpoint.URL) ||
+		strings.Contains(string(env.receipts.written[0].Response), "test-key-123") {
+		t.Fatalf("receipt leaks endpoint or credential: %s", env.receipts.written[0].Response)
 	}
 }

@@ -251,6 +251,13 @@ func (g *Gateway) ListTools(ctx context.Context, tenantID string) ([]store.ToolD
 	return g.tools.ListToolDescriptors(ctx, tenantID)
 }
 
+// GetToolDescriptor returns one immutable descriptor. An empty version selects
+// the registry's latest; the gateway service pins a concrete version before it
+// reaches here whenever a capability freeze is enforced.
+func (g *Gateway) GetToolDescriptor(ctx context.Context, tenantID, name, version string) (store.ToolDescriptor, error) {
+	return g.tools.GetToolDescriptor(ctx, tenantID, name, version)
+}
+
 // InvokeTool runs one invocation through the full decision chain.
 func (g *Gateway) InvokeTool(ctx context.Context, in InvokeInput) (InvokeResult, error) {
 	var result InvokeResult

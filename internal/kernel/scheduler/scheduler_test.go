@@ -489,3 +489,32 @@ func TestSelectFailsClosedOnMissingCapacityLedger(t *testing.T) {
 		t.Fatalf("rejections = %+v, want CAPACITY_LEDGER_MISSING", result.Rejected)
 	}
 }
+
+// TestGuardProductionPoolSourceRejectsStaticSource proves the P2-06 guard: a
+// non-dev server handed a StaticPoolSource (directly or wrapped by a
+// LeaseAwarePoolSource) fails closed, while dev mode and a non-static source
+// pass.
+func TestGuardProductionPoolSourceRejectsStaticSource(t *testing.T) {
+	static := StaticPoolSource{{ID: "p", RuntimeClass: "oci", RuntimeInstanceID: "w", Region: "r", TenantIDs: []string{"t"}}}
+	if err := GuardProductionPoolSource(static, false); err == nil {
+		t.Fatal("production server accepted a StaticPoolSource")
+	}
+	wrapped := NewLeaseAwarePoolSource(static, nil, time.Minute)
+	if err := GuardProductionPoolSource(wrapped, false); err == nil {
+		t.Fatal("production server accepted a LeaseAwarePoolSource wrapping a StaticPoolSource")
+	}
+	if err := GuardProductionPoolSource(static, true); err != nil {
+		t.Fatalf("dev mode rejected a StaticPoolSource: %v", err)
+	}
+	// A non-static source (the durable registry stands in as any PoolSource
+	// that is not StaticPoolSource) passes in production.
+	if err := GuardProductionPoolSource(nonStaticPoolSource{}, false); err != nil {
+		t.Fatalf("production server rejected a non-static pool source: %v", err)
+	}
+}
+
+type nonStaticPoolSource struct{}
+
+func (nonStaticPoolSource) ListRuntimePools(context.Context, string) ([]RuntimePool, error) {
+	return nil, nil
+}

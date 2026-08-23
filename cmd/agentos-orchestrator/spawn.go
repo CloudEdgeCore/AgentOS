@@ -14,6 +14,7 @@ import (
 
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	workflowkernel "github.com/CloudEdgeCore/AgentOS/internal/kernel/workflow"
@@ -98,7 +99,7 @@ func (s *spawnService) SpawnStep(ctx context.Context, request *runtimev1.SpawnSt
 	if len(request.GetGoal()) > 8192 || len(request.GetIdempotencyKey()) > 512 || request.GetMaxAttempts() < 0 || request.GetMaxAttempts() > 10 {
 		return nil, status.Error(codes.InvalidArgument, "goal, idempotencyKey or maxAttempts exceeds its bound")
 	}
-	if _, _, err := agentversion.ParseRef(request.GetAgentVersionRef()); err != nil {
+	if _, _, _, err := agentversion.ParseRef(request.GetAgentVersionRef()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if raw := request.GetArgumentsJson(); raw != "" && !json.Valid([]byte(raw)) {
@@ -161,8 +162,12 @@ func authorizeSpawnTarget(assignment kernelstore.RuntimeAssignment, target strin
 	if !spec.Capabilities.SpawnTasks {
 		return status.Error(codes.PermissionDenied, "AgentVersion is not allowed to spawn tasks")
 	}
+	// The child allowlist honors the shared MatchGrant wildcard contract
+	// (exact, global "*", or a namespace suffix wildcard like "team-a/*"), so
+	// namespaced child references authorize identically to the broker's
+	// agent-facing pre-check (P1-07).
 	for _, allowed := range spec.Capabilities.ChildAgents {
-		if allowed == target {
+		if capability.MatchGrant(allowed, target) {
 			return nil
 		}
 	}

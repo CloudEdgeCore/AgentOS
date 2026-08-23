@@ -37,7 +37,10 @@ type Route struct {
 	Model    string `json:"model"`
 }
 
-// Register adds or replaces one provider endpoint configuration.
+// Register adds one provider endpoint configuration. A provider name is
+// declared once: registering an existing name fails instead of silently
+// replacing the endpoint (a duplicate in static configuration is a mistake,
+// not a rotation).
 func (r *Registry) Register(config Config) error {
 	if strings.TrimSpace(config.Name) == "" {
 		return fmt.Errorf("provider name is required")
@@ -53,6 +56,9 @@ func (r *Registry) Register(config Config) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, duplicate := r.executors[config.Name]; duplicate {
+		return fmt.Errorf("provider %q is declared twice: remove one entry instead of relying on file order", config.Name)
+	}
 	r.executors[config.Name] = NewExecutor(config, nil).WithCircuitBreaker(r.breaker)
 	return nil
 }
@@ -79,7 +85,9 @@ func (r *Registry) Resolve(name string) (*Executor, error) {
 	return executor, nil
 }
 
-// RegisterRoute adds or replaces one explicit logical-model route.
+// RegisterRoute adds one explicit logical-model route. A modelRef is routed
+// once: re-declaring it fails instead of silently overriding the previous
+// route.
 func (r *Registry) RegisterRoute(route Route) error {
 	if _, model, ok := strings.Cut(strings.TrimSpace(route.ModelRef), "/"); !ok || strings.TrimSpace(model) == "" ||
 		strings.TrimSpace(route.Provider) == "" || strings.TrimSpace(route.Model) == "" {
@@ -89,6 +97,9 @@ func (r *Registry) RegisterRoute(route Route) error {
 	defer r.mu.Unlock()
 	if _, ok := r.executors[route.Provider]; !ok {
 		return fmt.Errorf("model route %q references unknown provider %q", route.ModelRef, route.Provider)
+	}
+	if _, duplicate := r.routes[route.ModelRef]; duplicate {
+		return fmt.Errorf("model route %q is declared twice: remove one entry instead of relying on file order", route.ModelRef)
 	}
 	r.routes[route.ModelRef] = route
 	return nil

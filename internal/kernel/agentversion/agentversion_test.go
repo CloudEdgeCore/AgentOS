@@ -6,13 +6,27 @@ import (
 )
 
 func TestParseRefAcceptsCanonicalReferences(t *testing.T) {
-	for _, ref := range []string{"research-agent@1.3.0", "agent@1", "a.b-c_d@v0.1.2"} {
-		name, version, err := ParseRef(ref)
+	// A reference with no namespace segment resolves to the default namespace,
+	// so historical "name@version" references keep their exact meaning.
+	for _, tc := range []struct {
+		ref       string
+		namespace string
+	}{
+		{"research-agent@1.3.0", DefaultNamespace},
+		{"agent@1", DefaultNamespace},
+		{"a.b-c_d@v0.1.2", DefaultNamespace},
+		{"team-a/research-agent@1.3.0", "team-a"},
+		{"default/agent@1", "default"},
+	} {
+		namespace, name, version, err := ParseRef(tc.ref)
 		if err != nil {
-			t.Fatalf("ParseRef(%q) error: %v", ref, err)
+			t.Fatalf("ParseRef(%q) error: %v", tc.ref, err)
+		}
+		if namespace != tc.namespace {
+			t.Fatalf("ParseRef(%q) namespace = %q, want %q", tc.ref, namespace, tc.namespace)
 		}
 		if name == "" || version == "" {
-			t.Fatalf("ParseRef(%q) = (%q, %q), want non-empty halves", ref, name, version)
+			t.Fatalf("ParseRef(%q) = (%q, %q), want non-empty halves", tc.ref, name, version)
 		}
 	}
 }
@@ -21,8 +35,10 @@ func TestParseRefRejectsMalformedReferences(t *testing.T) {
 	for _, ref := range []string{
 		"", "agent", "agent@", "@1", "agent@1@2", "agent v1", "agent:v1",
 		"@", "a@b c", "-agent@1", "agent@-1", "agent@1/2",
+		// A written namespace must be a canonical token too.
+		"bad ns/agent@1", "-ns/agent@1", "ns/agent", "a/b/agent@1",
 	} {
-		if _, _, err := ParseRef(ref); err == nil {
+		if _, _, _, err := ParseRef(ref); err == nil {
 			t.Fatalf("ParseRef(%q) unexpectedly succeeded", ref)
 		}
 	}

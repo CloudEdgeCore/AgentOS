@@ -27,6 +27,13 @@ const (
 	MaxNameLength    = 128
 	MaxVersionLength = 128
 	MaxAttemptsLimit = 10
+
+	// DefaultNamespace is the namespace an AgentVersion reference resolves to
+	// when none is written explicitly. Eliding it keeps the historical
+	// "name@version" grammar valid byte-for-byte while the namespace becomes a
+	// real part of the identity (P1-07): two versions with the same name and
+	// version can coexist under one tenant in different namespaces.
+	DefaultNamespace = "default"
 )
 
 // tokenPattern bounds both agent names and version strings to safe, opaque,
@@ -91,20 +98,53 @@ func ValidateVersion(version string) error {
 	return nil
 }
 
-// ParseRef splits the canonical "name@version" reference. The reference must
-// contain exactly one '@' and both halves must be valid tokens.
-func ParseRef(ref string) (name, version string, err error) {
-	name, version, found := strings.Cut(ref, "@")
+// ValidateNamespace rejects namespaces that are not canonical tokens. The
+// namespace is part of the AgentVersion identity and rides in the reference
+// grammar ahead of the '/' separator, so it must be free of both the '/' and
+// '@' separators — the token grammar already excludes them.
+func ValidateNamespace(namespace string) error {
+	if !tokenPattern.MatchString(namespace) {
+		return fmt.Errorf("agent namespace must match %s", tokenPattern)
+	}
+	return nil
+}
+
+// FormatRef renders the canonical reference for an identity. The default
+// namespace is elided so historical "name@version" references remain
+// byte-identical; any other namespace is written as the full
+// "namespace/name@version" identity.
+func FormatRef(namespace, name, version string) string {
+	if namespace == "" || namespace == DefaultNamespace {
+		return name + "@" + version
+	}
+	return namespace + "/" + name + "@" + version
+}
+
+// ParseRef splits the canonical "[namespace/]name@version" reference. A
+// reference with no namespace segment resolves to DefaultNamespace, so every
+// historical "name@version" reference keeps its exact meaning. The reference
+// must contain exactly one '@'; the namespace (when written), name and version
+// must all be valid tokens.
+func ParseRef(ref string) (namespace, name, version string, err error) {
+	namespace = DefaultNamespace
+	rest := ref
+	if head, tail, hasNamespace := strings.Cut(ref, "/"); hasNamespace {
+		namespace, rest = head, tail
+		if err := ValidateNamespace(namespace); err != nil {
+			return "", "", "", fmt.Errorf("agent version reference: %w", err)
+		}
+	}
+	name, version, found := strings.Cut(rest, "@")
 	if !found {
-		return "", "", fmt.Errorf("agent version reference must be name@version")
+		return "", "", "", fmt.Errorf("agent version reference must be [namespace/]name@version")
 	}
 	if err := ValidateName(name); err != nil {
-		return "", "", fmt.Errorf("agent version reference: %w", err)
+		return "", "", "", fmt.Errorf("agent version reference: %w", err)
 	}
 	if err := ValidateVersion(version); err != nil {
-		return "", "", fmt.Errorf("agent version reference: %w", err)
+		return "", "", "", fmt.Errorf("agent version reference: %w", err)
 	}
-	return name, version, nil
+	return namespace, name, version, nil
 }
 
 // CanonicalizeSpec normalizes a raw spec document into its canonical JSON form

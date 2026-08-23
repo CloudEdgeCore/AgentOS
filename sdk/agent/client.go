@@ -21,15 +21,28 @@ type Client struct {
 	prefix   string
 }
 
-func NewClient(baseURL string, client *http.Client) (*Client, error) {
+// ValidateBaseURL checks one Runtime Interface endpoint against the wire
+// contract every client and binding loader shares: an absolute http(s) URL
+// with a host and no userinfo, query, fragment, or path components. It is
+// the single validator so configuration fails fast at load time instead of
+// at the first request.
+func ValidateBaseURL(baseURL string) error {
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, errors.New("runtime interface base URL must be an absolute HTTP(S) URL")
+		return errors.New("runtime interface base URL must be an absolute HTTP(S) URL")
 	}
 	if parsed.Hostname() == "" {
-		return nil, errors.New("runtime interface base URL must include a host")
+		return errors.New("runtime interface base URL must include a host")
 	}
+	return nil
+}
+
+func NewClient(baseURL string, client *http.Client) (*Client, error) {
+	if err := ValidateBaseURL(baseURL); err != nil {
+		return nil, err
+	}
+	parsed, _ := url.Parse(strings.TrimRight(baseURL, "/"))
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}

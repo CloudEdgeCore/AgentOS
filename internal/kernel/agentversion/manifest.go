@@ -133,8 +133,8 @@ func (m Manifest) Validate() error {
 	if err := ValidateVersion(m.Metadata.Version); err != nil {
 		return fmt.Errorf("agent manifest metadata.version: %w", err)
 	}
-	if namespace := strings.TrimSpace(m.Metadata.Namespace); namespace == "" || len(namespace) > 255 {
-		return fmt.Errorf("agent manifest metadata.namespace is required and must not exceed 255 bytes")
+	if err := ValidateNamespace(m.Metadata.Namespace); err != nil {
+		return fmt.Errorf("agent manifest metadata.namespace: %w", err)
 	}
 	if len(m.Spec.Runtimes) == 0 {
 		return fmt.Errorf("agent manifest spec.runtimes requires at least one target")
@@ -161,7 +161,9 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-func (m Manifest) Ref() string { return m.Metadata.Name + "@" + m.Metadata.Version }
+func (m Manifest) Ref() string {
+	return FormatRef(m.Metadata.Namespace, m.Metadata.Name, m.Metadata.Version)
+}
 
 // PromoteToV1 performs the only supported alpha-to-GA schema migration. The
 // v1 schema is otherwise wire-identical, so canonical identity changes solely
@@ -328,8 +330,8 @@ func validateCapabilitySet(values []string) error {
 			return fmt.Errorf("identifier %q is invalid", value)
 		}
 		if strings.Contains(value, "*") && value != "*" &&
-			!(strings.HasSuffix(value, ".*") || strings.HasSuffix(value, "/*")) {
-			return fmt.Errorf("identifier %q uses an unsupported wildcard; use exact, *, .*, or /*", value)
+			!(strings.HasSuffix(value, ".*") || strings.HasSuffix(value, "/*") || strings.HasSuffix(value, "@*")) {
+			return fmt.Errorf("identifier %q uses an unsupported wildcard; use exact, *, .*, /*, or @* (version floating)", value)
 		}
 		if strings.Count(value, "*") > 1 {
 			return fmt.Errorf("identifier %q contains more than one wildcard", value)

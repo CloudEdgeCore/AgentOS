@@ -151,6 +151,70 @@ func (x *ChatMessage) GetToolCalls() []*ChatToolCall {
 	return nil
 }
 
+// ToolDefinition declares one callable tool to the model: the platform (not
+// the sandbox) generates the schema from the granted tool registry, so a
+// sandboxed agent cannot invent or widen tool contracts.
+type ToolDefinition struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	// parameters_json is the JSON Schema of the tool's input contract.
+	ParametersJson string `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ToolDefinition) Reset() {
+	*x = ToolDefinition{}
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolDefinition) ProtoMessage() {}
+
+func (x *ToolDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolDefinition.ProtoReflect.Descriptor instead.
+func (*ToolDefinition) Descriptor() ([]byte, []int) {
+	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ToolDefinition) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolDefinition) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *ToolDefinition) GetParametersJson() string {
+	if x != nil {
+		return x.ParametersJson
+	}
+	return ""
+}
+
 type InvokeRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Identity        *AttemptIdentity       `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
@@ -163,13 +227,15 @@ type InvokeRequest struct {
 	Stream          bool                   `protobuf:"varint,8,opt,name=stream,proto3" json:"stream,omitempty"`
 	Temperature     *float64               `protobuf:"fixed64,9,opt,name=temperature,proto3,oneof" json:"temperature,omitempty"`
 	MaxOutputTokens int32                  `protobuf:"varint,10,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// tools are the granted, platform-described tools the model may call.
+	Tools         []*ToolDefinition `protobuf:"bytes,11,rep,name=tools,proto3" json:"tools,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InvokeRequest) Reset() {
 	*x = InvokeRequest{}
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[2]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -181,7 +247,7 @@ func (x *InvokeRequest) String() string {
 func (*InvokeRequest) ProtoMessage() {}
 
 func (x *InvokeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[2]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -194,7 +260,7 @@ func (x *InvokeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeRequest.ProtoReflect.Descriptor instead.
 func (*InvokeRequest) Descriptor() ([]byte, []int) {
-	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{2}
+	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *InvokeRequest) GetIdentity() *AttemptIdentity {
@@ -267,6 +333,13 @@ func (x *InvokeRequest) GetMaxOutputTokens() int32 {
 	return 0
 }
 
+func (x *InvokeRequest) GetTools() []*ToolDefinition {
+	if x != nil {
+		return x.Tools
+	}
+	return nil
+}
+
 // InvokeResponse is one streamed chunk: a content delta, a model-requested
 // tool call, or the terminal finish / structured failure.
 type InvokeResponse struct {
@@ -281,7 +354,7 @@ type InvokeResponse struct {
 
 func (x *InvokeResponse) Reset() {
 	*x = InvokeResponse{}
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[3]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -293,7 +366,7 @@ func (x *InvokeResponse) String() string {
 func (*InvokeResponse) ProtoMessage() {}
 
 func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[3]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -306,7 +379,7 @@ func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeResponse.ProtoReflect.Descriptor instead.
 func (*InvokeResponse) Descriptor() ([]byte, []int) {
-	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{3}
+	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *InvokeResponse) GetDelta() string {
@@ -356,7 +429,7 @@ type InvokeFinish struct {
 
 func (x *InvokeFinish) Reset() {
 	*x = InvokeFinish{}
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[4]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -368,7 +441,7 @@ func (x *InvokeFinish) String() string {
 func (*InvokeFinish) ProtoMessage() {}
 
 func (x *InvokeFinish) ProtoReflect() protoreflect.Message {
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[4]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -381,7 +454,7 @@ func (x *InvokeFinish) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeFinish.ProtoReflect.Descriptor instead.
 func (*InvokeFinish) Descriptor() ([]byte, []int) {
-	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{4}
+	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InvokeFinish) GetCallId() string {
@@ -465,7 +538,7 @@ type InvokeFailure struct {
 
 func (x *InvokeFailure) Reset() {
 	*x = InvokeFailure{}
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[5]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -477,7 +550,7 @@ func (x *InvokeFailure) String() string {
 func (*InvokeFailure) ProtoMessage() {}
 
 func (x *InvokeFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_agentos_model_v1_invoke_proto_msgTypes[5]
+	mi := &file_agentos_model_v1_invoke_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -490,7 +563,7 @@ func (x *InvokeFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeFailure.ProtoReflect.Descriptor instead.
 func (*InvokeFailure) Descriptor() ([]byte, []int) {
-	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{5}
+	return file_agentos_model_v1_invoke_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *InvokeFailure) GetCode() string {
@@ -529,7 +602,11 @@ const file_agentos_model_v1_invoke_proto_rawDesc = "" +
 	"\ftool_call_id\x18\x03 \x01(\tR\n" +
 	"toolCallId\x12=\n" +
 	"\n" +
-	"tool_calls\x18\x04 \x03(\v2\x1e.agentos.model.v1.ChatToolCallR\ttoolCalls\"\xa6\x03\n" +
+	"tool_calls\x18\x04 \x03(\v2\x1e.agentos.model.v1.ChatToolCallR\ttoolCalls\"o\n" +
+	"\x0eToolDefinition\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
+	"\x0fparameters_json\x18\x03 \x01(\tR\x0eparametersJson\"\xde\x03\n" +
 	"\rInvokeRequest\x12=\n" +
 	"\bidentity\x18\x01 \x01(\v2!.agentos.model.v1.AttemptIdentityR\bidentity\x12\x17\n" +
 	"\atask_id\x18\x02 \x01(\tR\x06taskId\x12\x15\n" +
@@ -541,7 +618,8 @@ const file_agentos_model_v1_invoke_proto_rawDesc = "" +
 	"\x06stream\x18\b \x01(\bR\x06stream\x12%\n" +
 	"\vtemperature\x18\t \x01(\x01H\x00R\vtemperature\x88\x01\x01\x12*\n" +
 	"\x11max_output_tokens\x18\n" +
-	" \x01(\x05R\x0fmaxOutputTokensB\x0e\n" +
+	" \x01(\x05R\x0fmaxOutputTokens\x126\n" +
+	"\x05tools\x18\v \x03(\v2 .agentos.model.v1.ToolDefinitionR\x05toolsB\x0e\n" +
 	"\f_temperature\"\xd6\x01\n" +
 	"\x0eInvokeResponse\x12\x14\n" +
 	"\x05delta\x18\x01 \x01(\tR\x05delta\x12;\n" +
@@ -579,30 +657,32 @@ func file_agentos_model_v1_invoke_proto_rawDescGZIP() []byte {
 	return file_agentos_model_v1_invoke_proto_rawDescData
 }
 
-var file_agentos_model_v1_invoke_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_agentos_model_v1_invoke_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_agentos_model_v1_invoke_proto_goTypes = []any{
 	(*ChatToolCall)(nil),    // 0: agentos.model.v1.ChatToolCall
 	(*ChatMessage)(nil),     // 1: agentos.model.v1.ChatMessage
-	(*InvokeRequest)(nil),   // 2: agentos.model.v1.InvokeRequest
-	(*InvokeResponse)(nil),  // 3: agentos.model.v1.InvokeResponse
-	(*InvokeFinish)(nil),    // 4: agentos.model.v1.InvokeFinish
-	(*InvokeFailure)(nil),   // 5: agentos.model.v1.InvokeFailure
-	(*AttemptIdentity)(nil), // 6: agentos.model.v1.AttemptIdentity
+	(*ToolDefinition)(nil),  // 2: agentos.model.v1.ToolDefinition
+	(*InvokeRequest)(nil),   // 3: agentos.model.v1.InvokeRequest
+	(*InvokeResponse)(nil),  // 4: agentos.model.v1.InvokeResponse
+	(*InvokeFinish)(nil),    // 5: agentos.model.v1.InvokeFinish
+	(*InvokeFailure)(nil),   // 6: agentos.model.v1.InvokeFailure
+	(*AttemptIdentity)(nil), // 7: agentos.model.v1.AttemptIdentity
 }
 var file_agentos_model_v1_invoke_proto_depIdxs = []int32{
 	0, // 0: agentos.model.v1.ChatMessage.tool_calls:type_name -> agentos.model.v1.ChatToolCall
-	6, // 1: agentos.model.v1.InvokeRequest.identity:type_name -> agentos.model.v1.AttemptIdentity
+	7, // 1: agentos.model.v1.InvokeRequest.identity:type_name -> agentos.model.v1.AttemptIdentity
 	1, // 2: agentos.model.v1.InvokeRequest.messages:type_name -> agentos.model.v1.ChatMessage
-	0, // 3: agentos.model.v1.InvokeResponse.tool_call:type_name -> agentos.model.v1.ChatToolCall
-	4, // 4: agentos.model.v1.InvokeResponse.finish:type_name -> agentos.model.v1.InvokeFinish
-	5, // 5: agentos.model.v1.InvokeResponse.failure:type_name -> agentos.model.v1.InvokeFailure
-	2, // 6: agentos.model.v1.ModelInvocationService.Invoke:input_type -> agentos.model.v1.InvokeRequest
-	3, // 7: agentos.model.v1.ModelInvocationService.Invoke:output_type -> agentos.model.v1.InvokeResponse
-	7, // [7:8] is the sub-list for method output_type
-	6, // [6:7] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	2, // 3: agentos.model.v1.InvokeRequest.tools:type_name -> agentos.model.v1.ToolDefinition
+	0, // 4: agentos.model.v1.InvokeResponse.tool_call:type_name -> agentos.model.v1.ChatToolCall
+	5, // 5: agentos.model.v1.InvokeResponse.finish:type_name -> agentos.model.v1.InvokeFinish
+	6, // 6: agentos.model.v1.InvokeResponse.failure:type_name -> agentos.model.v1.InvokeFailure
+	3, // 7: agentos.model.v1.ModelInvocationService.Invoke:input_type -> agentos.model.v1.InvokeRequest
+	4, // 8: agentos.model.v1.ModelInvocationService.Invoke:output_type -> agentos.model.v1.InvokeResponse
+	8, // [8:9] is the sub-list for method output_type
+	7, // [7:8] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_agentos_model_v1_invoke_proto_init() }
@@ -611,14 +691,14 @@ func file_agentos_model_v1_invoke_proto_init() {
 		return
 	}
 	file_agentos_model_v1_model_proto_init()
-	file_agentos_model_v1_invoke_proto_msgTypes[2].OneofWrappers = []any{}
+	file_agentos_model_v1_invoke_proto_msgTypes[3].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentos_model_v1_invoke_proto_rawDesc), len(file_agentos_model_v1_invoke_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

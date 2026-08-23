@@ -92,7 +92,10 @@ type ToolCall struct {
 	Arguments string `json:"arguments"`
 }
 
-// ToolDefinition declares one callable tool to the model.
+// ToolDefinition declares one callable tool to the model. The internal shape
+// stays flat; encodeInvocation converts it into the OpenAI-compatible
+// function-tool wire shape ({"type":"function","function":{…}}) at the
+// request boundary.
 type ToolDefinition struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
@@ -647,25 +650,85 @@ func (e *Executor) recordFailure(ctx context.Context, permit CircuitPermit, retr
 	e.probing = false
 }
 
+// wireToolRequest is the OpenAI-compatible function-tool wire shape of one
+// request-side tool declaration: {"type":"function","function":{...}}. The
+// kernel's internal ToolDefinition stays flat; the conversion happens only
+// at this wire boundary, because strict OpenAI-compatible providers (vLLM,
+// Qwen, DeepSeek, GLM, OpenAI itself) reject or ignore a bare
+// {"name",...} object in "tools".
+type wireToolRequest struct {
+	Type     string             `json:"type"`
+	Function wireToolDefinition `json:"function"`
+}
+
+type wireToolDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// wireMessage is the OpenAI-compatible wire shape of one chat turn. An
+// assistant turn's tool calls must serialize as
+// [{"id","type":"function","function":{"name","arguments"}}]: the internal
+// flat ToolCall shape is a parse convenience, and sending it verbatim makes
+// strict providers reject the follow-up turn with the tool results (the
+// real-model closed loop died exactly there).
+type wireChatTurn struct {
+	Role       string             `json:"role"`
+	Content    string             `json:"content"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	ToolCalls  []wireToolCallItem `json:"tool_calls,omitempty"`
+}
+
+type wireToolCallItem struct {
+	ID       string               `json:"id"`
+	Type     string               `json:"type"`
+	Function wireToolCallFunction `json:"function"`
+}
+
+type wireToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// encodeMessages converts internal chat turns into their wire shape.
+func encodeMessages(messages []Message) []wireChatTurn {
+	converted := make([]wireChatTurn, 0, len(messages))
+	for _, message := range messages {
+		wire := wireChatTurn{Role: message.Role, Content: message.Content, ToolCallID: message.ToolCallID}
+		for _, call := range message.ToolCalls {
+			wire.ToolCalls = append(wire.ToolCalls, wireToolCallItem{
+				ID:   call.ID,
+				Type: "function",
+				Function: wireToolCallFunction{
+					Name: call.Name, Arguments: call.Arguments,
+				},
+			})
+		}
+		converted = append(converted, wire)
+	}
+	return converted
+}
+
 func encodeInvocation(invocation Invocation, profiles ...CapabilityProfile) ([]byte, error) {
 	profile := CapabilityProfile{}
 	if len(profiles) > 0 {
 		profile = profiles[0]
 	}
 	type wire struct {
-		Model               string           `json:"model"`
-		Messages            []Message        `json:"messages"`
-		Temperature         *float64         `json:"temperature,omitempty"`
-		MaxTokens           int32            `json:"max_tokens,omitempty"`
-		MaxCompletionTokens int32            `json:"max_completion_tokens,omitempty"`
-		Stream              bool             `json:"stream,omitempty"`
-		StreamOptions       *wireStreamOpts  `json:"stream_options,omitempty"`
-		Tools               []ToolDefinition `json:"tools,omitempty"`
+		Model               string            `json:"model"`
+		Messages            []wireChatTurn    `json:"messages"`
+		Temperature         *float64          `json:"temperature,omitempty"`
+		MaxTokens           int32             `json:"max_tokens,omitempty"`
+		MaxCompletionTokens int32             `json:"max_completion_tokens,omitempty"`
+		Stream              bool              `json:"stream,omitempty"`
+		StreamOptions       *wireStreamOpts   `json:"stream_options,omitempty"`
+		Tools               []wireToolRequest `json:"tools,omitempty"`
 	}
 	value := wire{
-		Model: invocation.ModelName, Messages: invocation.Messages,
+		Model: invocation.ModelName, Messages: encodeMessages(invocation.Messages),
 		Temperature: invocation.Temperature, MaxTokens: invocation.MaxOutputTokens,
-		Stream: invocation.Stream, Tools: invocation.Tools,
+		Stream: invocation.Stream, Tools: encodeTools(invocation.Tools),
 	}
 	if profile.MaxTokensField != "" && profile.MaxTokensField != "max_tokens" && profile.MaxTokensField != "max_completion_tokens" {
 		return nil, fmt.Errorf("unsupported provider maxTokensField %q", profile.MaxTokensField)
@@ -696,6 +759,24 @@ func encodeInvocation(invocation Invocation, profiles ...CapabilityProfile) ([]b
 		return nil, fmt.Errorf("provider request exceeds %d bytes", maxRequestBytes)
 	}
 	return encoded, nil
+}
+
+// encodeTools converts internal tool declarations into the OpenAI-compatible
+// function-tool wire shape. It never mutates the invocation's declarations.
+func encodeTools(tools []ToolDefinition) []wireToolRequest {
+	if len(tools) == 0 {
+		return nil
+	}
+	converted := make([]wireToolRequest, 0, len(tools))
+	for _, tool := range tools {
+		// wireToolDefinition mirrors ToolDefinition field-for-field, so the
+		// conversion is a direct type conversion.
+		converted = append(converted, wireToolRequest{
+			Type:     "function",
+			Function: wireToolDefinition(tool),
+		})
+	}
+	return converted
 }
 
 type wireStreamOpts struct {

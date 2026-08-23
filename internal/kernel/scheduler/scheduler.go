@@ -217,6 +217,13 @@ type PoolSource interface {
 	ListRuntimePools(context.Context, string) ([]RuntimePool, error)
 }
 
+// StaticPoolSource is an in-memory pool list for tests and local development.
+// It is NOT a production capacity authority: it reports pools directly from a
+// fixed slice and never consults the durable capacity ledger, so wiring it into
+// a server bypasses the reservation invariant that keeps concurrent placement
+// from over-committing a pool. Production builds the pool source from the
+// durable registry (LeaseAwarePoolSource over the store); GuardProductionPoolSource
+// fails a non-dev server that is handed a StaticPoolSource.
 type StaticPoolSource []RuntimePool
 
 func (s StaticPoolSource) ListRuntimePools(_ context.Context, tenantID string) ([]RuntimePool, error) {
@@ -227,6 +234,29 @@ func (s StaticPoolSource) ListRuntimePools(_ context.Context, tenantID string) (
 		}
 	}
 	return pools, nil
+}
+
+// GuardProductionPoolSource rejects a StaticPoolSource on a production startup
+// path. The scheduler's authoritative capacity total lives in the durable
+// capacity ledger; a StaticPoolSource sidesteps it, so a non-dev server that is
+// (now or in future) handed one - directly or wrapped by a LeaseAwarePoolSource
+// - fails closed rather than silently scheduling against unenforced capacity.
+// devMode mirrors the -dev-mode acknowledgment that already gates seeding the
+// mutable registry from a flat file.
+func GuardProductionPoolSource(source PoolSource, devMode bool) error {
+	if devMode {
+		return nil
+	}
+	for {
+		switch typed := source.(type) {
+		case StaticPoolSource:
+			return fmt.Errorf("StaticPoolSource is dev/test only and bypasses the durable capacity ledger; build the pool source from the runtime registry or pass -dev-mode")
+		case *LeaseAwarePoolSource:
+			source = typed.static // unwrap and inspect the underlying source
+		default:
+			return nil
+		}
+	}
 }
 
 // LeaseAwarePoolSource overlays lease-derived runtime health onto a static
@@ -455,8 +485,7 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 			ClaimFencingToken: claim.FencingToken, ExpectedTaskVersion: claim.Task.ResourceVersion,
 			RunID: c.newID(), AttemptID: c.newID(), LeaseID: c.newID(), RuntimePoolID: pool.ID,
 			RuntimeClass: pool.RuntimeClass, RuntimeInstanceID: pool.RuntimeInstanceID, LeaseTTL: c.leaseTTL,
-			PoolCPUCapacity: pool.AvailableCPU, PoolMemoryCapacity: pool.AvailableMemory,
-			PoolLLMCapacity: pool.AvailableLLMSlots, RequestedCPU: spec.Placement.CPU,
+			RequestedCPU:    spec.Placement.CPU,
 			RequestedMemory: spec.Placement.Memory, RequestedLLMSlots: spec.Placement.LLMConcurrency,
 		})
 		if err == nil {

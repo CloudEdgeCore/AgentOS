@@ -302,6 +302,13 @@ type FinishInput struct {
 	ProviderRequestID string
 	FinishReason      string
 	UsageCertainty    store.ModelUsageCertainty
+	// ProviderName and WireModel are the physical deployment identity the
+	// logical modelRef actually resolved to (P2-10). They are recorded in the
+	// audit receipt so a call is reproducible against the exact provider route
+	// that served it, distinct from the tenant-visible logical reference.
+	// ProviderName is a name only — endpoints/credentials never enter a receipt.
+	ProviderName string
+	WireModel    string
 }
 
 // Finish finalizes the invocation: the final usage is settled idempotently,
@@ -389,14 +396,26 @@ func (g *Gateway) Finish(ctx context.Context, call store.ModelCall, in FinishInp
 		modelReservationKey(call.AttemptID, call.ModelRef, call.IdempotencyKey)); err != nil {
 		return store.ModelCall{}, fmt.Errorf("release model usage reservation: %w", err)
 	}
-	receipt, err := json.Marshal(map[string]any{
+	receiptFields := map[string]any{
 		"modelRef": updated.ModelRef, "status": updated.Status,
 		"inputTokens": updated.InputTokens, "outputTokens": updated.OutputTokens,
 		"costUsd": updated.CostMicroUSD.USD(), "costMicroUsd": updated.CostMicroUSD,
 		"priceRevision": updated.PriceRevision,
 		"finishReason":  updated.FinishReason, "providerRequestId": updated.ProviderRequestID,
 		"usageCertainty": updated.UsageCertainty,
-	})
+	}
+	// P2-10: pin the physical deployment identity the logical modelRef resolved
+	// to, plus a content-addressed route revision. A route repoint (same logical
+	// ref, different provider/wire model) changes the revision, so audit makes
+	// the reproducibility boundary explicit. Names only — never endpoints/keys.
+	if in.ProviderName != "" || in.WireModel != "" {
+		receiptFields["providerDeployment"] = map[string]any{
+			"provider": in.ProviderName, "wireModel": in.WireModel,
+		}
+		routeDigest := sha256.Sum256([]byte(updated.ModelRef + "|" + in.ProviderName + "|" + in.WireModel))
+		receiptFields["routeRevision"] = hex.EncodeToString(routeDigest[:])[:16]
+	}
+	receipt, err := json.Marshal(receiptFields)
 	if err != nil {
 		return store.ModelCall{}, err
 	}

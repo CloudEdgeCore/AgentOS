@@ -2,11 +2,27 @@
 // budget reservations. Estimates only guard the reservation envelope: the
 // provider-reported usage at Finish remains the authoritative settlement,
 // so every estimator errs on the high side.
+//
+// Envelope contract (P1-06). AgentOS reserves against a proven conservative
+// envelope, not an exact in-process tokenizer. The contract every estimator
+// upholds is a one-sided guarantee: for any input the reservation is at or
+// above the true token count a real tokenizer would report, never below it
+// (envelope_corpus_test.go pins this across Latin, CJK, JSON, tool-call,
+// reasoning, multilingual, and over-long inputs). An exact tokenizer
+// (tiktoken, Qwen, SentencePiece, HF) is a per-provider plug-in installed
+// via Register and selected by Executor.Tokenizer(); registering one may
+// only tighten the envelope from above, so the budget invariant holds before
+// and after. Until one is registered the heuristic and conservative
+// estimators are the envelope: provider configuration loading rejects an
+// unrecognized tokenizer name up front, and any runtime resolution failure
+// falls back to conservative.
 package tokens
 
 import (
 	"fmt"
 	"math"
+	"strings"
+	"sync"
 )
 
 // Estimator returns a conservative token estimate for one text chunk.
@@ -101,9 +117,12 @@ func runeLen(r rune) int {
 }
 
 // ForName resolves a configured tokenizer name to its estimator. The empty
-// name (an unconfigured descriptor) uses the script-aware heuristic; the
-// explicit "conservative" mode doubles the safety margin. An unrecognized
-// name fails safe to the conservative estimator rather than silently
+// name (an unconfigured descriptor) uses the script-aware heuristic and the
+// explicit "conservative" mode doubles the safety margin; a registered
+// plug-in tokenizer (Register) resolves by its declared name. An unresolved
+// name returns an error: provider configuration loading rejects it up front,
+// and a caller that reaches resolution anyway must fail safe to the
+// conservative estimator (as the kernel invoker does) rather than silently
 // under-reserving.
 func ForName(name string) (Estimator, error) {
 	switch name {
@@ -111,7 +130,43 @@ func ForName(name string) (Estimator, error) {
 		return Heuristic, nil
 	case "conservative":
 		return Conservative, nil
-	default:
-		return nil, fmt.Errorf("unknown tokenizer %q (supported: heuristic, conservative)", name)
 	}
+	registryMu.RLock()
+	estimator, ok := pluginTokenizers[name]
+	registryMu.RUnlock()
+	if ok {
+		return estimator, nil
+	}
+	return nil, fmt.Errorf("unknown tokenizer %q (supported: heuristic, conservative, registered plugins)", name)
+}
+
+var (
+	registryMu       sync.RWMutex
+	pluginTokenizers = map[string]Estimator{}
+)
+
+// Register installs a tokenizer implementation under a provider-configurable
+// name — the seam for exact per-provider tokenizers (tiktoken, Qwen,
+// SentencePiece, HF): a deployment imports its plugin package for side
+// effects before configurations load, and provider configs select it with
+// {"tokenizer": "<name>"}. A registered estimator must uphold the envelope
+// contract from the package documentation: it may only tighten the
+// reservation from above, never estimate below the true token count.
+// Built-in names are reserved and duplicate registrations are rejected so
+// one binary's link order can never silently swap an estimator.
+func Register(name string, estimator Estimator) error {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "heuristic" || name == "conservative" {
+		return fmt.Errorf("tokenizer name %q is reserved", name)
+	}
+	if estimator == nil {
+		return fmt.Errorf("tokenizer %q requires an estimator", name)
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if _, exists := pluginTokenizers[name]; exists {
+		return fmt.Errorf("tokenizer %q is already registered", name)
+	}
+	pluginTokenizers[name] = estimator
+	return nil
 }
