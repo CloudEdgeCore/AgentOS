@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -23,6 +24,16 @@ func TestAtomicCapacityReservationOneSlot(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)
 	ctx := context.Background()
+
+	// The capacity ledger is operator-owned: registering the pool seeds the
+	// authoritative total capacity row that every reservation serializes on.
+	if err := repository.RegisterRuntimePools(ctx, []scheduler.RuntimePool{{
+		ID: "one-slot", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci",
+		RuntimeInstanceID: "worker-one", Region: "cn-east", Ready: true, Status: "ACTIVE",
+		AvailableCPU: 100, AvailableMemory: 128, AvailableLLMSlots: 1,
+	}}); err != nil {
+		t.Fatalf("register one-slot pool: %v", err)
+	}
 
 	const schedulers = 100
 	claims := make([]kernelstore.TaskClaim, 0, schedulers)

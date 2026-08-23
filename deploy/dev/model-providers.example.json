@@ -7,7 +7,8 @@
       "timeoutMs": 120000,
       "maxAttempts": 3,
       "breakerOpens": 5,
-      "breakerCooldownMs": 30000
+      "breakerCooldownMs": 30000,
+      "tokenizer": "heuristic"
     },
     {
       "name": "qwen",
@@ -17,7 +18,8 @@
     {
       "name": "vllm",
       "baseUrl": "http://127.0.0.1:8000/v1",
-      "apiKeyEnv": "VLLM_API_KEY"
+      "apiKeyEnv": "VLLM_API_KEY",
+      "tokenizer": "conservative"
     }
   ],
   "routes": [

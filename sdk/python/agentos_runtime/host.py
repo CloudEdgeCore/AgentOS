@@ -3,6 +3,18 @@
 Framework adapters implement AgentRuntime; this module owns transport,
 idempotency, bounded events, cancellation, checkpoint/restore and results.
 No framework or model provider is imported by the protocol layer.
+
+Isolation boundary: RuntimeHost is a *protocol host*, not a security or
+isolation boundary. Agent code runs as Python threads inside this process,
+and Python threads cannot be forcibly killed — an agent that ignores
+``stop_event`` keeps its thread alive. The host therefore bounds what it
+can bound: the watchdog finalizes a timed-out execution terminally, blocks
+further event emission, releases its ledger capacity after the termination
+grace, and escalates to the deployment-provided ``force_terminate`` hook.
+A true hard kill must come from outside the process: run production agents
+in a killable sandbox (separate process supervised by the adapter, OCI
+container, gVisor sandbox, or microVM) and map ``force_terminate`` to the
+corresponding PID/cgroup/container kill.
 """
 
 from __future__ import annotations
@@ -58,7 +70,15 @@ class _Execution:
 
 
 class RuntimeHost:
-    """Thread-safe black-box host shared by Python and framework adapters."""
+    """Thread-safe black-box host shared by Python and framework adapters.
+
+    This host terminates executions at the *protocol* level only; it is not
+    a security or isolation boundary (see the module docstring). The
+    optional ``force_terminate`` hook receives the execution id once a
+    finalized execution is still occupying capacity after
+    ``termination_grace`` — deployments that manage agent subprocesses map
+    it to a real process/cgroup/container kill.
+    """
 
     def __init__(
         self,
@@ -157,6 +177,7 @@ class RuntimeHost:
             ":stop": "stop",
             ":checkpoint": "checkpoint",
             ":restore": "restore",
+            "/events/stream": "events_stream",
             "/events": "events",
             "/result": "result",
         }
@@ -285,18 +306,26 @@ class RuntimeHost:
         self._schedule_force_termination(execution_id)
 
     def _schedule_force_termination(self, execution_id: str) -> None:
-        if self.force_terminate is None:
-            return
-
         def terminate_if_stuck() -> None:
             with self.lock:
                 execution = self.executions.get(execution_id)
                 stuck = execution is not None and not execution.capacity_released
-            if stuck:
+            if not stuck:
+                return
+            if self.force_terminate is not None:
                 try:
                     self.force_terminate(execution_id)
                 except Exception:
+                    # The hook is best-effort; the capacity release below is
+                    # the hard guarantee.
                     pass
+            # A stuck agent thread cannot be killed from inside this
+            # process. Releasing the ledger capacity bounds the damage —
+            # the host keeps accepting work instead of leaking every
+            # concurrency slot to runaway agents. The thread itself stays
+            # alive until the surrounding sandbox is killed; that is the
+            # deployment's responsibility, not the protocol host's.
+            self._release_capacity(execution_id)
 
         timer = threading.Timer(self.termination_grace, terminate_if_stuck)
         timer.daemon = True
@@ -417,6 +446,64 @@ class RuntimeHost:
                 page_bytes += event_bytes
         next_after = events[-1]["sequence"] if events else after
         self._write(handler, 200, {"executionId": execution_id, "events": events, "nextAfter": next_after, "truncated": truncated})
+
+    def _events_stream(self, handler: BaseHTTPRequestHandler, execution_id: str, method: str, query: str) -> None:
+        """Server-sent-events extension of the Runtime Interface.
+
+        One long-lived connection replaces the Events/Result poll cycle:
+        events are pushed as SSE frames (``event: event``) and the terminal
+        frame (``event: result``) carries the final result. The ``after``
+        cursor makes reconnects lossless. A v1-only client keeps using the
+        frozen polling endpoints; both coexist forever.
+        """
+        if method != "GET":
+            self._problem(handler, 405, "METHOD_NOT_ALLOWED", "GET is required")
+            return
+        try:
+            after = int(parse_qs(query).get("after", ["0"])[0])
+            if after < 0:
+                raise ValueError
+        except ValueError:
+            self._problem(handler, 400, "INVALID_CURSOR", "after must be a non-negative integer")
+            return
+        with self.lock:
+            if execution_id not in self.executions:
+                self._problem(handler, 404, "EXECUTION_NOT_FOUND", "agent execution not found")
+                return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("AgentOS-Runtime-Interface", getattr(handler, "agentos_protocol", PROTOCOL_VERSION))
+        handler.end_headers()
+        NL = chr(10)
+        cursor = after
+        idle_since = time.monotonic()
+        while True:
+            with self.lock:
+                execution = self.executions.get(execution_id)
+                if execution is None:
+                    return
+                pending = [event for event in execution.events if event["sequence"] > cursor]
+                terminal = execution.status not in {"ACCEPTED", "RUNNING"}
+                result = execution.result
+            try:
+                for event in pending[:MAX_EVENTS_PER_PAGE]:
+                    frame = json.dumps(event, separators=(",", ":"))
+                    handler.wfile.write(("event: event" + NL + "data: " + frame + NL + NL).encode())
+                    cursor = event["sequence"]
+                    idle_since = time.monotonic()
+                if terminal and not pending:
+                    frame = json.dumps(result, separators=(",", ":"))
+                    handler.wfile.write(("event: result" + NL + "data: " + frame + NL + NL).encode())
+                    handler.wfile.flush()
+                    return
+                if time.monotonic() - idle_since >= 10.0:
+                    handler.wfile.write((": keepalive" + NL + NL).encode())
+                    idle_since = time.monotonic()
+                handler.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+            time.sleep(0.05)
 
     def _result(self, handler: BaseHTTPRequestHandler, execution_id: str, method: str, _query: str) -> None:
         if method != "GET":

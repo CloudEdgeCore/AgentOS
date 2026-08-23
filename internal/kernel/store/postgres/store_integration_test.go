@@ -296,11 +296,15 @@ func TestControllersClaimAdmitAndScheduleAtomically(t *testing.T) {
 		t.Fatalf("policy revision = %q, want %q", policyRevision, policy.Revision)
 	}
 
-	schedulerController := scheduler.NewController(repository, staticPools{{
-		ID: "pool-cn-1", RuntimeClass: "oci", RuntimeInstanceID: "worker-cn-1",
+	fixturePools := staticPools{{
+		ID: "pool-cn-1", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci", RuntimeInstanceID: "worker-cn-1",
 		Region: "cn-east", DataResidency: "cn", Ready: true, AvailableCPU: 2000,
 		AvailableMemory: 4096, AvailableLLMSlots: 4, ArtifactRegions: []string{"cn-east"},
-	}}, "scheduler-1", 10, time.Minute, 30*time.Second)
+	}}
+	if err := repository.RegisterRuntimePools(ctx, fixturePools); err != nil {
+		t.Fatalf("register fixture pools: %v", err)
+	}
+	schedulerController := scheduler.NewController(repository, fixturePools, "scheduler-1", 10, time.Minute, 30*time.Second)
 	processed, err = schedulerController.Reconcile(ctx)
 	if err != nil || processed != 1 {
 		t.Fatalf("scheduler reconcile processed=%d err=%v", processed, err)

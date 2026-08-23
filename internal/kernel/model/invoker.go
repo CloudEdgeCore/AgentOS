@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/tokens"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -95,12 +96,18 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 	if err != nil {
 		return InvokeOutput{}, fmt.Errorf("%w: %s", ErrNoProviderExecution, providerName)
 	}
+	estimator, estimatorErr := tokens.ForName(executor.Tokenizer())
+	if estimatorErr != nil {
+		// An unresolvable tokenizer name fails safe to the conservative
+		// estimator instead of blocking execution.
+		estimator = tokens.Conservative
+	}
 
 	begin, err := inv.gateway.Begin(ctx, BeginInput{
 		TenantID: in.TenantID, TaskID: in.TaskID, RunID: in.RunID, AttemptID: in.AttemptID,
 		FencingToken: in.FencingToken, AgentVersionRef: in.AgentVersionRef,
 		ModelRef: in.ModelRef, IdempotencyKey: in.IdempotencyKey,
-		EstimatedInputTokens: estimateInputTokens(in.Messages), MaxOutputTokens: int64(in.MaxOutputTokens),
+		EstimatedInputTokens: estimateInputTokens(in.Messages, estimator), MaxOutputTokens: int64(in.MaxOutputTokens),
 	})
 	if err != nil {
 		return InvokeOutput{}, err
@@ -109,25 +116,25 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 	call := begin.Call
 
 	// The hard-stop guard: stream deltas are settled as estimated increments
-	// so the ceiling trips without waiting for the final usage report.
+	// so the ceiling trips without waiting for the final usage report. The
+	// same provider tokenizer drives the estimate as the input reservation.
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 	sequence := int64(0)
-	pendingBytes := int64(0)
+	pendingTokens := int64(0)
 	settledEstimate := int64(0)
 	var exhausted error
 	guardedGenerated := func(delta string) {
 		if exhausted != nil {
 			return
 		}
-		pendingBytes += int64(len(delta))
-		estimatedTokens := pendingBytes / 4
-		increment := estimatedTokens - settledEstimate
+		pendingTokens += estimator(delta)
+		increment := pendingTokens - settledEstimate
 		if increment < midStreamSettleTokens {
 			return
 		}
 		sequence++
-		settledEstimate = estimatedTokens
+		settledEstimate = pendingTokens
 		if err := inv.gateway.Settle(streamCtx, call, sequence, Usage{OutputTokens: increment}); err != nil {
 			if errors.Is(err, ErrBudgetExhausted) {
 				exhausted = err
@@ -204,18 +211,19 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 	return output, nil
 }
 
-func estimateInputTokens(messages []provider.Message) int64 {
-	var bytes int64
+// estimateInputTokens estimates the reservation envelope for a prompt
+// using the provider's tokenizer-aware estimator. It never under-counts the
+// legacy bytes/4 floor and errs high: the provider's reported usage at
+// Finish settles the exact consumption.
+func estimateInputTokens(messages []provider.Message, estimator tokens.Estimator) int64 {
+	var estimated int64
 	for _, message := range messages {
-		bytes += int64(len(message.Role) + len(message.Content) + len(message.ToolCallID))
+		estimated += estimator(message.Role) + estimator(message.Content) + estimator(message.ToolCallID)
 		for _, call := range message.ToolCalls {
-			bytes += int64(len(call.ID) + len(call.Name) + len(call.Arguments))
+			estimated += estimator(call.ID) + estimator(call.Name) + estimator(call.Arguments)
 		}
 	}
-	if bytes == 0 {
-		return 0
-	}
-	return (bytes + 3) / 4
+	return estimated
 }
 
 // finishGuarded closes a stream that the budget guard cancelled: exact usage

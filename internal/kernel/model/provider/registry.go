@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/tokens"
 )
 
 // Registry resolves provider names (the first path segment of a model
@@ -45,6 +47,9 @@ func (r *Registry) Register(config Config) error {
 	}
 	if !strings.HasPrefix(config.BaseURL, "https://") && !strings.HasPrefix(config.BaseURL, "http://") {
 		return fmt.Errorf("provider %q: base URL must be absolute", config.Name)
+	}
+	if _, err := tokens.ForName(config.Tokenizer); err != nil {
+		return fmt.Errorf("provider %q: %w", config.Name, err)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

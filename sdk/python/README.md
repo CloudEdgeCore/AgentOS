@@ -81,6 +81,22 @@ execution and checkpoint timeouts, a 256 KiB event limit, a 1 MiB event-page
 limit, and a 2 MiB result limit. Exceptions returned over the protocol are
 redacted to stable public error messages.
 
+## Isolation boundary
+
+`RuntimeHost` is a **protocol host, not a security or isolation boundary**.
+Agent code runs as Python threads inside the adapter process, and Python
+threads cannot be forcibly killed. When an agent ignores `stop_event`, the
+host finalizes the execution terminally (`FAILED`/`EXECUTION_TIMEOUT`),
+blocks further event emission, releases the execution's ledger capacity
+after `termination_grace`, and calls the optional `force_terminate` hook.
+The stuck thread itself keeps running until its process dies.
+
+Production deployments must therefore run agents in a killable sandbox —
+a process supervised by the adapter, an OCI container, a gVisor sandbox, or
+a microVM — and map `force_terminate` to the corresponding PID, cgroup, or
+container kill. Without an external sandbox, a malicious agent can only be
+contained by terminating the whole adapter process.
+
 ## Verify an adapter
 
 After starting it locally:

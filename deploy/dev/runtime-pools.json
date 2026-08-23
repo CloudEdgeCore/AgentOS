@@ -1,7 +1,9 @@
 [
   {
     "id": "dev-oci-cn-east",
-    "tenantIds": ["dev"],
+    "tenantIds": [
+      "dev"
+    ],
     "runtimeClass": "oci",
     "runtimeInstanceId": "dev-worker-1",
     "region": "cn-east",
@@ -10,12 +12,19 @@
     "availableCpuMillis": 8000,
     "availableMemoryMiB": 16384,
     "availableLlmSlots": 16,
-    "artifactRegions": ["cn-east"],
-    "costWeight": 0.2
+    "artifactRegions": [
+      "cn-east"
+    ],
+    "costWeight": 0.2,
+    "operators": [
+      "dev"
+    ]
   },
   {
     "id": "dev-wasm-cn-east",
-    "tenantIds": ["dev"],
+    "tenantIds": [
+      "dev"
+    ],
     "runtimeClass": "wasm",
     "runtimeInstanceId": "dev-worker-2",
     "region": "cn-east",
@@ -24,7 +33,12 @@
     "availableCpuMillis": 4000,
     "availableMemoryMiB": 8192,
     "availableLlmSlots": 8,
-    "artifactRegions": ["cn-east"],
-    "costWeight": 0.1
+    "artifactRegions": [
+      "cn-east"
+    ],
+    "costWeight": 0.1,
+    "operators": [
+      "dev"
+    ]
   }
 ]

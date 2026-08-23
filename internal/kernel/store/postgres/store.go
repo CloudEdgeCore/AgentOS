@@ -88,6 +88,28 @@ func (s *Store) createTaskOnce(ctx context.Context, in kernelstore.CreateTaskInp
 	)
 	created, scanErr := scanTask(row)
 	if scanErr == nil {
+		// Workflow lineage: the fresh task consumes the task-count slot the
+		// step reserved at spawn/creation (the task-insert trigger already
+		// counted the task, so the slot moves atomically with it; token and
+		// cost reservations transfer later, when admission establishes the
+		// task's own budget ledger). Replays take the ON CONFLICT path and
+		// never consume a second slot.
+		if created.WorkflowStepID != nil {
+			command, err := tx.Exec(ctx, `UPDATE workflow_steps SET reserved_tasks = 0
+				WHERE tenant_id = $1 AND workflow_id = $2 AND id = $3 AND reserved_tasks > 0`,
+				created.TenantID, created.WorkflowID, created.WorkflowStepID)
+			if err != nil {
+				return result, classify(err)
+			}
+			if command.RowsAffected() == 1 {
+				if _, err := tx.Exec(ctx, `UPDATE workflow_usage_ledgers
+					SET step_reserved_tasks = GREATEST(0, step_reserved_tasks - 1), updated_at = $3
+					WHERE tenant_id = $1 AND workflow_id = $2`,
+					created.TenantID, created.WorkflowID, now); err != nil {
+					return result, classify(err)
+				}
+			}
+		}
 		if err := insertEvent(ctx, tx, created.TenantID, "Task", created.ID, created.ResourceVersion, "TaskQueued", map[string]any{
 			"taskId": created.ID, "namespace": created.Namespace,
 		}, now, s.newID()); err != nil {

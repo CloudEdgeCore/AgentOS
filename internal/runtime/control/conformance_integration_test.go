@@ -194,6 +194,9 @@ func (env *conformanceEnv) prepareScenario(t *testing.T, scenario scenario) {
 		Region: "cn-east", DataResidency: "cn", Ready: true,
 		AvailableCPU: 2000, AvailableMemory: 4096, AvailableLLMSlots: 4,
 	}}
+	if err := env.store.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register fixture pools: %v", err)
+	}
 	schedulerController := scheduler.NewController(env.store, pools, "scheduler-"+scenario.key, 10, time.Minute, 30*time.Second)
 	if count, err := schedulerController.Reconcile(ctx); err != nil || count != 1 {
 		t.Fatalf("scheduler reconcile count=%d err=%v", count, err)

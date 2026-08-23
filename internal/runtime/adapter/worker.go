@@ -8,9 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +67,13 @@ type Worker struct {
 	heartbeatTTL      time.Duration
 	pollInterval      time.Duration
 	window            ExecutionWindow
+	// bindings resolve logical manifest entrypoints (agentos-binding://…)
+	// to concrete deployment endpoints, keeping mutable endpoint state out
+	// of immutable AgentVersions. RunOnce is serial per worker, so the
+	// resolved client is swapped before each assignment.
+	bindings   *RuntimeBindings
+	httpClient *http.Client
+	clients    map[string]*agent.Client
 }
 
 // WithExecutionWindow attaches the sandbox brokered-access window (the
@@ -72,6 +81,15 @@ type Worker struct {
 // the AgentVersion capability grants for the duration of each assignment.
 func (w *Worker) WithExecutionWindow(window ExecutionWindow) *Worker {
 	w.window = window
+	return w
+}
+
+// WithRuntimeBindings attaches the deployment's runtime binding table. When
+// set, assignments whose manifest entrypoint is a logical binding reference
+// (or whose version ref has an explicit binding) resolve through it; the
+// worker's constructor endpoint remains the highest-priority override.
+func (w *Worker) WithRuntimeBindings(bindings *RuntimeBindings) *Worker {
+	w.bindings = bindings
 	return w
 }
 
@@ -88,15 +106,59 @@ func NewWorker(
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(runtimeInstanceID) == "" || heartbeatTTL <= 0 {
 		return nil, fmt.Errorf("tenant, runtime instance and positive heartbeat TTL are required")
 	}
-	client, err := agent.NewClient(endpoint, httpClient)
-	if err != nil {
-		return nil, err
+	// An empty endpoint is valid when runtime bindings resolve every
+	// assignment; resolveRuntime fails closed on unresolvable entrypoints.
+	var client *agent.Client
+	if strings.TrimSpace(endpoint) != "" {
+		var err error
+		client, err = agent.NewClient(endpoint, httpClient)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Worker{
 		control: control, artifacts: artifacts, runtime: client, endpoint: strings.TrimRight(endpoint, "/"),
 		tenantID: tenantID, runtimeInstanceID: runtimeInstanceID, heartbeatTTL: heartbeatTTL,
-		pollInterval: defaultPollInterval,
+		pollInterval: defaultPollInterval, httpClient: httpClient, clients: map[string]*agent.Client{},
 	}, nil
+}
+
+// resolveRuntime picks the Runtime Interface client for one assignment.
+// Priority: the worker's explicit constructor endpoint (the operator's
+// per-worker override), then a runtime binding for the agent version
+// (exact ref or name wildcard), then a concrete http(s) entrypoint embedded
+// in the manifest. A logical binding entrypoint with no covering binding
+// fails closed — an unresolved deployment reference must never silently
+// fall through to another agent's endpoint.
+func (w *Worker) resolveRuntime(agentVersionRef string, target agentversion.RuntimeTarget) (*agent.Client, error) {
+	if w.runtime != nil && w.endpoint != "" {
+		return w.runtime, nil
+	}
+	if endpoint, ok := w.bindings.Resolve(agentVersionRef); ok {
+		return w.clientFor(endpoint)
+	}
+	entrypoint := target.Entrypoint[0]
+	if IsLogicalEntrypoint(entrypoint) {
+		return nil, fmt.Errorf("agent version %s declares logical entrypoint %q but no runtime binding resolves it",
+			agentVersionRef, entrypoint)
+	}
+	if parsed, err := url.Parse(entrypoint); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
+		return w.clientFor(strings.TrimRight(entrypoint, "/"))
+	}
+	return nil, fmt.Errorf("agent version %s entrypoint %q is neither bindable nor an absolute http(s) URL",
+		agentVersionRef, entrypoint)
+}
+
+func (w *Worker) clientFor(endpoint string) (*agent.Client, error) {
+	if client, ok := w.clients[endpoint]; ok {
+		return client, nil
+	}
+	client, err := agent.NewClient(endpoint, w.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	w.clients[endpoint] = client
+	return client, nil
 }
 
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
@@ -122,6 +184,11 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return w.fail(ctx, assignment.GetIdentity(), assignment.GetAttemptVersion(), "adapter_manifest_invalid", err)
 	}
+	runtimeClient, err := w.resolveRuntime(assignment.GetAgentVersionRef(), target)
+	if err != nil {
+		return w.fail(ctx, assignment.GetIdentity(), assignment.GetAttemptVersion(), "adapter_endpoint_unresolved", err)
+	}
+	w.runtime = runtimeClient
 	identity := assignment.GetIdentity()
 	taskID, runID, attemptID, err := parseAssignmentIdentity(assignment)
 	if err != nil {
@@ -314,7 +381,73 @@ func parseAssignmentIdentity(assignment *runtimev1.Assignment) (uuid.UUID, uuid.
 	return parsed[0], parsed[1], parsed[2], nil
 }
 
+// wait observes one execution to its terminal state. Stream-capable
+// runtimes hold a single long-lived event-stream connection (one HTTP
+// request instead of a poll cycle, with the terminal frame carrying the
+// result); v1-only runtimes fall back to the frozen polling endpoints
+// mid-flight, resuming from the stream cursor without event loss.
 func (w *Worker) wait(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error) (agent.Result, []agent.Event, error) {
+	streamed := w.waitStreaming(ctx, executionID, checkpointInterval, checkpoint)
+	if !streamed.unsupported {
+		return streamed.result, streamed.events, streamed.err
+	}
+	return w.waitPolling(ctx, executionID, checkpointInterval, checkpoint, streamed.events, streamed.after)
+}
+
+type streamOutcome struct {
+	result      agent.Result
+	events      []agent.Event
+	after       int64
+	unsupported bool
+	err         error
+}
+
+func (w *Worker) waitStreaming(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error) streamOutcome {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	outcome := make(chan streamOutcome, 1)
+	go func() {
+		var events []agent.Event
+		var after int64
+		result, err := w.runtime.StreamEvents(streamCtx, executionID, 0, func(event agent.Event) error {
+			if len(events) >= maxCollectedEvents {
+				return fmt.Errorf("runtime event history exceeds %d events", maxCollectedEvents)
+			}
+			events = append(events, event)
+			after = event.Sequence
+			return nil
+		})
+		if errors.Is(err, agent.ErrStreamingUnsupported) {
+			outcome <- streamOutcome{events: events, after: after, unsupported: true}
+			return
+		}
+		outcome <- streamOutcome{result: result, events: events, err: err}
+	}()
+	var checkpointTicker *time.Ticker
+	var checkpointTick <-chan time.Time
+	if checkpointInterval > 0 {
+		checkpointTicker = time.NewTicker(checkpointInterval)
+		checkpointTick = checkpointTicker.C
+		defer checkpointTicker.Stop()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return streamOutcome{err: ctx.Err()}
+		case <-checkpointTick:
+			if checkpoint == nil {
+				return streamOutcome{err: fmt.Errorf("periodic checkpoint callback is not configured")}
+			}
+			if err := checkpoint(); err != nil {
+				return streamOutcome{err: fmt.Errorf("periodic checkpoint: %w", err)}
+			}
+		case done := <-outcome:
+			return done
+		}
+	}
+}
+
+func (w *Worker) waitPolling(ctx context.Context, executionID string, checkpointInterval time.Duration, checkpoint func() error, events []agent.Event, after int64) (agent.Result, []agent.Event, error) {
 	pollDelay := w.pollInterval
 	if pollDelay <= 0 {
 		pollDelay = defaultPollInterval
@@ -328,8 +461,6 @@ func (w *Worker) wait(ctx context.Context, executionID string, checkpointInterva
 		checkpointTick = checkpointTicker.C
 		defer checkpointTicker.Stop()
 	}
-	var events []agent.Event
-	var after int64
 	for {
 		select {
 		case <-ctx.Done():

@@ -24,6 +24,7 @@ const workflowStepColumns = `id, tenant_id, workflow_id, name, ordinal, status, 
 	result_summary, COALESCE(failure_code, ''), COALESCE(decided_by, ''), COALESCE(approval_decision, ''), decided_at,
 	COALESCE(parent_step_name, ''), spawn_depth, is_dynamic, COALESCE(spawn_key, ''),
 	COALESCE(goal, ''), COALESCE(agent_version_ref, ''), spec, COALESCE(max_attempts, 0),
+	reserved_tasks, reserved_tokens, reserved_cost_micro_usd,
 	resource_version, created_at, updated_at`
 
 func scanWorkflow(row pgx.Row) (kernelstore.Workflow, error) {
@@ -46,6 +47,7 @@ func scanWorkflowStep(row pgx.Row) (kernelstore.WorkflowStep, error) {
 		&step.AttemptCount, &step.TaskID, &summary, &step.FailureCode, &step.DecidedBy, &step.ApprovalDecision, &step.DecidedAt,
 		&step.ParentStepName, &step.SpawnDepth, &step.IsDynamic, &step.SpawnKey,
 		&step.Goal, &step.AgentVersionRef, &step.Spec, &step.MaxAttempts,
+		&step.ReservedTasks, &step.ReservedTokens, &step.ReservedCostMicroUSD,
 		&step.ResourceVersion, &step.CreatedAt, &step.UpdatedAt)
 	if summary != nil {
 		step.ResultSummary = summary
@@ -77,7 +79,7 @@ func (s *Store) CreateWorkflow(ctx context.Context, in kernelstore.CreateWorkflo
 			status, budget_max_tasks, budget_max_tokens, budget_max_cost_micro_usd,
 			deadline_at, step_count, resource_version, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, $10, $11, $12, 1, $13, $13)
-		ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET updated_at = workflows.updated_at
+		ON CONFLICT (tenant_id, namespace, idempotency_key) DO UPDATE SET updated_at = workflows.updated_at
 		RETURNING `+workflowColumns,
 		in.ID, in.TenantID, in.Namespace, in.IdempotencyKey, in.Goal, in.Spec, hash[:],
 		nullableInt64(in.BudgetMaxTasks), nullableInt64(in.BudgetMaxTokens), nullableInt64(int64(in.BudgetMaxCostMicroUSD)),
@@ -95,15 +97,41 @@ func (s *Store) CreateWorkflow(ctx context.Context, in kernelstore.CreateWorkflo
 		}
 		return kernelstore.CreateWorkflowResult{Workflow: created, Existing: true}, nil
 	}
+	// Declared steps hold their workflow budget reservation from creation:
+	// the workflow's promise is complete before any reconcile runs. A
+	// declaration that already exceeds a ceiling fails closed here as well
+	// (publication validation rejects it first for API callers).
+	var reservedTokens, reservedCost int64
+	for _, step := range in.Steps {
+		tokens, cost := kernelstore.TaskSpecBudgetReservation(step.Spec)
+		reservedTokens += tokens
+		reservedCost += int64(cost)
+	}
+	if in.BudgetMaxTasks > 0 && int64(len(in.Steps)) > in.BudgetMaxTasks {
+		return kernelstore.CreateWorkflowResult{}, fmt.Errorf("workflow declares %d steps over its budget of %d tasks",
+			len(in.Steps), in.BudgetMaxTasks)
+	}
+	if in.BudgetMaxTokens > 0 && reservedTokens > in.BudgetMaxTokens {
+		return kernelstore.CreateWorkflowResult{}, fmt.Errorf("declared step budgets reserve %d tokens over the workflow budget of %d",
+			reservedTokens, in.BudgetMaxTokens)
+	}
+	if in.BudgetMaxCostMicroUSD > 0 && reservedCost > int64(in.BudgetMaxCostMicroUSD) {
+		return kernelstore.CreateWorkflowResult{}, fmt.Errorf("declared step budgets reserve %d micro-USD over the workflow budget of %d",
+			reservedCost, int64(in.BudgetMaxCostMicroUSD))
+	}
 	for ordinal, step := range in.Steps {
+		stepTokens, stepCost := kernelstore.TaskSpecBudgetReservation(step.Spec)
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO workflow_steps (id, tenant_id, workflow_id, name, ordinal, status, attempt_count,
+				reserved_tasks, reserved_tokens, reserved_cost_micro_usd,
 				resource_version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 'PENDING', 0, 1, $6, $6)`,
-			uuid.New(), in.TenantID, in.ID, step.Name, ordinal, now); err != nil {
+			VALUES ($1, $2, $3, $4, $5, 'PENDING', 0, 1, $6, $7, 1, $8, $8)`,
+			uuid.New(), in.TenantID, in.ID, step.Name, ordinal, stepTokens, int64(stepCost), now); err != nil {
 			return kernelstore.CreateWorkflowResult{}, classify(err)
 		}
 	}
+	// The per-step reservations land on the usage ledger through the
+	// workflow_steps insert trigger in the same transaction.
 	if err := insertEvent(ctx, tx, in.TenantID, "Workflow", created.ID, created.ResourceVersion, "WorkflowCreated", map[string]any{
 		"workflowId": created.ID, "stepCount": len(in.Steps),
 	}, now, s.newID()); err != nil {
@@ -186,6 +214,7 @@ func (s *Store) ListWorkflowSteps(ctx context.Context, tenantID string, workflow
 			&step.Status, &step.AttemptCount, &step.TaskID, &summary, &step.FailureCode, &step.DecidedBy,
 			&step.ApprovalDecision, &step.DecidedAt, &step.ParentStepName, &step.SpawnDepth, &step.IsDynamic, &step.SpawnKey,
 			&step.Goal, &step.AgentVersionRef, &spec, &step.MaxAttempts,
+			&step.ReservedTasks, &step.ReservedTokens, &step.ReservedCostMicroUSD,
 			&step.ResourceVersion, &step.CreatedAt, &step.UpdatedAt); err != nil {
 			return nil, classify(err)
 		}
@@ -292,14 +321,73 @@ func (s *Store) TransitionWorkflowStep(ctx context.Context, in kernelstore.Trans
 	} else if in.To == kernelstore.StepSucceeded || in.To == kernelstore.StepRunning {
 		failureCode = ""
 	}
+	// Reservation accounting. Terminal transitions release whatever the
+	// step still holds (skips and cancellations of undispatched steps; a
+	// dispatched step's reservation already transferred to its task). The
+	// RUNNING→PENDING retry re-reserves the next attempt's ceiling under
+	// the budget guard, exactly like a fresh spawn.
+	reserveTasks, reserveTokens, reserveCost := current.ReservedTasks, current.ReservedTokens, current.ReservedCostMicroUSD
+	if in.To.Terminal() {
+		reserveTasks, reserveTokens, reserveCost = 0, 0, 0
+	} else if current.Status == kernelstore.StepRunning && in.To == kernelstore.StepPending {
+		reserveTasks, reserveTokens, reserveCost = 1, 0, 0
+		reserveTokens, reserveCost = kernelstore.TaskSpecBudgetReservation(current.Spec)
+		var budgets struct {
+			Tasks  *int64
+			Tokens *int64
+			Cost   *int64
+		}
+		if err := tx.QueryRow(ctx,
+			`SELECT budget_max_tasks, budget_max_tokens, budget_max_cost_micro_usd
+			 FROM workflows WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+			in.TenantID, in.WorkflowID).Scan(&budgets.Tasks, &budgets.Tokens, &budgets.Cost); err != nil {
+			return kernelstore.WorkflowStep{}, classify(err)
+		}
+		usage, err := s.workflowTaskUsage(ctx, tx, in.TenantID, in.WorkflowID)
+		if err != nil {
+			return kernelstore.WorkflowStep{}, err
+		}
+		if budgets.Tasks != nil && *budgets.Tasks > 0 && usage.CommittedTasks() >= *budgets.Tasks {
+			return kernelstore.WorkflowStep{}, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
+				Message: fmt.Sprintf("retry denied: workflow budget exhausted: %d/%d tasks", usage.CommittedTasks(), *budgets.Tasks)}
+		}
+		if budgets.Tokens != nil && *budgets.Tokens > 0 && usage.CommittedTokens()+reserveTokens > *budgets.Tokens {
+			return kernelstore.WorkflowStep{}, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
+				Message: fmt.Sprintf("retry denied: workflow budget exhausted: %d/%d tokens", usage.CommittedTokens()+reserveTokens, *budgets.Tokens)}
+		}
+		if budgets.Cost != nil && *budgets.Cost > 0 && usage.CommittedCostMicroUSD()+reserveCost > kernelmoney.MicroUSD(*budgets.Cost) {
+			return kernelstore.WorkflowStep{}, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
+				Message: fmt.Sprintf("retry denied: workflow budget exhausted: $%.6f/$%.6f",
+					usage.CommittedCostMicroUSD().USD()+reserveCost.USD(), kernelmoney.MicroUSD(*budgets.Cost).USD())}
+		}
+	}
 	now := s.now()
 	updated, err := scanWorkflowStep(tx.QueryRow(ctx, `
 		UPDATE workflow_steps SET status = $4, task_id = $5, attempt_count = $6, result_summary = $7,
-			failure_code = NULLIF($8, ''), resource_version = resource_version + 1, updated_at = $9
+			failure_code = NULLIF($8, ''),
+			reserved_tasks = $10, reserved_tokens = $11, reserved_cost_micro_usd = $12,
+			resource_version = resource_version + 1, updated_at = $9
 		WHERE id = $1 AND resource_version = $2 AND tenant_id = $3 RETURNING `+workflowStepColumns,
-		current.ID, in.ExpectedVersion, in.TenantID, in.To, taskID, attemptCount, summary, failureCode, now))
+		current.ID, in.ExpectedVersion, in.TenantID, in.To, taskID, attemptCount, summary, failureCode, now,
+		reserveTasks, reserveTokens, int64(reserveCost)))
 	if err != nil {
 		return kernelstore.WorkflowStep{}, classify(err)
+	}
+	if deltaTasks, deltaTokens, deltaCost := reserveTasks-current.ReservedTasks,
+		reserveTokens-current.ReservedTokens, int64(reserveCost)-int64(current.ReservedCostMicroUSD); deltaTasks != 0 || deltaTokens != 0 || deltaCost != 0 {
+		command, err := tx.Exec(ctx, `UPDATE workflow_usage_ledgers SET
+			step_reserved_tasks = GREATEST(0, step_reserved_tasks + $3),
+			step_reserved_tokens = GREATEST(0, step_reserved_tokens + $4),
+			step_reserved_cost_micro_usd = GREATEST(0, step_reserved_cost_micro_usd + $5),
+			updated_at = $6
+			WHERE tenant_id = $1 AND workflow_id = $2`,
+			in.TenantID, in.WorkflowID, deltaTasks, deltaTokens, deltaCost, now)
+		if err != nil {
+			return kernelstore.WorkflowStep{}, classify(err)
+		}
+		if command.RowsAffected() != 1 {
+			return kernelstore.WorkflowStep{}, fmt.Errorf("workflow usage ledger is missing for workflow %s", in.WorkflowID)
+		}
 	}
 	if err := insertEvent(ctx, tx, in.TenantID, "WorkflowStep", current.ID, updated.ResourceVersion,
 		"WorkflowStep"+title(string(in.To)), map[string]any{"workflowId": in.WorkflowID, "step": in.StepName, "status": in.To, "failureCode": failureCode}, now, s.newID()); err != nil {
@@ -540,12 +628,15 @@ func (s *Store) RenewWorkflowClaim(ctx context.Context, tenantID string, workflo
 }
 
 // workflowTaskUsage aggregates the tasks carrying one workflow's idempotency
-// prefix: their count, settled usage, and any unsettled overage.
+// prefix: their count, settled usage, any unsettled overage, and the
+// outstanding step reservations that represent the workflow's future
+// commitment.
 func (s *Store) workflowTaskUsage(ctx context.Context, tx pgx.Tx, tenantID string, workflowID uuid.UUID) (kernelstore.WorkflowUsage, error) {
 	var usage kernelstore.WorkflowUsage
 	err := tx.QueryRow(ctx, workflowUsageQuery,
 		tenantID, workflowID).Scan(
-		&usage.Tasks, &usage.Tokens, &usage.CostMicroUSD, &usage.ReservedTokens, &usage.ReservedCostMicroUSD, &usage.PendingOverage)
+		&usage.Tasks, &usage.Tokens, &usage.CostMicroUSD, &usage.ReservedTokens, &usage.ReservedCostMicroUSD,
+		&usage.StepReservedTasks, &usage.StepReservedTokens, &usage.StepReservedCostMicroUSD, &usage.PendingOverage)
 	if err != nil {
 		return usage, classify(err)
 	}
@@ -558,7 +649,8 @@ func (s *Store) WorkflowUsageSnapshot(ctx context.Context, tenantID string, work
 	var usage kernelstore.WorkflowUsage
 	err := s.pool.QueryRow(ctx, workflowUsageQuery,
 		tenantID, workflowID).Scan(
-		&usage.Tasks, &usage.Tokens, &usage.CostMicroUSD, &usage.ReservedTokens, &usage.ReservedCostMicroUSD, &usage.PendingOverage)
+		&usage.Tasks, &usage.Tokens, &usage.CostMicroUSD, &usage.ReservedTokens, &usage.ReservedCostMicroUSD,
+		&usage.StepReservedTasks, &usage.StepReservedTokens, &usage.StepReservedCostMicroUSD, &usage.PendingOverage)
 	if err != nil {
 		return usage, classify(err)
 	}
@@ -585,7 +677,8 @@ func (s *Store) WorkflowUsageSnapshot(ctx context.Context, tenantID string, work
 }
 
 const workflowUsageQuery = `
-	SELECT task_count,settled_tokens,settled_cost_micro_usd,reserved_tokens,reserved_cost_micro_usd,pending_tasks>0
+	SELECT task_count,settled_tokens,settled_cost_micro_usd,reserved_tokens,reserved_cost_micro_usd,
+		step_reserved_tasks,step_reserved_tokens,step_reserved_cost_micro_usd,pending_tasks>0
 	FROM workflow_usage_ledgers WHERE tenant_id=$1 AND workflow_id=$2`
 
 // SpawnWorkflowStep creates one dynamic step with every recursion, fan-out
@@ -705,7 +798,12 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 			Message: fmt.Sprintf("workflow already has %d dynamic steps (maxDynamicSteps %d)", dynamicCount, in.Guards.MaxDynamicSteps)}
 	}
 
-	// Budget guards: tasks/tokens/cost ceilings across the whole run.
+	// Budget guards: tasks/tokens/cost ceilings across the whole run,
+	// measured against the workflow's total commitment — created tasks,
+	// their settled and reserved usage, and the reservations still held by
+	// undispatched steps. Because the reservation for this spawn is added
+	// in the same transaction, concurrent spawns serialize on the workflow
+	// row and can never collectively promise past a ceiling.
 	usage, err := s.workflowTaskUsage(ctx, tx, in.TenantID, in.WorkflowID)
 	if err != nil {
 		return result, err
@@ -713,32 +811,35 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 	usage.BudgetMaxTasks, usage.BudgetMaxTokens, usage.BudgetMaxCostMicroUSD =
 		workflow.BudgetMaxTasks, workflow.BudgetMaxTokens, workflow.BudgetMaxCostMicroUSD
 	result.Usage = usage
-	if workflow.BudgetMaxTasks > 0 && usage.Tasks >= workflow.BudgetMaxTasks {
+	reserveTokens, reserveCost := kernelstore.TaskSpecBudgetReservation(in.Spec)
+	if workflow.BudgetMaxTasks > 0 && usage.CommittedTasks() >= workflow.BudgetMaxTasks {
 		result.WorkflowExhausted = true
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
-			Message: fmt.Sprintf("workflow budget exhausted: %d/%d tasks", usage.Tasks, workflow.BudgetMaxTasks)}
+			Message: fmt.Sprintf("workflow budget exhausted: %d/%d tasks", usage.CommittedTasks(), workflow.BudgetMaxTasks)}
 	}
-	if workflow.BudgetMaxTokens > 0 && usage.Tokens+usage.ReservedTokens >= workflow.BudgetMaxTokens {
+	if workflow.BudgetMaxTokens > 0 && usage.CommittedTokens()+reserveTokens > workflow.BudgetMaxTokens {
 		result.WorkflowExhausted = true
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
-			Message: fmt.Sprintf("workflow budget exhausted: %d/%d tokens", usage.Tokens, workflow.BudgetMaxTokens)}
+			Message: fmt.Sprintf("workflow budget exhausted: %d/%d tokens", usage.CommittedTokens()+reserveTokens, workflow.BudgetMaxTokens)}
 	}
-	if workflow.BudgetMaxCostMicroUSD > 0 && usage.CostMicroUSD+usage.ReservedCostMicroUSD >= workflow.BudgetMaxCostMicroUSD {
+	if workflow.BudgetMaxCostMicroUSD > 0 && usage.CommittedCostMicroUSD()+reserveCost > workflow.BudgetMaxCostMicroUSD {
 		result.WorkflowExhausted = true
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted,
-			Message: fmt.Sprintf("workflow budget exhausted: $%.6f/$%.6f", usage.CostMicroUSD.USD(), workflow.BudgetMaxCostMicroUSD.USD())}
+			Message: fmt.Sprintf("workflow budget exhausted: $%.6f/$%.6f",
+				usage.CommittedCostMicroUSD().USD()+reserveCost.USD(), workflow.BudgetMaxCostMicroUSD.USD())}
 	}
-	if in.Guards.MaxSpawnTasks > 0 && usage.Tasks >= in.Guards.MaxSpawnTasks {
+	if in.Guards.MaxSpawnTasks > 0 && usage.CommittedTasks() >= in.Guards.MaxSpawnTasks {
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnTaskLimitExceeded,
-			Message: fmt.Sprintf("spawned task limit reached: %d/%d", usage.Tasks, in.Guards.MaxSpawnTasks)}
+			Message: fmt.Sprintf("spawned task limit reached: %d/%d", usage.CommittedTasks(), in.Guards.MaxSpawnTasks)}
 	}
-	if in.Guards.MaxSpawnTokens > 0 && usage.Tokens+usage.ReservedTokens >= in.Guards.MaxSpawnTokens {
+	if in.Guards.MaxSpawnTokens > 0 && usage.CommittedTokens()+reserveTokens > in.Guards.MaxSpawnTokens {
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnTokenLimitExceeded,
-			Message: fmt.Sprintf("spawned token limit reached: %d/%d", usage.Tokens, in.Guards.MaxSpawnTokens)}
+			Message: fmt.Sprintf("spawned token limit reached: %d/%d", usage.CommittedTokens()+reserveTokens, in.Guards.MaxSpawnTokens)}
 	}
-	if in.Guards.MaxSpawnCostMicroUSD > 0 && usage.CostMicroUSD+usage.ReservedCostMicroUSD >= in.Guards.MaxSpawnCostMicroUSD {
+	if in.Guards.MaxSpawnCostMicroUSD > 0 && usage.CommittedCostMicroUSD()+reserveCost > in.Guards.MaxSpawnCostMicroUSD {
 		return result, kernelstore.SpawnDenial{Code: errorcode.SpawnCostLimitExceeded,
-			Message: fmt.Sprintf("spawned cost limit reached: $%.6f/$%.6f", usage.CostMicroUSD.USD(), in.Guards.MaxSpawnCostMicroUSD.USD())}
+			Message: fmt.Sprintf("spawned cost limit reached: $%.6f/$%.6f",
+				usage.CommittedCostMicroUSD().USD()+reserveCost.USD(), in.Guards.MaxSpawnCostMicroUSD.USD())}
 	}
 
 	// Per-parent fan-out cap.
@@ -754,12 +855,13 @@ func (s *Store) SpawnWorkflowStep(ctx context.Context, in kernelstore.SpawnWorkf
 	created, err := scanWorkflowStep(tx.QueryRow(ctx, `
 		INSERT INTO workflow_steps (id, tenant_id, workflow_id, name, ordinal, status, attempt_count,
 			parent_step_name, spawn_depth, is_dynamic, spawn_key, goal, agent_version_ref, spec, max_attempts,
+			reserved_tasks, reserved_tokens, reserved_cost_micro_usd,
 			resource_version, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'PENDING', 0, $6, $7, true, $8, $9, $10, $11, $12, 1, $13, $13)
+		VALUES ($1, $2, $3, $4, $5, 'PENDING', 0, $6, $7, true, $8, $9, $10, $11, $12, 1, $13, $14, 1, $15, $15)
 		RETURNING `+workflowStepColumns,
 		uuid.New(), in.TenantID, in.WorkflowID, in.Name, ordinal,
 		nullableString(in.ParentStepName), depth, spawnKey, in.Goal, in.AgentVersionRef, in.Spec,
-		nullableInt(int(in.MaxAttempts)), s.now()))
+		nullableInt(int(in.MaxAttempts)), reserveTokens, int64(reserveCost), s.now()))
 	if err != nil {
 		return result, classify(err)
 	}

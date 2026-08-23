@@ -145,6 +145,11 @@ type Config struct {
 	HealthPath          string            `json:"healthPath"`
 	HealthMethod        string            `json:"healthMethod"`
 	Capabilities        CapabilityProfile `json:"capabilities,omitempty"`
+	// Tokenizer names the token estimator used for this provider's budget
+	// reservations: "heuristic" (default, script-aware) or "conservative"
+	// (uncharacterized tokenizers). Provider-reported usage remains the
+	// authoritative settlement.
+	Tokenizer string `json:"tokenizer,omitempty"`
 }
 
 // CapabilityProfile makes OpenAI-compatible dialect differences explicit.
@@ -245,6 +250,10 @@ func NewExecutor(config Config, client *http.Client) *Executor {
 
 // Name returns the provider name model references resolve against.
 func (e *Executor) Name() string { return e.config.Name }
+
+// Tokenizer returns the configured token-estimator name for budget
+// reservations on this provider.
+func (e *Executor) Tokenizer() string { return e.config.Tokenizer }
 
 // Health probes the endpoint with a short-lived /models request. It is the
 // half-open probe of the circuit breaker as well as the readiness signal.

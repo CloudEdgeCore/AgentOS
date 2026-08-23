@@ -668,6 +668,11 @@ func reconcile(ctx context.Context, t *testing.T, env *e2eEnv, pools staticPools
 	})
 	admissionController := admission.NewController(env.store, engine, env.policyEngine, "e2e-admission", 100, time.Minute)
 	schedulerController := scheduler.NewController(env.store, pools, "e2e-scheduler", 100, time.Minute, 2*time.Minute)
+	// Scheduling fails closed without an operator-registered capacity
+	// ledger; registering the fixture pools is an idempotent upsert.
+	if err := env.store.RegisterRuntimePools(ctx, pools); err != nil {
+		t.Fatalf("register fixture pools: %v", err)
+	}
 	if _, err := admissionController.Reconcile(ctx); err != nil {
 		t.Fatalf("admission reconcile: %v", err)
 	}
@@ -693,6 +698,7 @@ func reconcileQuiet(ctx context.Context, env *e2eEnv, pools staticPools) {
 	})
 	admissionController := admission.NewController(env.store, engine, env.policyEngine, "e2e-admission", 100, time.Minute)
 	schedulerController := scheduler.NewController(env.store, pools, "e2e-scheduler", 100, time.Minute, 2*time.Minute)
+	_ = env.store.RegisterRuntimePools(ctx, pools)
 	_, _ = admissionController.Reconcile(ctx)
 	_, _ = schedulerController.Reconcile(ctx)
 	_, _ = env.recovery.Reconcile(ctx)

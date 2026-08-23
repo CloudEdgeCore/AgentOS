@@ -14,6 +14,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/errorcode"
 	"github.com/google/uuid"
 )
 
@@ -163,6 +164,10 @@ type fakeWorkflowStore struct {
 	workflows map[uuid.UUID]*kernelstore.Workflow
 	steps     map[uuid.UUID]map[string]*kernelstore.WorkflowStep
 	artifacts map[string]kernelstore.ArtifactReference
+	// retryDenial, when set, is returned by the RUNNING→PENDING retry
+	// transition (the real store denies it when re-reserving the next
+	// attempt would exceed the workflow budget).
+	retryDenial error
 }
 
 func newFakeWorkflowStore() *fakeWorkflowStore {
@@ -177,7 +182,7 @@ func (f *fakeWorkflowStore) CreateWorkflow(_ context.Context, in kernelstore.Cre
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, existing := range f.workflows {
-		if existing.TenantID == in.TenantID && existing.IdempotencyKey == in.IdempotencyKey {
+		if existing.TenantID == in.TenantID && existing.Namespace == in.Namespace && existing.IdempotencyKey == in.IdempotencyKey {
 			return kernelstore.CreateWorkflowResult{Workflow: *existing, Existing: true}, nil
 		}
 	}
@@ -276,6 +281,9 @@ func (f *fakeWorkflowStore) TransitionWorkflowStep(_ context.Context, in kernels
 	}
 	if !kernelstore.CanTransitionStep(step.Status, in.To) {
 		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: %s -> %s", kernelstore.ErrInvalidTransition, step.Status, in.To)
+	}
+	if f.retryDenial != nil && step.Status == kernelstore.StepRunning && in.To == kernelstore.StepPending {
+		return kernelstore.WorkflowStep{}, f.retryDenial
 	}
 	step.Status = in.To
 	if in.TaskID != nil {
@@ -1062,5 +1070,47 @@ func TestEngineHardStopsExpiredWorkflow(t *testing.T) {
 	}
 	if len(tasks.tasks) != 0 {
 		t.Fatalf("expired workflow dispatched %d tasks", len(tasks.tasks))
+	}
+}
+
+// TestEngineBudgetDeniedRetryFailsTheStep proves a retry whose reservation
+// would exceed the workflow budget fails the step with the durable budget
+// code instead of retry-looping against a hard ceiling.
+func TestEngineBudgetDeniedRetryFailsTheStep(t *testing.T) {
+	spec := `{
+	  "budget":{"maxTasks":10},
+	  "defaultTaskSpec": {"budget":{"tokens":100}},
+	  "steps": [
+	    {"name":"flaky","agentVersionRef":"x@1","goal":"flaky step","retry":{"maxAttempts":3}}
+	  ]
+	}`
+	store := newFakeWorkflowStore()
+	store.retryDenial = kernelstore.SpawnDenial{Code: errorcode.SpawnBudgetExhausted, Message: "retry denied: workflow budget exhausted"}
+	tasks := newFakeTaskPipeline()
+	engine := newEngine(store, tasks)
+	workflow := createWorkflowForTest(t, store, spec)
+
+	reconcileUntil(t, engine, func() bool {
+		steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+		return steps[0].Status == kernelstore.StepRunning
+	}, 5*time.Second)
+	steps, _ := store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	flakyTask := *steps[0].TaskID
+	tasks.fail(flakyTask)
+
+	reconcileUntil(t, engine, func() bool {
+		current, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+		return current.Status.Terminal()
+	}, 5*time.Second)
+	final, _ := store.GetWorkflow(context.Background(), "tenant-1", workflow.ID)
+	if final.Status != kernelstore.WorkflowFailed || final.FailureCode != errorcode.WorkflowBudgetExhausted {
+		t.Fatalf("budget-denied retry outcome = %s/%s, want FAILED/WORKFLOW_BUDGET_EXHAUSTED", final.Status, final.FailureCode)
+	}
+	steps, _ = store.ListWorkflowSteps(context.Background(), "tenant-1", workflow.ID)
+	if steps[0].Status != kernelstore.StepFailed || steps[0].FailureCode != errorcode.WorkflowBudgetExhausted {
+		t.Fatalf("budget-denied step = %s/%s, want FAILED/WORKFLOW_BUDGET_EXHAUSTED", steps[0].Status, steps[0].FailureCode)
+	}
+	if steps[0].AttemptCount != 1 {
+		t.Fatalf("budget-denied retry must not dispatch another task, attempts = %d", steps[0].AttemptCount)
 	}
 }

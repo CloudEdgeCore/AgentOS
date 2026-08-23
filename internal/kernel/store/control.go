@@ -14,6 +14,12 @@ import (
 
 var ErrCapacityExhausted = errors.New("runtime pool capacity exhausted")
 
+// ErrPoolCapacityNotInitialized is returned when placement targets a pool
+// whose durable capacity ledger row has not been registered by the runtime
+// pool registry. Scheduling fails closed instead of bootstrapping totals
+// from a caller snapshot.
+var ErrPoolCapacityNotInitialized = errors.New("runtime pool capacity ledger is not initialized")
+
 type ControllerKind string
 
 const (

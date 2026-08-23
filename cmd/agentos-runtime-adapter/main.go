@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -30,7 +31,8 @@ import (
 
 func main() {
 	controlAddress := flag.String("control-address", "127.0.0.1:9090", "Runtime Protocol control endpoint")
-	endpoint := flag.String("adapter-endpoint", "", "loopback Agent Runtime Interface endpoint")
+	endpoint := flag.String("adapter-endpoint", "", "explicit loopback Agent Runtime Interface endpoint (overrides runtime bindings and manifest entrypoints)")
+	runtimeBindings := flag.String("runtime-bindings", "", "JSON runtime binding file mapping agent version refs to Runtime Interface endpoints (empty disables)")
 	tenantID := flag.String("tenant", "", "tenant assigned to this worker")
 	runtimeInstanceID := flag.String("runtime-instance-id", "", "assigned runtime instance ID")
 	artifactRoot := flag.String("artifact-root", "", "content-addressed artifact directory")
@@ -44,20 +46,38 @@ func main() {
 	devMode := flag.Bool("dev-mode", false, "allow plaintext Runtime Protocol for local development")
 	spawnAddress := flag.String("spawn-address", "", "orchestrator WorkflowSpawnService address (dynamic step spawn; empty disables)")
 	flag.Parse()
-	if strings.TrimSpace(*endpoint) == "" || strings.TrimSpace(*tenantID) == "" ||
-		strings.TrimSpace(*runtimeInstanceID) == "" || strings.TrimSpace(*artifactRoot) == "" ||
+	if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*runtimeInstanceID) == "" ||
+		strings.TrimSpace(*artifactRoot) == "" ||
 		*pollInterval <= 0 || *heartbeatTTL <= 0 {
-		slog.Error("adapter endpoint, tenant, runtime instance, artifact root and positive intervals are required")
+		slog.Error("adapter tenant, runtime instance, artifact root and positive intervals are required")
 		os.Exit(2)
 	}
-	parsed, err := url.Parse(*endpoint)
-	if err != nil || parsed.Scheme != "http" || parsed.Hostname() == "" {
-		slog.Error("adapter endpoint must be an absolute HTTP loopback URL")
+	// The explicit endpoint is optional when runtime bindings resolve every
+	// assignment: deployments that bind agent version refs to endpoints no
+	// longer pin a default endpoint to this worker.
+	if strings.TrimSpace(*endpoint) == "" && strings.TrimSpace(*runtimeBindings) == "" {
+		slog.Error("either -adapter-endpoint or -runtime-bindings is required")
 		os.Exit(2)
 	}
-	ip := net.ParseIP(parsed.Hostname())
-	if parsed.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		slog.Error("v1 adapter endpoint must be co-located on loopback", "endpoint", *endpoint)
+	if strings.TrimSpace(*endpoint) != "" {
+		parsed, err := url.Parse(*endpoint)
+		if err != nil || parsed.Scheme != "http" || parsed.Hostname() == "" {
+			slog.Error("adapter endpoint must be an absolute HTTP loopback URL")
+			os.Exit(2)
+		}
+		ip := net.ParseIP(parsed.Hostname())
+		if parsed.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			slog.Error("v1 adapter endpoint must be co-located on loopback", "endpoint", *endpoint)
+			os.Exit(2)
+		}
+	}
+	if err := validateSandboxMCPListen(*mcpListen); err != nil {
+		slog.Error("invalid -mcp-listen", "error", err)
+		os.Exit(2)
+	}
+	bindings, err := runtimeadapter.LoadRuntimeBindings(*runtimeBindings)
+	if err != nil {
+		slog.Error("load runtime bindings", "error", err)
 		os.Exit(2)
 	}
 	tlsConfigured := *tlsCert != "" || *tlsKey != "" || *trustBundle != ""
@@ -71,7 +91,7 @@ func main() {
 			slog.Error("mTLS identity is required unless -dev-mode is explicit")
 			os.Exit(2)
 		}
-		for name, address := range map[string]string{"control": *controlAddress, "gateway": *gatewayAddress, "spawn": *spawnAddress, "mcp": *mcpListen} {
+		for name, address := range map[string]string{"control": *controlAddress, "gateway": *gatewayAddress, "spawn": *spawnAddress} {
 			if strings.TrimSpace(address) != "" && !loopbackRPCAddress(address) {
 				slog.Error("plaintext development endpoint must be loopback-only", "endpoint", name, "address", address)
 				os.Exit(2)
@@ -108,6 +128,10 @@ func main() {
 	if err != nil {
 		slog.Error("create adapter worker", "error", err)
 		os.Exit(1)
+	}
+	if bindings != nil {
+		worker.WithRuntimeBindings(bindings)
+		slog.Info("runtime bindings loaded", "file", *runtimeBindings)
 	}
 	if strings.TrimSpace(*mcpListen) != "" {
 		if strings.TrimSpace(*gatewayAddress) == "" {
@@ -203,4 +227,20 @@ func loopbackRPCAddress(address string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// validateSandboxMCPListen enforces the loopback-only boundary for the
+// sandbox Agent MCP listener. The endpoint brokers model, tool, memory and
+// spawn access for sandboxed agents, so until MCP gains its own
+// SPIFFE/mTLS identity it must never bind a non-loopback address —
+// regardless of dev or production mode and regardless of the configured
+// control-plane mTLS.
+func validateSandboxMCPListen(listen string) error {
+	if strings.TrimSpace(listen) == "" {
+		return nil
+	}
+	if !loopbackRPCAddress(listen) {
+		return fmt.Errorf("sandbox MCP listener must be loopback-only (127.0.0.1, ::1 or localhost), got %q", listen)
+	}
+	return nil
 }

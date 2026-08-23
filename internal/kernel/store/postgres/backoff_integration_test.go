@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -54,6 +55,13 @@ func TestNoPlacementDeferralGatesClaimsAndResetsOnSchedule(t *testing.T) {
 	clock := newFakeClock()
 	pool, repository := prepare(t, clock.Now)
 	ctx := context.Background()
+	if err := repository.RegisterRuntimePools(ctx, []scheduler.RuntimePool{{
+		ID: "pool-1", TenantIDs: []string{"tenant-a"}, RuntimeClass: "oci",
+		RuntimeInstanceID: "worker-1", Region: "cn-east", Ready: true, Status: "ACTIVE",
+		AvailableCPU: 1000, AvailableMemory: 1024, AvailableLLMSlots: 1,
+	}}); err != nil {
+		t.Fatalf("register pool: %v", err)
+	}
 	task := createAdmittedTask(t, ctx, repository, "backoff-loop")
 
 	claim, err := claimScheduling(t, ctx, repository, "scheduler-1")

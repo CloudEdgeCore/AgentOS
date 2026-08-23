@@ -34,7 +34,7 @@ A typical task moves through the following lifecycle:
 1. A developer submits a stable Agent Manifest and, optionally, a signed Agent Package.
 2. The Control API creates an immutable `AgentVersion` and a durable `Task`.
 3. Admission validates the version, capabilities, policy, tenant quota, and task budget.
-4. The Scheduler selects a provider using runtime class, region, capacity, and lease health.
+4. The Scheduler selects a provider using runtime class, region, effective capacity (declared totals minus the active reservation ledger), and lease health; on a capacity race it walks the ranked candidates before deferring.
 5. A worker receives a fenced assignment through Runtime Protocol v1.
 6. The agent executes in Wasmtime, OCI/gVisor, or a co-located adapter runtime.
 7. Model, tool, memory, and secret operations pass through gateways for authorization, metering, and audit.
@@ -47,7 +47,7 @@ A typical task moves through the following lifecycle:
 | --- | --- |
 | Agent lifecycle | Stable manifests, immutable AgentVersions, signed packages, publishing, and version lookup |
 | Task kernel | `Task → Run → Attempt` state machine, cancellation, retry, timeout, SSE event streams, and durable results |
-| Scheduling and recovery | Admission, default-deny Rego policy, capacity-aware placement, leases, fencing tokens, backoff, and orphan recovery |
+| Scheduling and recovery | Admission, default-deny Rego policy, effective-capacity placement with ranked-candidate fallback, operator-owned pool capacity, leases, fencing tokens, backoff, and orphan recovery |
 | Runtimes | Wasmtime/Wasm provider, OCI provider, Linux gVisor isolation, reference provider, and HTTP adapter worker |
 | Agent SDKs | Go and Python Runtime Interface SDKs, typed TypeScript Control/Runtime clients, LangGraph adapter, and A2A adapter |
 | Gateways | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
@@ -182,6 +182,15 @@ go run ./cmd/agentos-runtime-reference `
   -artifact-root tmp/artifacts `
   -dev-mode
 ```
+
+`agentos init` writes an environment-independent logical entrypoint
+(`agentos-binding://<agent-name>/remote`) into the manifest, so one immutable
+AgentVersion deploys across dev/staging/prod without re-signing. Map version
+refs (or `name@*` wildcards) to concrete Runtime Interface endpoints with
+`agentos-runtime-adapter -runtime-bindings deploy/dev/runtime-bindings.example.json`;
+an explicit `-adapter-endpoint` still overrides bindings, and unresolved
+logical entrypoints fail closed. The `-mcp-listen` sandbox MCP endpoint is
+loopback-only in every mode, including configured production mTLS.
 
 The adapter runtime additionally exposes a loopback MCP endpoint for its
 sandboxed agents (`-mcp-listen 127.0.0.1:9093 -gateway-address 127.0.0.1:9091`):
@@ -436,8 +445,10 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | Capability | Status | Verification |
 | --- | --- | --- |
 | Task kernel, fencing, recovery, and budgets | Stable | Unit, race, PostgreSQL/NATS integration, fault injection |
+| Workflow budget reservation loop | Stable | 100-way concurrent spawn race, transfer/release/reconciliation integration evidence |
 | Workflow DAG and dynamic multi-agent spawn | Stable | Workflow acceptance, multi-orchestrator claims, 10k-step scheduled scale |
 | Go/Python Runtime Interface SDKs | Stable | Conformance suite and language-specific unit tests |
+| Runtime Interface event streaming | Stable (additive) | SSE round-trip, cursor resume, and v1 polling fallback tests |
 | TypeScript Control/Runtime client SDK | Stable client surface | Strict TypeScript build and HTTP contract tests |
 | Wasmtime and OCI/gVisor runtimes | Stable | Rust tests and real Linux isolation CI |
 | Firecracker runtime | Evaluation only | Dedicated real-KVM scheduled probe; no production provider yet |

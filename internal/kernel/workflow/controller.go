@@ -389,6 +389,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 	// Finalize when every step is terminal.
 	allTerminal := true
 	failed, cancelled := false, false
+	workflowCode := ""
 	for _, step := range steps {
 		if !step.Status.Terminal() {
 			allTerminal = false
@@ -397,6 +398,12 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		switch step.Status {
 		case kernelstore.StepFailed:
 			failed = true
+			// A step that failed specifically because the workflow budget
+			// denied its (re)dispatch carries that durable code to the
+			// workflow outcome instead of the generic step-failure code.
+			if step.FailureCode == errorcode.WorkflowBudgetExhausted {
+				workflowCode = errorcode.WorkflowBudgetExhausted
+			}
 		case kernelstore.StepCancelled:
 			cancelled = true
 		}
@@ -407,6 +414,9 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		switch {
 		case failed:
 			target, code = kernelstore.WorkflowFailed, "WORKFLOW_STEP_FAILED"
+			if workflowCode != "" {
+				code = workflowCode
+			}
 		case cancelled:
 			target, code = kernelstore.WorkflowCancelled, "WORKFLOW_CANCELLED"
 		}
@@ -730,6 +740,19 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 			})
 			if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
 				return false, nil
+			}
+			if code, denied := kernelstore.DenialCode(err); denied && code == errorcode.SpawnBudgetExhausted {
+				// The retry's reservation exceeds the workflow budget: fail
+				// the step instead of retry-looping against a hard ceiling.
+				_, failErr := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
+					TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
+					ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
+					FailureCode: errorcode.WorkflowBudgetExhausted,
+				})
+				if failErr != nil && !errors.Is(failErr, kernelstore.ErrVersionConflict) {
+					return true, failErr
+				}
+				return true, nil
 			}
 			return true, err
 		}

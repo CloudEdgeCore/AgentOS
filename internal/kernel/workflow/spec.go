@@ -292,7 +292,44 @@ func DecodeWorkflowSpec(raw []byte) (WorkflowSpec, error) {
 	if err := spec.validateStepSpecs(); err != nil {
 		return spec, err
 	}
+	if err := spec.validateBudgetCommitment(); err != nil {
+		return spec, err
+	}
 	return spec, nil
+}
+
+// validateBudgetCommitment rejects documents whose declared steps already
+// promise more than the workflow budget: every step reserves its future
+// Task's ceiling at creation, so the declaration itself must fit.
+func (s WorkflowSpec) validateBudgetCommitment() error {
+	if s.Budget == nil {
+		return nil
+	}
+	if s.Budget.MaxTasks > 0 && int64(len(s.Steps)) > s.Budget.MaxTasks {
+		return fmt.Errorf("budget.maxTasks %d is below the %d declared steps", s.Budget.MaxTasks, len(s.Steps))
+	}
+	if s.Budget.MaxTokens <= 0 && s.Budget.MaxCostMicroUSD <= 0 {
+		return nil
+	}
+	defaults := objectMap(s.DefaultTaskSpec)
+	var tokens, costMicroUSD int64
+	for _, step := range s.Steps {
+		merged, err := mergeSpecs(defaults, objectMap(step.Spec))
+		if err != nil {
+			continue // validateStepSpecs already rejected unmergeable steps
+		}
+		stepTokens, stepCost := kernelstore.TaskSpecBudgetReservation(merged)
+		tokens += stepTokens
+		costMicroUSD += int64(stepCost)
+	}
+	if s.Budget.MaxTokens > 0 && tokens > s.Budget.MaxTokens {
+		return fmt.Errorf("declared step budgets reserve %d tokens over budget.maxTokens %d", tokens, s.Budget.MaxTokens)
+	}
+	if s.Budget.MaxCostMicroUSD > 0 && costMicroUSD > int64(s.Budget.MaxCostMicroUSD) {
+		return fmt.Errorf("declared step budgets reserve $%.6f over budget.maxCostUsd $%.6f",
+			float64(costMicroUSD)/1_000_000, s.Budget.MaxCostMicroUSD.USD())
+	}
+	return nil
 }
 
 func validateBudget(budget *WorkflowBudget) error {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/provider"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/model/tokens"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -176,7 +177,7 @@ func TestInvokerOmittedOutputLimitUsesBoundedReservation(t *testing.T) {
 	if _, err := invoker.Invoke(context.Background(), input); err != nil {
 		t.Fatalf("invoke: %v", err)
 	}
-	want := estimateInputTokens(input.Messages) + defaultMaxOutputTokens
+	want := estimateInputTokens(input.Messages, tokens.Heuristic) + defaultMaxOutputTokens
 	if got := env.budget.lastReserved.Tokens; got != want {
 		t.Fatalf("reserved tokens = %d, want bounded default %d", got, want)
 	}

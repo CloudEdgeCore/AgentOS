@@ -13,41 +13,35 @@ import (
 
 // reserveRuntimeCapacity serializes every placement for a pool on its
 // capacity row and commits the reservation with Task/Run/Attempt/Lease.
+//
+// Total capacity is operator-owned: only the runtime pool registry writes
+// total_*. Scheduling reads totals under the row lock taken by the guarded
+// UPDATE and may only move reserved_*, so a stale scheduler snapshot can
+// never overwrite an operator scaling decision. A pool without a registered
+// capacity row fails closed instead of bootstrapping totals from a snapshot.
 func (s *Store) reserveRuntimeCapacity(ctx context.Context, tx pgx.Tx, in kernelstore.ScheduleTaskInput, now time.Time) error {
-	command, err := tx.Exec(ctx, `INSERT INTO runtime_pool_capacities (
-		pool_id, total_cpu_millis, total_memory_mib, total_llm_slots, updated_at
-	) VALUES ($1, $2, $3, $4, $5)
-	ON CONFLICT (pool_id) DO UPDATE SET
-		total_cpu_millis = EXCLUDED.total_cpu_millis,
-		total_memory_mib = EXCLUDED.total_memory_mib,
-		total_llm_slots = EXCLUDED.total_llm_slots,
-		resource_version = runtime_pool_capacities.resource_version + 1,
-		updated_at = EXCLUDED.updated_at
-	WHERE runtime_pool_capacities.reserved_cpu_millis <= EXCLUDED.total_cpu_millis
-	  AND runtime_pool_capacities.reserved_memory_mib <= EXCLUDED.total_memory_mib
-	  AND runtime_pool_capacities.reserved_llm_slots <= EXCLUDED.total_llm_slots`,
-		in.RuntimePoolID, in.PoolCPUCapacity, in.PoolMemoryCapacity, in.PoolLLMCapacity, now)
-	if err != nil {
-		return classify(err)
-	}
-	if command.RowsAffected() != 1 {
-		return fmt.Errorf("%w: pool %s cannot shrink below active reservations", kernelstore.ErrCapacityExhausted, in.RuntimePoolID)
-	}
-
-	command, err = tx.Exec(ctx, `UPDATE runtime_pool_capacities SET
+	command, err := tx.Exec(ctx, `UPDATE runtime_pool_capacities SET
 		reserved_cpu_millis = reserved_cpu_millis + $1,
 		reserved_memory_mib = reserved_memory_mib + $2,
 		reserved_llm_slots = reserved_llm_slots + $3,
 		resource_version = resource_version + 1, updated_at = $4
-	WHERE pool_id = $5
-	  AND reserved_cpu_millis + $1 <= total_cpu_millis
-	  AND reserved_memory_mib + $2 <= total_memory_mib
-	  AND reserved_llm_slots + $3 <= total_llm_slots`,
+		WHERE pool_id = $5
+		  AND reserved_cpu_millis + $1 <= total_cpu_millis
+		  AND reserved_memory_mib + $2 <= total_memory_mib
+		  AND reserved_llm_slots + $3 <= total_llm_slots`,
 		in.RequestedCPU, in.RequestedMemory, in.RequestedLLMSlots, now, in.RuntimePoolID)
 	if err != nil {
 		return classify(err)
 	}
 	if command.RowsAffected() != 1 {
+		var registered bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_pool_capacities WHERE pool_id=$1)`,
+			in.RuntimePoolID).Scan(&registered); err != nil {
+			return classify(err)
+		}
+		if !registered {
+			return fmt.Errorf("%w: pool %s has no registered capacity ledger", kernelstore.ErrPoolCapacityNotInitialized, in.RuntimePoolID)
+		}
 		return fmt.Errorf("%w: pool=%s cpu=%d memory=%d llm=%d", kernelstore.ErrCapacityExhausted,
 			in.RuntimePoolID, in.RequestedCPU, in.RequestedMemory, in.RequestedLLMSlots)
 	}
