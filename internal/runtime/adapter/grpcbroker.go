@@ -32,7 +32,12 @@ func NewGrpcModelBroker(client modelv1.ModelInvocationServiceClient) *GrpcModelB
 }
 
 // InvokeStream streams one invocation, forwarding deltas and mapping the
-// terminal chunk onto the kernel output shape.
+// terminal chunk onto the kernel output shape. The agent-offered tool
+// definitions ride along: the broker resolved the names against the
+// capability-filtered registry, and dropping them here would silently strip
+// the model's tool surface (a real-model run answered without ever seeing a
+// tool — the fake provider could not catch it because it scripts tool calls
+// regardless of the offered surface).
 func (b *GrpcModelBroker) InvokeStream(ctx context.Context, in model.InvokeInput, onDelta func(string)) (model.InvokeOutput, error) {
 	messages := make([]*modelv1.ChatMessage, 0, len(in.Messages))
 	for _, message := range in.Messages {
@@ -44,6 +49,12 @@ func (b *GrpcModelBroker) InvokeStream(ctx context.Context, in model.InvokeInput
 		}
 		messages = append(messages, entry)
 	}
+	tools := make([]*modelv1.ToolDefinition, 0, len(in.Tools))
+	for _, tool := range in.Tools {
+		tools = append(tools, &modelv1.ToolDefinition{
+			Name: tool.Name, Description: tool.Description, ParametersJson: string(tool.Parameters),
+		})
+	}
 	stream, err := b.client.Invoke(ctx, &modelv1.InvokeRequest{
 		Identity: &modelv1.AttemptIdentity{
 			TenantId: in.TenantID, AttemptId: in.AttemptID.String(), FencingToken: in.FencingToken,
@@ -51,6 +62,7 @@ func (b *GrpcModelBroker) InvokeStream(ctx context.Context, in model.InvokeInput
 		TaskId: in.TaskID.String(), RunId: in.RunID.String(), AgentVersionRef: in.AgentVersionRef,
 		ModelRef: in.ModelRef, IdempotencyKey: in.IdempotencyKey, Messages: messages,
 		Stream: in.Stream, MaxOutputTokens: in.MaxOutputTokens, Temperature: in.Temperature,
+		Tools: tools,
 	})
 	if err != nil {
 		return model.InvokeOutput{}, fmt.Errorf("open model invocation: %w", err)

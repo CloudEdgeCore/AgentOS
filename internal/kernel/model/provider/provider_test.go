@@ -684,4 +684,58 @@ func TestEncodeInvocationUsesFunctionToolWireFormat(t *testing.T) {
 	}
 }
 
+// The follow-up turn must carry the assistant's tool calls back in the
+// OpenAI-compatible envelope: flat {id,name,arguments} objects make strict
+// providers reject the request, which killed the real model→tool→model loop
+// exactly between turn one and turn two.
+func TestEncodeInvocationSerializesAssistantToolCallsInWireShape(t *testing.T) {
+	body, err := encodeInvocation(Invocation{
+		ModelName: "m",
+		Messages: []Message{
+			{Role: "user", Content: "report the weather"},
+			{Role: "assistant", ToolCalls: []ToolCall{{
+				ID: "call_1", Name: "weather.lookup", Arguments: `{"city":"paris"}`,
+			}}},
+			{Role: "tool", ToolCallID: "call_1", Content: `{"temp": 21}`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var document struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			Content    string `json:"content"`
+			ToolCallID string `json:"tool_call_id,omitempty"`
+			ToolCalls  []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(document.Messages) != 3 {
+		t.Fatalf("messages = %d turns, want 3", len(document.Messages))
+	}
+	assistant := document.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("assistant turn = %+v", assistant)
+	}
+	call := assistant.ToolCalls[0]
+	if call.ID != "call_1" || call.Type != "function" ||
+		call.Function.Name != "weather.lookup" || call.Function.Arguments != `{"city":"paris"}` {
+		t.Fatalf("tool call not in wire envelope: %+v", call)
+	}
+	toolTurn := document.Messages[2]
+	if toolTurn.Role != "tool" || toolTurn.ToolCallID != "call_1" {
+		t.Fatalf("tool result turn lost its binding: %+v", toolTurn)
+	}
+}
+
 var _ atomic.Int64

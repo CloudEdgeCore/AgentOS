@@ -51,6 +51,10 @@ public protocol versions evolve independently.
 - System tool namespaces are reserved, capability wildcard behavior is unified, and memory sensitivity is authorization-enforced.
 - Remote Runtime Adapter control traffic requires SPIFFE/mTLS outside explicit loopback development mode.
 
+### Fixed
+
+- Real model→tool→model closed loop: the runtime adapter's gRPC model broker dropped the agent-resolved tool definitions from `InvokeRequest.tools`, so providers never saw the tool surface and answered from parametric memory; and assistant turns serialized tool calls as flat `{id,name,arguments}` instead of the OpenAI-compatible `{"id","type":"function","function":{…}}` envelope, so strict providers rejected the follow-up turn carrying tool results. Both surfaces now convert at the wire boundary only; regression tests pin the mapping. Verified end-to-end against a live vLLM endpoint (`TestRealModelToolCalling`: model calls → webhook tool execution → grounded answer with exact usage settlement).
+
 ## 1.0.0 - 2026-08-21
 
 ### Added

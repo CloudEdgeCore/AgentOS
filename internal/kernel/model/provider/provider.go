@@ -667,6 +667,49 @@ type wireToolDefinition struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
+// wireMessage is the OpenAI-compatible wire shape of one chat turn. An
+// assistant turn's tool calls must serialize as
+// [{"id","type":"function","function":{"name","arguments"}}]: the internal
+// flat ToolCall shape is a parse convenience, and sending it verbatim makes
+// strict providers reject the follow-up turn with the tool results (the
+// real-model closed loop died exactly there).
+type wireChatTurn struct {
+	Role       string             `json:"role"`
+	Content    string             `json:"content"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	ToolCalls  []wireToolCallItem `json:"tool_calls,omitempty"`
+}
+
+type wireToolCallItem struct {
+	ID       string               `json:"id"`
+	Type     string               `json:"type"`
+	Function wireToolCallFunction `json:"function"`
+}
+
+type wireToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// encodeMessages converts internal chat turns into their wire shape.
+func encodeMessages(messages []Message) []wireChatTurn {
+	converted := make([]wireChatTurn, 0, len(messages))
+	for _, message := range messages {
+		wire := wireChatTurn{Role: message.Role, Content: message.Content, ToolCallID: message.ToolCallID}
+		for _, call := range message.ToolCalls {
+			wire.ToolCalls = append(wire.ToolCalls, wireToolCallItem{
+				ID:   call.ID,
+				Type: "function",
+				Function: wireToolCallFunction{
+					Name: call.Name, Arguments: call.Arguments,
+				},
+			})
+		}
+		converted = append(converted, wire)
+	}
+	return converted
+}
+
 func encodeInvocation(invocation Invocation, profiles ...CapabilityProfile) ([]byte, error) {
 	profile := CapabilityProfile{}
 	if len(profiles) > 0 {
@@ -674,7 +717,7 @@ func encodeInvocation(invocation Invocation, profiles ...CapabilityProfile) ([]b
 	}
 	type wire struct {
 		Model               string            `json:"model"`
-		Messages            []Message         `json:"messages"`
+		Messages            []wireChatTurn    `json:"messages"`
 		Temperature         *float64          `json:"temperature,omitempty"`
 		MaxTokens           int32             `json:"max_tokens,omitempty"`
 		MaxCompletionTokens int32             `json:"max_completion_tokens,omitempty"`
@@ -683,7 +726,7 @@ func encodeInvocation(invocation Invocation, profiles ...CapabilityProfile) ([]b
 		Tools               []wireToolRequest `json:"tools,omitempty"`
 	}
 	value := wire{
-		Model: invocation.ModelName, Messages: invocation.Messages,
+		Model: invocation.ModelName, Messages: encodeMessages(invocation.Messages),
 		Temperature: invocation.Temperature, MaxTokens: invocation.MaxOutputTokens,
 		Stream: invocation.Stream, Tools: encodeTools(invocation.Tools),
 	}
