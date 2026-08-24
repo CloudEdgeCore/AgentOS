@@ -40,3 +40,4 @@ modelcheck/tla/AgentOS_TTrace*
 research-e2e.log
 research-final.log
 research-scale.log
+research-*.log
