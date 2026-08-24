@@ -50,8 +50,14 @@ func TestExtractUpstreamOutputsMultipleBlocks(t *testing.T) {
 	if got := upstreamVerdict(goal); got != "PASS" {
 		t.Fatalf("upstreamVerdict = %q, want PASS", got)
 	}
-	if got := upstreamVerdict(goal + "\n\nUpstream result [critic-final]:\n{\"status\":\"INSUFFICIENT_EVIDENCE\",\"score\":0.4}"); got != "INSUFFICIENT_EVIDENCE" {
-		t.Fatalf("upstreamVerdict after final = %q, want INSUFFICIENT_EVIDENCE", got)
+	// Render order must decide, never Go map iteration order: append a
+	// later critic block and repeat — the final verdict has to win every
+	// time regardless of hash randomization across processes.
+	final := goal + "\n\nUpstream result [critic-final]:\n{\"status\":\"INSUFFICIENT_EVIDENCE\",\"score\":0.4}"
+	for range 25 {
+		if got := upstreamVerdict(final); got != "INSUFFICIENT_EVIDENCE" {
+			t.Fatalf("upstreamVerdict after final = %q, want INSUFFICIENT_EVIDENCE", got)
+		}
 	}
 }
 

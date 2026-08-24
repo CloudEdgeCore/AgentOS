@@ -436,23 +436,44 @@ func InvokeModelText(ctx context.Context, deps Deps, executionID, modelRef, syst
 
 // upstreamVerdict scans the rendered dependency outputs for a critic
 // decision and returns its status ("PASS", "NEEDS_MORE_RESEARCH",
-// "INSUFFICIENT_EVIDENCE", "").
+// "INSUFFICIENT_EVIDENCE", ""). Blocks are scanned in RENDER ORDER — never
+// map order — so the LAST critic block (the final round) always wins.
 func upstreamVerdict(goal string) string {
 	verdict := ""
-	for _, raw := range ExtractUpstreamOutputs(goal) {
-		var probe struct {
-			Status string  `json:"status"`
-			Score  float64 `json:"score"`
+	const marker = "\n\nUpstream result ["
+	cursor := goal
+	for {
+		start := strings.Index(cursor, marker)
+		if start < 0 {
+			return verdict
 		}
-		if json.Unmarshal([]byte(firstJSONObject(raw)), &probe) != nil || probe.Status == "" {
+		rest := cursor[start+len(marker):]
+		end := strings.Index(rest, "]:\n")
+		if end < 0 {
+			return verdict
+		}
+		name := rest[:end]
+		body := rest[end+3:]
+		next := strings.Index(body, marker)
+		block := body
+		if next >= 0 {
+			block = body[:next]
+			cursor = body[next:]
+		}
+		var probe struct {
+			Status string `json:"status"`
+		}
+		if name == "" || json.Unmarshal([]byte(firstJSONObject(block)), &probe) != nil {
 			continue
 		}
 		switch probe.Status {
 		case "PASS", "NEEDS_MORE_RESEARCH", "INSUFFICIENT_EVIDENCE":
-			verdict = probe.Status // later blocks win: the latest critic speaks last
+			verdict = probe.Status // the latest critic in render order speaks last
+		}
+		if next < 0 {
+			return verdict
 		}
 	}
-	return verdict
 }
 
 // -- analyst -----------------------------------------------------------------
