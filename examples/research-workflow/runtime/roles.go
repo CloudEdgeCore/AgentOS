@@ -2,6 +2,8 @@ package research
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -121,7 +123,7 @@ func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Env
 // -- search ------------------------------------------------------------------
 
 type searchOutput struct {
-	Question *Question  `json:"question"`
+	Question *Question   `json:"question"`
 	Sources  []SourceHit `json:"sources"`
 }
 
@@ -171,7 +173,9 @@ func runSearch(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	// Seed the evidence namespace with snippet-level bundles so round-one
 	// analysis has an evidence base before any reader runs; reader passes
-	// later replace these with full verbatim-claim bundles.
+	// later replace these with full verbatim-claim bundles. The snippet IS
+	// the retrieved source text at this point, so its claims are grounded
+	// against it verbatim and hashed accordingly.
 	for index, hit := range sources {
 		bundle := EvidenceBundle{
 			SourceID:           hit.SourceID,
@@ -183,6 +187,8 @@ func runSearch(ctx context.Context, deps Deps, executionID string, envelope Enve
 				Claim:      hit.Title,
 				Evidence:   hit.Snippet,
 				Confidence: 0.5,
+				SourceHash: sourceHash(hit.Snippet),
+				Grounded:   true,
 			}},
 		}
 		if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "ev-"+hit.SourceID, "application/json", bundle); err != nil {
@@ -319,6 +325,10 @@ type Claim struct {
 	Claim      string  `json:"claim"`
 	Evidence   string  `json:"evidence"`
 	Confidence float64 `json:"confidence"`
+	// SourceHash pins the exact retrieved source text the evidence was
+	// verified against (sha256 hex); Grounded records that verification.
+	SourceHash string `json:"sourceHash,omitempty"`
+	Grounded   bool   `json:"grounded"`
 }
 
 type EvidenceBundle struct {
@@ -356,9 +366,13 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if err := decodeLoose(content, &parsed); err != nil {
 		return nil, fmt.Errorf("reader output: %w", err)
 	}
+	// Evidence → Original Source grounding (roadmap §3.4): every claim's
+	// evidence must appear verbatim in the fetched document text; claims
+	// that fail are rejected here, before they can reach memory.
 	bundle := EvidenceBundle{
 		SourceID: document.SourceID, ResearchQuestionID: source.ResearchQuestionID,
-		Title: document.Title, URL: document.URL, Claims: parsed.Claims,
+		Title: document.Title, URL: document.URL,
+		Claims: groundClaims(parsed.Claims, document.Content),
 	}
 	for index := range bundle.Claims {
 		bundle.Claims[index].ClaimID = fmt.Sprintf("%s-claim-%03d", bundle.SourceID, index+1)
@@ -370,7 +384,7 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 		bundle.Claims = bundle.Claims[:6]
 	}
 	if len(bundle.Claims) == 0 {
-		return nil, fmt.Errorf("reader produced no claims for %s", bundle.SourceID)
+		return nil, fmt.Errorf("reader produced no grounded claims for %s", bundle.SourceID)
 	}
 	// "ev-" carries the (upgraded) evidence bundle; "read-" is the marker the
 	// collector checks to avoid re-spawning a completed source.
@@ -382,6 +396,31 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	output, _ := json.Marshal(bundle)
 	return output, nil
+}
+
+// groundClaims filters model-extracted claims down to the ones whose
+// evidence text appears verbatim (whitespace-normalized) in the retrieved
+// source text, stamping each survivor with the source content hash. It is
+// the Evidence → Original Source verification step of the provenance chain.
+func groundClaims(claims []Claim, sourceText string) []Claim {
+	hash := sourceHash(sourceText)
+	haystack := normalizeSpace(sourceText)
+	grounded := make([]Claim, 0, len(claims))
+	for _, claim := range claims {
+		evidence := normalizeSpace(claim.Evidence)
+		if evidence == "" || !strings.Contains(haystack, evidence) {
+			continue // reject the claim: its "evidence" is not in the source
+		}
+		claim.SourceHash = hash
+		claim.Grounded = true
+		grounded = append(grounded, claim)
+	}
+	return grounded
+}
+
+func sourceHash(text string) string {
+	digest := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(digest[:])
 }
 
 func InvokeModelText(ctx context.Context, deps Deps, executionID, modelRef, system, user string) (string, error) {
@@ -396,18 +435,20 @@ func InvokeModelText(ctx context.Context, deps Deps, executionID, modelRef, syst
 }
 
 // upstreamVerdict scans the rendered dependency outputs for a critic
-// decision and returns its status ("PASS", "NEEDS_MORE_RESEARCH", "").
+// decision and returns its status ("PASS", "NEEDS_MORE_RESEARCH",
+// "INSUFFICIENT_EVIDENCE", "").
 func upstreamVerdict(goal string) string {
 	verdict := ""
 	for _, raw := range ExtractUpstreamOutputs(goal) {
 		var probe struct {
-			Status string `json:"status"`
+			Status string  `json:"status"`
 			Score  float64 `json:"score"`
 		}
 		if json.Unmarshal([]byte(firstJSONObject(raw)), &probe) != nil || probe.Status == "" {
 			continue
 		}
-		if probe.Status == "PASS" || probe.Status == "NEEDS_MORE_RESEARCH" {
+		switch probe.Status {
+		case "PASS", "NEEDS_MORE_RESEARCH", "INSUFFICIENT_EVIDENCE":
 			verdict = probe.Status // later blocks win: the latest critic speaks last
 		}
 	}
@@ -535,9 +576,9 @@ func collectEvidence(ctx context.Context, deps Deps, executionID string, envelop
 // -- critic ------------------------------------------------------------------
 
 type criticDecision struct {
-	Status      string `json:"status"`
-	Score       float64 `json:"score"`
-	Gaps        []struct {
+	Status string  `json:"status"`
+	Score  float64 `json:"score"`
+	Gaps   []struct {
 		GapID            string   `json:"gapId"`
 		Question         string   `json:"question"`
 		Severity         string   `json:"severity"`
@@ -584,7 +625,7 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	system := "You are a research critic. Judge whether the analysis answers the original goal rigorously. " +
 		"If specific, answerable sub-questions remain unaddressed, return NEEDS_MORE_RESEARCH with at most 4 gaps, each with 1-3 suggested search queries. " +
-		"A score below 0.75 means more research is needed. When Round >= 3 you MUST return PASS unless evidence directly contradicts the analysis. " + jsonOnlyInstruction
+		"A score below 0.75 means more research is needed. When Round >= 3 do not force PASS: if the evidence base is still too thin, return INSUFFICIENT_EVIDENCE. " + jsonOnlyInstruction
 	user := fmt.Sprintf("Original goal summary:\n%s\n\nRound: %d of 3\n\nAnalysis under review:\n%s",
 		truncate(strings.TrimPrefix(envelope.Goal, envelopePrefix), 2000), envelope.Round, truncate(analysisRaw, 16000))
 	content, err := chat(ctx, deps, executionID, system, user)
@@ -598,9 +639,11 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if decision.Score >= 0 && decision.Score < 0.75 && decision.Status == "PASS" && envelope.Round < 3 {
 		decision.Status = "NEEDS_MORE_RESEARCH"
 	}
-	if envelope.Round >= 3 && decision.Status != "PASS" {
-		decision.Status = "PASS" // hard round wall: converge rather than spin
-	}
+	// Terminal rule (roadmap §3.5): round three never forces convergence.
+	// A still-unanswered analysis ends as INSUFFICIENT_EVIDENCE so the
+	// downstream writer reports the shortfall honestly instead of faking
+	// acceptance.
+	applyCriticTerminalRule(&decision.Status, envelope.Round)
 	if decision.Gaps == nil {
 		decision.Gaps = []struct {
 			GapID            string   `json:"gapId"`
@@ -655,10 +698,13 @@ type citation struct {
 }
 
 type reportDoc struct {
-	Title     string    `json:"title"`
-	Summary   string    `json:"summary"`
-	Sections  []section `json:"sections"`
+	Title     string     `json:"title"`
+	Summary   string     `json:"summary"`
+	Sections  []section  `json:"sections"`
 	Citations []citation `json:"citations"`
+	// InsufficientEvidence records an honest INSUFFICIENT_EVIDENCE verdict
+	// from the final critic: the report ships, but declares the shortfall.
+	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
 }
 
 func runWriter(ctx context.Context, deps Deps, executionID string, envelope Envelope, feedback string) (json.RawMessage, string, error) {
@@ -690,6 +736,7 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if report.Title == "" || report.Summary == "" || len(report.Sections) == 0 {
 		return nil, "", fmt.Errorf("writer produced an incomplete report")
 	}
+	report.InsufficientEvidence = upstreamVerdict(envelope.Goal) == "INSUFFICIENT_EVIDENCE"
 	encoded, _ := json.Marshal(report)
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("report"), "report-draft", "application/json", report); err != nil {
 		return nil, "", err
@@ -702,6 +749,9 @@ type validationVerdict struct {
 	CitationCoverage  float64 `json:"citationCoverage"`
 	UnsupportedClaims int     `json:"unsupportedClaims"`
 	Retries           int     `json:"retries"`
+	// InsufficientEvidence mirrors the final critic's honest verdict when
+	// the evidence base could not answer the goal within the round budget.
+	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
 }
 
 func runValidator(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -714,6 +764,15 @@ func runValidator(ctx context.Context, deps Deps, executionID string, envelope E
 		}
 		bundles := collectEvidence(ctx, deps, executionID, envelope)
 		verdict := gradeCitations(raw, bundles)
+		// Mirror the shortfall from the draft itself (the writer stamps it
+		// from the final critic verdict); the validator's own rendered goal
+		// does not carry the critic block transitively.
+		var probe struct {
+			InsufficientEvidence bool `json:"insufficientEvidence"`
+		}
+		_ = json.Unmarshal(raw, &probe)
+		verdict.InsufficientEvidence =
+			upstreamVerdict(envelope.Goal) == "INSUFFICIENT_EVIDENCE" || probe.InsufficientEvidence
 		if verdict.CitationCoverage >= threshold && verdict.UnsupportedClaims == 0 {
 			verdict.Retries = retries
 			if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("report"), "report", "application/json", raw); err != nil {
@@ -776,44 +835,44 @@ func loadReportDraft(ctx context.Context, deps Deps, executionID string, envelop
 	return nil, "", fmt.Errorf("no report draft found for validation")
 }
 
-// gradeCitations scores a report against the evidence base: a citation is
-// supported when its quoted passage appears (whitespace-normalized) inside
-// the evidence text of the claim it points at, or inside ANY bundle when the
-// claim id is unknown.
+// gradeCitations scores a report against the evidence base under STRICT
+// grounding rules (roadmap §3.3): a citation counts as supported only when
+// its evidenceId names an existing claim AND its quote is a non-empty,
+// whitespace-normalized substring of THAT claim's evidence. Empty quotes,
+// unknown claim ids, and passages borrowed from different evidence are all
+// rejected — there is no corpus-wide fallback.
 func gradeCitations(raw json.RawMessage, bundles []EvidenceBundle) validationVerdict {
 	var report reportDoc
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return validationVerdict{}
 	}
 	evidenceText := map[string]string{}
-	allText := strings.Builder{}
 	for _, bundle := range bundles {
 		for _, claim := range bundle.Claims {
 			evidenceText[claim.ClaimID] = normalizeSpace(claim.Evidence)
-			allText.WriteString(normalizeSpace(claim.Evidence))
-			allText.WriteString("\n")
 		}
 	}
 	supported := 0
 	unsupported := 0
-	haystack := allText.String()
 	for _, cite := range report.Citations {
-		text, ok := evidenceText[cite.EvidenceID]
-		if !ok {
-			text = haystack
-		}
-		if cite.Quote == "" || strings.Contains(text, normalizeSpace(cite.Quote)) {
-			supported++
+		text, known := evidenceText[cite.EvidenceID]
+		switch {
+		case cite.Quote == "", !known:
+			unsupported++
 			continue
+		case strings.Contains(text, normalizeSpace(cite.Quote)):
+			supported++
+		default:
+			unsupported++
 		}
-		unsupported++
 	}
 	total := len(report.Citations)
 	coverage := 0.0
 	if total > 0 {
 		coverage = float64(supported) / float64(total)
 	}
-	return validationVerdict{Valid: coverage >= 0.90 && unsupported == 0, CitationCoverage: coverage, UnsupportedClaims: unsupported}
+	return validationVerdict{Valid: total > 0 && coverage >= 0.90 && unsupported == 0,
+		CitationCoverage: coverage, UnsupportedClaims: unsupported}
 }
 
 // -- helpers -----------------------------------------------------------------
@@ -899,4 +958,13 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// applyCriticTerminalRule enforces the third terminal state: from round
+// three on, a critic that still cannot accept the analysis must declare
+// INSUFFICIENT_EVIDENCE rather than being forced into PASS.
+func applyCriticTerminalRule(status *string, round int) {
+	if round >= 3 && *status != "PASS" && *status != "" {
+		*status = "INSUFFICIENT_EVIDENCE"
+	}
 }

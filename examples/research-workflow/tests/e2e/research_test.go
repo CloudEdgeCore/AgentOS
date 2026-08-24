@@ -146,6 +146,89 @@ func TestResearchWorkflowCitationCoverage(t *testing.T) {
 		validation.Retries, validation.CitationCoverage)
 }
 
+// Evidence → Original Source grounding (roadmap §3.4): every persisted
+// claim carries a source hash and grounded flag; nothing ungrounded may
+// reach the evidence namespace.
+func TestResearchWorkflowEvidenceGrounding(t *testing.T) {
+	h := newHarness(t, "grounding", nil)
+	id, err := h.createResearch("Grounded-evidence overview of agent runtime control planes")
+	if err != nil {
+		t.Fatalf("create research: %v", err)
+	}
+	h.requireCompleted(id, settleTimeout)
+
+	evidenceJSON := memoryContentsJoined(t, h, id, "evidence")
+	claims := strings.Count(evidenceJSON, `"claimId"`)
+	if claims < 30 {
+		t.Fatalf("evidence carries %d claims, want >= 30", claims)
+	}
+	if strings.Contains(evidenceJSON, `"grounded":false`) {
+		t.Fatal("ungrounded claim reached the evidence namespace")
+	}
+	hashes := strings.Count(evidenceJSON, `"sourceHash":"`)
+	if hashes != claims {
+		t.Fatalf("sourceHash stamped on %d of %d claims", hashes, claims)
+	}
+	t.Logf("evidence grounding verified: claims=%d allGrounded=true", claims)
+}
+
+// A persistently sloppy writer citing non-existent claim ids can never pass
+// the hardened validator; the workflow ships the best effort with an honest
+// unsupported-citations verdict instead of failing.
+func TestResearchWorkflowInvalidCitation(t *testing.T) {
+	h := newHarness(t, "invalidcitation", func(s *scenario) { s.writerUnknownEvidence = true })
+	id, err := h.createResearch("Invalid-citation resilience outlook on agent runtime governance")
+	if err != nil {
+		t.Fatalf("create research: %v", err)
+	}
+	h.requireCompleted(id, settleTimeout)
+
+	var validation struct {
+		CitationCoverage  float64 `json:"citationCoverage"`
+		UnsupportedClaims int     `json:"unsupportedClaims"`
+		Retries           int     `json:"retries"`
+	}
+	mustDecodeMemory(t, h, id, "report", "validation", &validation)
+	if validation.Retries < 2 {
+		t.Fatalf("validator gave up too early: retries=%d", validation.Retries)
+	}
+	if validation.UnsupportedClaims == 0 || validation.CitationCoverage >= 0.90 {
+		t.Fatalf("unknown-evidence citations must stay unsupported: %+v", validation)
+	}
+	t.Logf("honest best-effort shipped: coverage=%.2f unsupported=%d retries=%d",
+		validation.CitationCoverage, validation.UnsupportedClaims, validation.Retries)
+}
+
+// When the critic still cannot accept the analysis at round three it must
+// declare INSUFFICIENT_EVIDENCE instead of being forced into PASS; the
+// writer and validator surface that shortfall honestly.
+func TestResearchWorkflowInsufficientEvidence(t *testing.T) {
+	h := newHarness(t, "insufficient", func(s *scenario) { s.criticAlwaysNeedsMore = true })
+	id, err := h.createResearch("Thin-evidence probe where the critic should declare insufficiency")
+	if err != nil {
+		t.Fatalf("create research: %v", err)
+	}
+	h.requireCompleted(id, settleTimeout)
+
+	gaps := memoryContentsJoined(t, h, id, "gaps")
+	if !strings.Contains(gaps, `"status":"INSUFFICIENT_EVIDENCE"`) {
+		t.Fatalf("final critic decision missing INSUFFICIENT_EVIDENCE: %.400s", gaps)
+	}
+	var validation struct {
+		Valid                bool `json:"valid"`
+		InsufficientEvidence bool `json:"insufficientEvidence"`
+	}
+	mustDecodeMemory(t, h, id, "report", "validation", &validation)
+	if !validation.InsufficientEvidence {
+		t.Fatalf("validation verdict must mirror the shortfall: %+v", validation)
+	}
+	report := memoryContentsJoined(t, h, id, "report")
+	if !strings.Contains(report, `"insufficientEvidence":true`) {
+		t.Fatal("shipped report does not declare insufficient evidence")
+	}
+	t.Logf("insufficiency surfaced honestly: valid=%v declared=true", validation.Valid)
+}
+
 // Tool failures recover through attempt retries without duplicate side
 // effects: injected fetch failures are absorbed and the workflow completes.
 func TestResearchWorkflowToolFailureRecovery(t *testing.T) {
@@ -208,24 +291,44 @@ func TestResearchWorkflowRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create research: %v", err)
 	}
-	// Wait until fan-out is actually executing (dynamic children exist).
+	// Wait until the fan-out is DEEP in flight (several live attempts, not
+	// just the planner pair) so killing both workers guarantees stranded
+	// leases exist to recover.
 	deadline := time.Now().Add(90 * time.Second)
 	for {
-		var running int
+		var running, attempts int
 		if err := h.pool.QueryRow(context.Background(),
-			`SELECT COUNT(*) FROM tasks WHERE phase = 'RUNNING'`).Scan(&running); err != nil {
-			t.Fatalf("count running tasks: %v", err)
+			`SELECT (SELECT COUNT(*) FROM tasks WHERE phase = 'RUNNING'),
+				(SELECT COUNT(*) FROM attempts)`).Scan(&running, &attempts); err != nil {
+			t.Fatalf("count in-flight work: %v", err)
 		}
-		if running >= 2 || time.Now().After(deadline) {
+		if running >= 3 && attempts >= 6 {
 			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fan-out never went deep enough to crash: running=%d attempts=%d", running, attempts)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 	h.KillWorker("research-worker-a")
 	h.KillWorker("research-worker-b")
-	// Leases expire (15s heartbeat TTL) -> recovery requeues; restart BOTH
-	// runtime instances because stranded runs may be bound to either pool.
-	time.Sleep(20 * time.Second)
+	// Leases expire (15s heartbeat TTL) -> recovery requeues. Wait for the
+	// replacement attempt to EXIST before restarting workers so the
+	// assertion below can never miss a slow-but-successful recovery.
+	recoverDeadline := time.Now().Add(45 * time.Second)
+	for {
+		var retried int
+		if err := h.pool.QueryRow(context.Background(),
+			`SELECT COUNT(*) FROM attempts WHERE ordinal >= 2`).Scan(&retried); err != nil {
+			t.Fatalf("count replacement attempts: %v", err)
+		}
+		if retried >= 1 || time.Now().After(recoverDeadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// Restart BOTH runtime instances because stranded runs may be bound to
+	// either pool.
 	h.startWorker(h.loopCtx, "research-worker-a")
 	h.startWorker(h.loopCtx, "research-worker-b")
 

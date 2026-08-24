@@ -50,6 +50,9 @@ func TestExtractUpstreamOutputsMultipleBlocks(t *testing.T) {
 	if got := upstreamVerdict(goal); got != "PASS" {
 		t.Fatalf("upstreamVerdict = %q, want PASS", got)
 	}
+	if got := upstreamVerdict(goal + "\n\nUpstream result [critic-final]:\n{\"status\":\"INSUFFICIENT_EVIDENCE\",\"score\":0.4}"); got != "INSUFFICIENT_EVIDENCE" {
+		t.Fatalf("upstreamVerdict after final = %q, want INSUFFICIENT_EVIDENCE", got)
+	}
 }
 
 func TestFirstJSONObjectBalancedAndEscaped(t *testing.T) {
@@ -72,7 +75,57 @@ func TestFirstJSONObjectBalancedAndEscaped(t *testing.T) {
 	}
 }
 
-func TestGradeCitationsCoverageAndUnsupported(t *testing.T) {
+func TestCitationAcceptsExactGroundedQuote(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims: []Claim{
+			{ClaimID: "src-1-claim-001", Evidence: "Runtimes schedule attempts with fencing tokens."},
+		},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001",
+			Quote: "schedule attempts with   fencing tokens."}},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if !verdict.Valid || verdict.CitationCoverage != 1 || verdict.UnsupportedClaims != 0 {
+		t.Fatalf("grounded quote must pass (whitespace normalized): %+v", verdict)
+	}
+}
+
+func TestCitationRejectsEmptyQuote(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims:   []Claim{{ClaimID: "src-1-claim-001", Evidence: "Runtimes fence attempts."}},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: ""}},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.CitationCoverage != 0 || verdict.UnsupportedClaims != 1 {
+		t.Fatalf("empty quote must be unsupported: %+v", verdict)
+	}
+}
+
+func TestCitationRejectsUnknownEvidenceID(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		// The quoted text exists in the corpus — but under a different id.
+		Claims: []Claim{{ClaimID: "src-1-claim-001", Evidence: "Evidence memory is namespaced per workflow."}},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Citations: []citation{{Marker: "[1]", EvidenceID: "src-999-claim-042",
+			Quote: "Evidence memory is namespaced"}},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.CitationCoverage != 0 || verdict.UnsupportedClaims != 1 {
+		t.Fatalf("unknown evidenceId must be unsupported even if text matches elsewhere: %+v", verdict)
+	}
+}
+
+func TestCitationRejectsQuoteFromDifferentEvidence(t *testing.T) {
 	bundles := []EvidenceBundle{{
 		SourceID: "src-1",
 		Claims: []Claim{
@@ -80,39 +133,77 @@ func TestGradeCitationsCoverageAndUnsupported(t *testing.T) {
 			{ClaimID: "src-1-claim-002", Evidence: "Evidence memory is namespaced per workflow."},
 		},
 	}}
-	report := func(citations ...citation) json.RawMessage {
-		raw, _ := json.Marshal(reportDoc{
-			Title: "T", Summary: "S",
-			Sections:  []section{{Heading: "H", Body: "B"}},
-			Citations: citations,
-		})
-		return raw
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001",
+			Quote: "namespaced per workflow"}},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.CitationCoverage != 0 || verdict.UnsupportedClaims != 1 {
+		t.Fatalf("cross-evidence quote must be unsupported: %+v", verdict)
 	}
+}
 
-	verdict := gradeCitations(report(
-		citation{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "schedule attempts with   fencing tokens."},
-	), bundles)
-	if !verdict.Valid || verdict.CitationCoverage != 1 || verdict.UnsupportedClaims != 0 {
-		t.Fatalf("supported verdict = %+v (whitespace must normalize)", verdict)
-	}
-
-	verdict = gradeCitations(report(
-		citation{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "fabricated quote that exists nowhere"},
-		citation{Marker: "[2]", EvidenceID: "", Quote: "namespaced per workflow"},
-	), bundles)
+func TestGradeCitationsMixedFabricationCounts(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims: []Claim{
+			{ClaimID: "src-1-claim-001", Evidence: "Runtimes schedule attempts with fencing tokens."},
+			{ClaimID: "src-1-claim-002", Evidence: "Evidence memory is namespaced per workflow."},
+		},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Citations: []citation{
+			{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "fabricated quote that exists nowhere"},
+			{Marker: "[2]", EvidenceID: "", Quote: "namespaced per workflow"},
+		},
+	})
+	verdict := gradeCitations(raw, bundles)
 	if verdict.Valid {
-		t.Fatalf("fabricated quote must fail validation: %+v", verdict)
+		t.Fatalf("fabricated quotes must fail validation: %+v", verdict)
 	}
-	if verdict.UnsupportedClaims != 1 || verdict.CitationCoverage != 0.5 {
+	if verdict.UnsupportedClaims != 2 || verdict.CitationCoverage != 0 {
 		t.Fatalf("verdict = %+v", verdict)
 	}
+}
 
-	// Unknown claim ids fall back to the whole-evidence haystack.
-	verdict = gradeCitations(report(
-		citation{Marker: "[1]", EvidenceID: "unknown-id", Quote: "Evidence memory is namespaced"},
-	), bundles)
-	if !verdict.Valid {
-		t.Fatalf("haystack fallback verdict = %+v", verdict)
+func TestGroundClaimsRejectsUngroundedEvidence(t *testing.T) {
+	source := "The runtime fences every attempt. Recovery replays from checkpoints."
+	claims := []Claim{
+		{Claim: "c1", Evidence: "fences every attempt"},        // grounded
+		{Claim: "c2", Evidence: "hallucinated passage absent"}, // rejected
+		{Claim: "c3", Evidence: ""},                            // rejected
+		{Claim: "c4", Evidence: "replays  from\ncheckpoints."}, // grounded after normalize
+	}
+	kept := groundClaims(claims, source)
+	if len(kept) != 2 {
+		t.Fatalf("kept = %+v", kept)
+	}
+	for _, claim := range kept {
+		if !claim.Grounded || len(claim.SourceHash) != 64 {
+			t.Fatalf("claim %s not stamped: %+v", claim.Claim, claim)
+		}
+	}
+	if kept := groundClaims(claims[:2], "unrelated body"); len(kept) != 0 {
+		t.Fatal("claims whose evidence misses the source must all be rejected")
+	}
+}
+
+func TestApplyCriticTerminalRule(t *testing.T) {
+	status := "NEEDS_MORE_RESEARCH"
+	applyCriticTerminalRule(&status, 2)
+	if status != "NEEDS_MORE_RESEARCH" {
+		t.Fatalf("round 2 must keep the status: %q", status)
+	}
+	applyCriticTerminalRule(&status, 3)
+	if status != "INSUFFICIENT_EVIDENCE" {
+		t.Fatalf("round 3 non-PASS must become INSUFFICIENT_EVIDENCE: %q", status)
+	}
+	pass := "PASS"
+	applyCriticTerminalRule(&pass, 3)
+	if pass != "PASS" {
+		t.Fatalf("an accepted analysis stays PASS: %q", pass)
 	}
 }
 

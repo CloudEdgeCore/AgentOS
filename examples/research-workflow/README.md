@@ -55,18 +55,34 @@ tests/e2e/               end-to-end scenario suite (build tag `integration`)
    read (`read-<sourceId>` markers), and spawns one **reader** per unread
    source — capped at 8 per drain (see deviation below), surplus deferred.
 4. **reader** fetches the full document via `web.fetch` (SSRF-guarded),
-   extracts 2-6 verbatim-evidenced claims via the reader model tier, writes
-   the upgraded bundle to `ev-<sourceId>` and its read marker. Zero claims is
-   a hard error (the attempt retries).
+   extracts 2-6 verbatim-evidenced claims via the reader model tier, and
+   GROUNDS them before persisting: each claim's evidence must appear verbatim
+   (whitespace-normalized) in the fetched source text, else the claim is
+   rejected; survivors are stamped with `sourceHash` (sha256 of the source)
+   and `grounded:true`, then written to `ev-<sourceId>` + read marker. Zero
+   grounded claims is a hard error (the attempt retries).
 5. **analyst** synthesizes findings/contradictions/unknowns from evidence,
    citing claim ids; a carried PASS verdict replays the stored analysis.
-6. **critic** scores the analysis; NEEDS_MORE_RESEARCH emits gaps whose
-   suggested queries spawn round-2 **search** children (`spawn:critic-rN`
-   join groups), looping analyst→critic until PASS or round 3.
+6. **critic** scores the analysis with THREE terminal states:
+   `PASS`; `NEEDS_MORE_RESEARCH` (gaps spawn round-N+1 **search** children
+   via `spawn:critic-rN` join groups); or — from round three on, never
+   forced into PASS — `INSUFFICIENT_EVIDENCE`.
 7. **writer** renders the report strictly from findings+evidence with
-   verbatim quotes; **citation-validator** grades coverage (≥0.90, zero
-   unsupported), requests revisions with retry-scoped feedback, and ships an
-   honest verdict after 2 failed revisions.
+   verbatim quotes, declaring `"insufficientEvidence":true` when the final
+   verdict demands it; **citation-validator** grades coverage under STRICT
+   grounding rules (≥0.90, zero unsupported), requests revisions with
+   retry-scoped feedback, and ships an honest verdict after 2 failed
+   revisions.
+
+### Provenance chain: Report → Citation → Evidence → Source
+
+Citation validation is as strict as extraction: a citation counts as
+supported ONLY when its evidenceId names an existing claim AND its quote is
+a non-empty whitespace-normalized substring of THAT claim's evidence.
+Empty quotes, unknown claim ids, and passages borrowed from different
+evidence are rejected outright — no corpus-wide fallback. Combined with
+reader-side grounding, every accepted citation traces to verified source
+text end to end.
 
 ### Documented deviation: the collector role
 
@@ -134,8 +150,11 @@ go test -tags integration -count=1 -timeout 12m \
 | Scenario | Proves |
 |---|---|
 | `Basic` | goal → ≥3 questions → ≥10 sources → ≥30 claims → report |
+| `EvidenceGrounding` | every persisted claim grounded + sourceHash-stamped; nothing ungrounded reaches memory |
 | `CriticRetry` | round-1 NEEDS_MORE_RESEARCH spawns gap searches/readers; final PASS |
+| `InsufficientEvidence` | round-3 non-PASS becomes INSUFFICIENT_EVIDENCE (never forced PASS); writer+validator declare the shortfall |
 | `CitationCoverage` | fabricated quotes trigger writer revision; gate ≥0.90 enforced honestly |
+| `InvalidCitation` | persistent unknown-evidence citations never pass the hardened validator; honest best-effort ships |
 | `ToolFailureRecovery` | injected `web.fetch` 500s absorbed by attempt retries, no duplicate side effects |
 | `ModelFailure` | provider 429 absorbed by bounded provider retry |
 | `Recovery` | SIGKILL-equivalent of both workers mid-run; lease expiry + recovery + restarted instances complete the workflow |

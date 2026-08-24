@@ -214,7 +214,8 @@ func (p *scriptedProvider) criticDecision(user string) string {
 		round = int(match[1][0] - '0')
 	}
 	p.mu.Lock()
-	needsMore := p.scenario.criticRound1NeedsMore && round == 1
+	needsMore := (p.scenario.criticRound1NeedsMore && round == 1) ||
+		p.scenario.criticAlwaysNeedsMore // every round; the runtime's terminal rule turns round 3 into INSUFFICIENT_EVIDENCE
 	p.mu.Unlock()
 	if needsMore {
 		return `{"status":"NEEDS_MORE_RESEARCH","score":0.55,"gaps":[{"gapId":"gap-r1-001","question":"How is capacity federated across remote runtimes?","severity":"MEDIUM","suggestedQueries":["remote runtimes federation mtls"]}]}`
@@ -257,6 +258,7 @@ func bundleClaims(user string) []map[string]any {
 func (p *scriptedProvider) writerReport(user string) string {
 	p.mu.Lock()
 	bad := p.scenario.writerBadCitations
+	unknownEvidence := p.scenario.writerUnknownEvidence
 	p.mu.Unlock()
 	// A revision-aware model stops fabricating once the validator's
 	// feedback reaches the prompt; the first draft stays dishonest.
@@ -272,6 +274,12 @@ func (p *scriptedProvider) writerReport(user string) string {
 		if bad {
 			quote = "A fabricated passage that appears nowhere in the evidence base."
 		}
+		if unknownEvidence {
+			// A persistently sloppy model: every citation points at a claim
+			// id that does not exist in the evidence base. The hardened
+			// validator must reject all of them on every revision.
+			claimID = fmt.Sprintf("src-999-claim-%03d", index+7)
+		}
 		encodedQuote, _ := json.Marshal(quote)
 		citations = append(citations, fmt.Sprintf(
 			`{"marker":"[%d]","evidenceId":"%s","sourceId":"%s","quote":%s}`, index+1, claimID, source, encodedQuote))
@@ -279,9 +287,13 @@ func (p *scriptedProvider) writerReport(user string) string {
 	if len(citations) == 0 {
 		citations = append(citations, `{"marker":"[1]","evidenceId":"src-001-claim-001","sourceId":"src-001","quote":"Agent runtimes consolidated into control planes."}`)
 	}
+	insufficient := ""
+	if strings.Contains(user, "INSUFFICIENT_EVIDENCE") {
+		insufficient = `,"insufficientEvidence":true`
+	}
 	return fmt.Sprintf(`{"title":"Agent Runtime Infrastructure: Three-Year Outlook",`+
 		`"summary":"Synthesis of twelve corpus sources covering control planes, sandboxing, budgets and federation.",`+
 		`"sections":[{"heading":"Findings","body":"Consolidation around governed control planes accelerates."},`+
 		`{"heading":"Outlook","body":"Expect capability attenuation and federated capacity to define the next cycle."}],`+
-		`"citations":[%s]}`, strings.Join(citations, ","))
+		`"citations":[%s]%s}`, strings.Join(citations, ","), insufficient)
 }

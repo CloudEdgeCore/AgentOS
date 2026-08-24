@@ -60,6 +60,8 @@ const (
 type scenario struct {
 	criticRound1NeedsMore bool
 	writerBadCitations    bool
+	criticAlwaysNeedsMore bool
+	writerUnknownEvidence bool
 }
 
 type fetchCounter struct {

@@ -49,8 +49,6 @@ type ChatTurn struct {
 	ToolCalls []ChatCall
 }
 
-const maxAgentTurns = 12
-
 // InvokeModel runs one governed model invocation through the broker,
 // resolving the logical tier to this deployment's reference first.
 func InvokeModel(ctx context.Context, mcp MCPClient, executionID, modelRef string, messages []ChatMessage) (ChatTurn, error) {
