@@ -68,13 +68,16 @@ func waitForWorkflowTerminal(ctx context.Context, t *testing.T, env *e2eEnv, id 
 	return current
 }
 
-// driveOrchestrators runs n concurrent orchestrator instances (the
-// multi-controller no-double-dispatch evidence) until ctx ends, measuring
-// per-round reconcile latency into samples (mutex-guarded).
+// driveOrchestrators runs n concurrent orchestrator instances in the durable
+// claim mode required for a multi-instance deployment. Running several
+// claim-lease=0 controllers would intentionally select the same full batch on
+// every round (that mode is for one instance), measuring avoidable CAS
+// contention instead of distributed orchestrator latency.
 func driveOrchestrators(ctx context.Context, t *testing.T, env *e2eEnv, n int, samples *latencySamples) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		controller := workflow.NewController(env.store, env.store, env.artifacts, fmt.Sprintf("e2e-orchestrator-%d", i), 100)
+		controller := workflow.NewController(env.store, env.store, env.artifacts, fmt.Sprintf("e2e-orchestrator-%d", i), 100).
+			WithClaiming(5*time.Second, 0)
 		go func(controller *workflow.Controller) {
 			for ctx.Err() == nil {
 				start := time.Now()
