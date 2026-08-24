@@ -13,6 +13,7 @@
 package webtools
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -50,12 +51,22 @@ type FetchResult struct {
 	FetchedAt string `json:"fetchedAt"`
 }
 
+// Backend produces search hits and fetched documents behind the stable
+// wire contract. The deterministic corpus implements it for CI; live
+// deployments swap in real providers (Brave/Bing search, hardened HTTP
+// fetch) without touching the agents or the workflow.
+type Backend interface {
+	Search(ctx context.Context, query string, limit int) ([]SearchHit, error)
+	Fetch(ctx context.Context, target string) (*FetchResult, error)
+}
+
 // Server serves the tool contract over HTTP(S).
 type Server struct {
-	corpus []Document
+	backend Backend
 	// FailFetchesFor makes the next N fetches whose URL contains the token
 	// fail with HTTP 500 (failure-injection seam used by the recovery and
-	// tool-failure tests).
+	// tool-failure tests). Injection sits ABOVE the backend so it works for
+	// deterministic and live providers alike.
 	failTokens   map[string]int
 	failureMu    chan struct{}
 	requestCount func(method string)
@@ -71,13 +82,19 @@ type Document struct {
 	Content     string   `json:"content"`
 }
 
-// New builds a Server over the given documents.
+// New builds a Server over the given documents (deterministic backend).
 func New(documents []Document) *Server {
 	return &Server{
-		corpus:     documents,
+		backend:    newCorpusBackend(documents),
 		failTokens: map[string]int{},
 		failureMu:  make(chan struct{}, 1),
 	}
+}
+
+// WithBackend replaces the backing provider (live web, enterprise search…).
+func (s *Server) WithBackend(backend Backend) *Server {
+	s.backend = backend
+	return s
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -115,15 +132,15 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	switch verb {
 	case "search":
-		s.handleSearch(writer, payload.Args)
+		s.handleSearch(writer, request, payload.Args)
 	case "fetch":
-		s.handleFetch(writer, payload.Args)
+		s.handleFetch(writer, request, payload.Args)
 	default:
 		writeError(writer, http.StatusBadRequest, "unknown action: "+payload.Action)
 	}
 }
 
-func (s *Server) handleSearch(writer http.ResponseWriter, raw json.RawMessage) {
+func (s *Server) handleSearch(writer http.ResponseWriter, request *http.Request, raw json.RawMessage) {
 	var args struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit,omitempty"`
@@ -135,11 +152,15 @@ func (s *Server) handleSearch(writer http.ResponseWriter, raw json.RawMessage) {
 	if args.Limit <= 0 || args.Limit > 10 {
 		args.Limit = 8
 	}
-	hits := rank(s.corpus, tokenize(args.Query), args.Limit)
+	hits, err := s.backend.Search(request.Context(), args.Query, args.Limit)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "search backend: "+err.Error())
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"query": args.Query, "results": hits})
 }
 
-func (s *Server) handleFetch(writer http.ResponseWriter, raw json.RawMessage) {
+func (s *Server) handleFetch(writer http.ResponseWriter, request *http.Request, raw json.RawMessage) {
 	var args struct {
 		URL string `json:"url"`
 	}
@@ -147,32 +168,51 @@ func (s *Server) handleFetch(writer http.ResponseWriter, raw json.RawMessage) {
 		writeError(writer, http.StatusBadRequest, "url is required")
 		return
 	}
-	// The v1 corpus is an explicit fetch allowlist: known documents are
-	// served offline (their hostnames do not resolve on purpose). Anything
-	// else must pass the SSRF policy before we even attempt a lookup.
-	var matched *Document
-	for index := range s.corpus {
-		if sameDocument(s.corpus[index].URL, args.URL) {
-			matched = &s.corpus[index]
-			break
-		}
-	}
-	if matched == nil {
-		if reason := rejectUnsafeURL(args.URL); reason != "" {
-			writeError(writer, http.StatusForbidden, "blocked by fetch policy: "+reason)
-			return
-		}
-		writeError(writer, http.StatusNotFound, "document not in corpus: "+args.URL)
-		return
-	}
 	if s.shouldFailFetch(args.URL) {
 		writeError(writer, http.StatusInternalServerError, "simulated upstream failure")
 		return
 	}
-	writeJSON(writer, http.StatusOK, FetchResult{
-		SourceID: matched.SourceID, Title: matched.Title, URL: matched.URL,
-		Content: matched.Content, FetchedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	result, err := s.backend.Fetch(request.Context(), args.URL)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "fetch backend: "+err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+// corpusBackend is the deterministic offline provider: ranked search over
+// the embedded corpus plus an allowlisted fetch of exactly those documents.
+type corpusBackend struct {
+	documents []Document
+}
+
+func newCorpusBackend(documents []Document) *corpusBackend {
+	return &corpusBackend{documents: documents}
+}
+
+// Search ranks the corpus for the query tokens.
+func (c *corpusBackend) Search(_ context.Context, query string, limit int) ([]SearchHit, error) {
+	return rank(c.documents, tokenize(query), limit), nil
+}
+
+// Fetch serves one known document. The corpus is an explicit fetch
+// allowlist: known documents are served offline (their hostnames do not
+// resolve on purpose); anything else must pass the SSRF policy before we
+// even attempt a lookup.
+func (c *corpusBackend) Fetch(_ context.Context, target string) (*FetchResult, error) {
+	for index := range c.documents {
+		if sameDocument(c.documents[index].URL, target) {
+			matched := &c.documents[index]
+			return &FetchResult{
+				SourceID: matched.SourceID, Title: matched.Title, URL: matched.URL,
+				Content: matched.Content, FetchedAt: time.Now().UTC().Format(time.RFC3339),
+			}, nil
+		}
+	}
+	if reason := rejectUnsafeURL(target); reason != "" {
+		return nil, fmt.Errorf("blocked by fetch policy: %s", reason)
+	}
+	return nil, fmt.Errorf("document not in corpus: %s", target)
 }
 
 // InjectFetchFailures fails the next count fetches matching token.

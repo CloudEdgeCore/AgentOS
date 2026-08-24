@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -453,6 +454,177 @@ func mustDecodeMemory(t *testing.T, h *harness, id fmt.Stringer, leaf, key strin
 }
 
 // -- generic helpers ---------------------------------------------------------
+
+// liveMetrics mirrors the observation set of implementation-plan §5: one
+// JSON document per live research run, written next to the test log.
+type liveMetrics struct {
+	WorkflowID           string  `json:"workflowId"`
+	Questions            int     `json:"questions"`
+	Sources              int     `json:"sources"`
+	UniqueDomains        int     `json:"uniqueDomains"`
+	EvidenceCount        int     `json:"evidenceCount"`
+	GroundedEvidenceRate float64 `json:"groundedEvidenceRate"`
+	CitationCoverage     float64 `json:"citationCoverage"`
+	UnsupportedCitations int     `json:"unsupportedCitations"`
+	Retries              int     `json:"retries"`
+	InsufficientEvidence bool    `json:"insufficientEvidence"`
+	CriticRounds         int     `json:"criticRounds"`
+	ModelCalls           int     `json:"modelCalls"`
+	ModelFailures        int     `json:"modelFailures"`
+	ToolCalls            int     `json:"toolCalls"`
+	RecoveredAttempts    int     `json:"recoveredAttempts"`
+	Tokens               int64   `json:"tokens"`
+	CostUSD              float64 `json:"costUsd"`
+	DurationSeconds      float64 `json:"durationSeconds"`
+}
+
+// collectLiveMetrics aggregates run evidence straight from the durable
+// store so live and deterministic runs report identically.
+func (h *harness) collectLiveMetrics(id uuid.UUID, started time.Time) liveMetrics {
+	h.t.Helper()
+	ctx := context.Background()
+	metrics := liveMetrics{WorkflowID: id.String(), DurationSeconds: time.Since(started).Seconds()}
+
+	evidenceJSON := memoryContentsJoined(h.t, h, id, "evidence")
+	sourcesJSON := memoryContentsJoined(h.t, h, id, "sources")
+	metrics.EvidenceCount = strings.Count(evidenceJSON, `"claimId"`)
+	grounded := strings.Count(evidenceJSON, `"grounded":true`)
+	if metrics.EvidenceCount > 0 {
+		metrics.GroundedEvidenceRate = float64(grounded) / float64(metrics.EvidenceCount)
+	}
+	metrics.Sources = strings.Count(sourcesJSON, `"url"`)
+
+	domains := map[string]bool{}
+	for _, raw := range strings.Split(sourcesJSON+evidenceJSON, `"url":"`) {
+		if len(raw) == 0 {
+			continue
+		}
+		end := strings.IndexByte(raw, '"')
+		if end < 0 {
+			continue
+		}
+		parsed, err := url.Parse("https://" + strings.TrimRight(raw[:end+1], `",`))
+		if err != nil {
+			continue
+		}
+		if host := parsed.Hostname(); host != "" && host != "corpus.agentos.dev" {
+			domains[host] = true
+		}
+	}
+	metrics.UniqueDomains = len(domains)
+
+	var plan struct {
+		Questions []json.RawMessage `json:"questions"`
+	}
+	mustDecodeMemory(h.t, h, id, "analysis", "plan", &plan)
+	metrics.Questions = len(plan.Questions)
+
+	var validation struct {
+		CitationCoverage     float64 `json:"citationCoverage"`
+		UnsupportedClaims    int     `json:"unsupportedClaims"`
+		Retries              int     `json:"retries"`
+		InsufficientEvidence bool    `json:"insufficientEvidence"`
+	}
+	mustDecodeMemory(h.t, h, id, "report", "validation", &validation)
+	metrics.CitationCoverage = validation.CitationCoverage
+	metrics.UnsupportedCitations = validation.UnsupportedClaims
+	metrics.Retries = validation.Retries
+	metrics.InsufficientEvidence = validation.InsufficientEvidence
+
+	scans := []struct {
+		query  string
+		target *int
+	}{
+		{`SELECT COUNT(DISTINCT name) FROM workflow_steps WHERE workflow_id = $1 AND name LIKE 'critic-r%' AND phase = 'SUCCEEDED'`, &metrics.CriticRounds},
+		{`SELECT COUNT(*) FROM model_calls mc JOIN tasks t ON t.id = mc.task_id WHERE t.workflow_id = $1 AND mc.status = 'COMPLETED'`, &metrics.ModelCalls},
+		{`SELECT COUNT(*) FROM model_calls mc JOIN tasks t ON t.id = mc.task_id WHERE t.workflow_id = $1 AND mc.status = 'FAILED'`, &metrics.ModelFailures},
+		{`SELECT COUNT(*) FROM tool_calls tc JOIN tasks t ON t.id = tc.task_id WHERE t.workflow_id = $1`, &metrics.ToolCalls},
+		{`SELECT COUNT(*) FROM attempts a JOIN runs r ON r.id = a.run_id WHERE r.task_id IN (SELECT id FROM tasks WHERE workflow_id = $1) AND a.ordinal >= 2`, &metrics.RecoveredAttempts},
+	}
+	for _, scan := range scans {
+		if err := h.pool.QueryRow(ctx, scan.query, id).Scan(scan.target); err != nil {
+			h.t.Fatalf("metric query: %v", err)
+		}
+	}
+	if err := h.pool.QueryRow(ctx, `SELECT
+			COALESCE(SUM(input_tokens + output_tokens), 0), COALESCE(SUM(cost_usd), 0)
+			FROM model_calls mc JOIN tasks t ON t.id = mc.task_id
+			WHERE t.workflow_id = $1 AND mc.status = 'COMPLETED'`, id).Scan(&metrics.Tokens, &metrics.CostUSD); err != nil {
+		h.t.Fatalf("usage query: %v", err)
+	}
+	return metrics
+}
+
+func requireLiveModelEnv(t *testing.T) {
+	t.Helper()
+	if os.Getenv("AGENTOS_RESEARCH_LIVE") != "1" {
+		t.Skip("set AGENTOS_RESEARCH_LIVE=1 with AGENTOS_RESEARCH_MODEL_BASE_URL/KEY to run the live-model acceptance")
+	}
+}
+
+func TestResearchWorkflowLiveModel(t *testing.T) {
+	requireLiveModelEnv(t)
+	started := time.Now()
+	h := newHarness(t, "live-model", nil)
+	id, err := h.createResearch("Summarize how agent runtime control planes evolved between 2023 and 2025")
+	if err != nil {
+		t.Fatalf("create research: %v", err)
+	}
+	workflow := h.requireCompleted(id, settleTimeout+time.Minute)
+
+	var validation struct {
+		CitationCoverage  float64 `json:"citationCoverage"`
+		UnsupportedClaims int     `json:"unsupportedClaims"`
+	}
+	mustDecodeMemory(t, h, id, "report", "validation", &validation)
+	if validation.UnsupportedClaims != 0 || validation.CitationCoverage < 0.90 {
+		t.Fatalf("live acceptance gate failed: coverage=%.2f unsupported=%d",
+			validation.CitationCoverage, validation.UnsupportedClaims)
+	}
+	evidenceJSON := memoryContentsJoined(t, h, id, "evidence")
+	if strings.Contains(evidenceJSON, `"grounded":false`) {
+		t.Fatal("ungrounded claim persisted in live run")
+	}
+	metrics := h.collectLiveMetrics(id, started)
+	encoded, _ := json.MarshalIndent(metrics, "", " ")
+	t.Logf("LIVE MODEL METRICS %s\n%s", workflow.Status, encoded)
+}
+
+func TestResearchWorkflowLiveFull(t *testing.T) {
+	requireLiveModelEnv(t)
+	if os.Getenv("AGENTOS_RESEARCH_LIVE_WEB") != "1" {
+		t.Skip("set AGENTOS_RESEARCH_LIVE_WEB=1 with AGENTOS_RESEARCH_SEARCH_PROVIDER/KEY for full live research")
+	}
+	started := time.Now()
+	goal := strings.TrimSpace(os.Getenv("AGENTOS_RESEARCH_LIVE_GOAL"))
+	if goal == "" {
+		t.Fatal("set AGENTOS_RESEARCH_LIVE_GOAL with a real research question")
+	}
+	h := newHarness(t, "live-full", nil)
+	id, err := h.createResearch(goal)
+	if err != nil {
+		t.Fatalf("create research: %v", err)
+	}
+	h.requireCompleted(id, settleTimeout+4*time.Minute)
+
+	metrics := h.collectLiveMetrics(id, started)
+	// Acceptance gates from implementation plan §5.
+	if metrics.GroundedEvidenceRate != 1 {
+		t.Fatalf("grounded evidence rate %.3f < 1.0", metrics.GroundedEvidenceRate)
+	}
+	if metrics.UnsupportedCitations != 0 || metrics.CitationCoverage < 0.90 {
+		t.Fatalf("citation gates failed: coverage=%.2f unsupported=%d",
+			metrics.CitationCoverage, metrics.UnsupportedCitations)
+	}
+	if metrics.UniqueDomains < 3 {
+		t.Fatalf("unique domains %d < 3", metrics.UniqueDomains)
+	}
+	if metrics.InsufficientEvidence {
+		t.Fatal("live run must not end INSUFFICIENT_EVIDENCE")
+	}
+	encoded, _ := json.MarshalIndent(metrics, "", " ")
+	t.Logf("LIVE FULL METRICS\n%s", encoded)
+}
 
 func extractOutput(summary json.RawMessage) string {
 	var document map[string]json.RawMessage

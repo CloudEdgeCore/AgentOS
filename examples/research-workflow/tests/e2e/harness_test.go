@@ -16,11 +16,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	research "github.com/CloudEdgeCore/AgentOS/examples/research-workflow/runtime"
 	webtools "github.com/CloudEdgeCore/AgentOS/examples/research-workflow/tools/webtools"
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
@@ -126,6 +128,27 @@ type harness struct {
 	loopCtx   context.Context
 	workerMu  sync.Mutex
 	workers   map[string]context.CancelFunc
+	models    research.Models // logical model refs active for this run
+	liveModel bool
+	liveWeb   bool
+	schema    string
+}
+
+// envOr returns the environment value or the fallback when unset/empty.
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func mustUSD(t *testing.T, value string) float64 {
+	t.Helper()
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		t.Fatalf("parse usd %q: %v", value, err)
+	}
+	return parsed
 }
 
 func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
@@ -177,7 +200,25 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	if tune != nil {
 		tune(scenarioState)
 	}
-	h := &harness{t: t, pool: pool, store: store, provider: &scriptedProvider{scenario: scenarioState}}
+	h := &harness{t: t, pool: pool, store: store, provider: &scriptedProvider{scenario: scenarioState}, schema: schema}
+
+	// Live-mode detection (roadmap P0/P1): AGENTOS_RESEARCH_LIVE=1 routes
+	// model calls to a real OpenAI-compatible provider; AGENTOS_RESEARCH_LIVE_WEB=1
+	// swaps the deterministic corpus for real internet search + fetch.
+	h.models = research.Models{Fast: fakeModelRef, Reader: fakeModelRef, Reasoning: fakeModelRef}
+	liveModel := os.Getenv("AGENTOS_RESEARCH_LIVE") == "1"
+	if liveModel {
+		if strings.TrimSpace(os.Getenv("AGENTOS_RESEARCH_MODEL_BASE_URL")) == "" {
+			t.Fatalf("AGENTOS_RESEARCH_LIVE=1 requires AGENTOS_RESEARCH_MODEL_BASE_URL")
+		}
+		h.liveModel = true
+		h.models = research.Models{
+			Fast:      "research/fast",
+			Reader:    "research/reader",
+			Reasoning: "research/reasoning",
+		}
+	}
+	h.liveWeb = os.Getenv("AGENTOS_RESEARCH_LIVE_WEB") == "1"
 
 	providerListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -188,6 +229,23 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	t.Cleanup(func() { _ = providerServer.Close() })
 
 	h.webtools = webtools.New(webtools.Corpus())
+	if h.liveWeb {
+		searchKey := os.Getenv("AGENTOS_RESEARCH_SEARCH_KEY")
+		var search webtools.SearchProvider
+		switch strings.ToLower(envOr("AGENTOS_RESEARCH_SEARCH_PROVIDER", "brave")) {
+		case "brave":
+			search = &webtools.BraveSearch{APIKey: searchKey}
+		case "bing":
+			search = &webtools.BingSearch{APIKey: searchKey}
+		default:
+			t.Fatalf("unknown AGENTOS_RESEARCH_SEARCH_PROVIDER %q (want brave or bing)",
+				os.Getenv("AGENTOS_RESEARCH_SEARCH_PROVIDER"))
+		}
+		h.webtools = h.webtools.WithBackend(&webtools.CompositeBackend{
+			SearchProvider: search,
+			FetchProvider:  &webtools.LiveFetch{},
+		})
+	}
 	toolListener, toolClient, toolEndpoint, err := webtools.SelfSignedTLSListener(h.webtools)
 	if err != nil {
 		t.Fatalf("webtools listener: %v", err)
@@ -199,9 +257,11 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	h.webtools.CountFetches(h.fetches.add)
 
 	policyEngine, err := policy.New(policy.TenantPolicies{researchTenant: {
-		MaxPriority:   100,
-		AllowedTools:  []string{"web.search", "web.fetch"},
-		AllowedModels: []string{fakeModelRef},
+		MaxPriority:  100,
+		AllowedTools: []string{"web.search", "web.fetch"},
+		AllowedModels: []string{
+			h.models.Fast, h.models.Reader, h.models.Reasoning,
+		},
 	}})
 	if err != nil {
 		t.Fatalf("policy engine: %v", err)
@@ -221,6 +281,28 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 		APIKey: "research-provider-key", TimeoutMs: 30000, MaxAttempts: 2,
 	}); err != nil {
 		t.Fatalf("register provider: %v", err)
+	}
+	if h.liveModel {
+		baseURL := strings.TrimSpace(os.Getenv("AGENTOS_RESEARCH_MODEL_BASE_URL"))
+		providerName := envOr("AGENTOS_RESEARCH_MODEL_PROVIDER", "openai")
+		if err := providerRegistry.Register(provider.Config{
+			Name: providerName, BaseURL: baseURL, APIKey: os.Getenv("AGENTOS_RESEARCH_MODEL_KEY"),
+			TimeoutMs: 180000, MaxAttempts: 2,
+		}); err != nil {
+			t.Fatalf("register live provider: %v", err)
+		}
+		routes := map[string]string{
+			"research/fast":      envOr("AGENTOS_RESEARCH_MODEL_FAST", "gpt-4o-mini"),
+			"research/reader":    envOr("AGENTOS_RESEARCH_MODEL_READER", envOr("AGENTOS_RESEARCH_MODEL_FAST", "gpt-4o-mini")),
+			"research/reasoning": envOr("AGENTOS_RESEARCH_MODEL_REASONING", "gpt-4o"),
+		}
+		for route, wireModel := range routes {
+			if err := providerRegistry.RegisterRoute(provider.Route{
+				ModelRef: route, Provider: providerName, Model: wireModel,
+			}); err != nil {
+				t.Fatalf("register live route %s: %v", route, err)
+			}
+		}
 	}
 	authorizer, err := capability.NewAuthorizer(store)
 	if err != nil {
@@ -270,6 +352,26 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	}); err != nil {
 		t.Fatalf("model descriptor: %v", err)
 	}
+	if h.liveModel {
+		// Logical-tier descriptors: the gateway resolves the descriptor from
+		// the logical ref ("research/fast" → provider=research model=fast).
+		for tier, descriptor := range map[string]struct {
+			input, output string
+		}{
+			"fast":      {"0.5", "1.5"},
+			"reader":    {"0.5", "1.5"},
+			"reasoning": {"3", "12"},
+		} {
+			if _, err := store.RegisterModelDescriptor(ctx, kernelstore.RegisterModelDescriptorInput{
+				TenantID: researchTenant, Provider: "research", ModelName: tier, SupportsStreaming: true,
+				InputPriceMicroUSDPerMillion:  money.MustFromUSD(mustUSD(t, descriptor.input)),
+				OutputPriceMicroUSDPerMillion: money.MustFromUSD(mustUSD(t, descriptor.output)),
+				PriceRevision:                 "live-p1",
+			}); err != nil {
+				t.Fatalf("live model descriptor %s: %v", tier, err)
+			}
+		}
+	}
 	for _, descriptor := range []struct {
 		name    string
 		pattern string
@@ -308,7 +410,7 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	if err != nil {
 		t.Fatalf("agent listen: %v", err)
 	}
-	agentHandler, err := newAgentHandler(h.mcpURL)
+	agentHandler, err := newAgentHandler(h.mcpURL, h.models)
 	if err != nil {
 		t.Fatalf("agent host: %v", err)
 	}

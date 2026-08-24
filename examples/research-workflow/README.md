@@ -136,6 +136,49 @@ examples/research-workflow/scripts/cleanup.sh
 The example runtime (`runtime/cmd`) serves all roles on one endpoint;
 `config/runtime-bindings.json` maps each published ref to it.
 
+## Live mode: real models and real web (roadmap P0/P1/P2)
+
+The deterministic stack stays the CI default. Two independent switches
+upgrade fidelity without touching the agents — they keep calling the same
+logical tiers (`research-fast` / `research-reader` / `research-reasoning`
+manifest placeholders) and the same `web.search@1.0.0` / `web.fetch@1.0.0`
+tools:
+
+```bash
+# P0 — real model (OpenAI-compatible / vLLM / Qwen / DeepSeek / GLM …)
+AGENTOS_RESEARCH_LIVE=1
+AGENTOS_RESEARCH_MODEL_BASE_URL=https://api.example.com/v1
+AGENTOS_RESEARCH_MODEL_KEY=sk-...
+AGENTOS_RESEARCH_MODEL_PROVIDER=openai            # registry name, default openai
+AGENTOS_RESEARCH_MODEL_FAST=gpt-4o-mini           # wire model per tier (optional)
+AGENTOS_RESEARCH_MODEL_READER=gpt-4o-mini
+AGENTOS_RESEARCH_MODEL_REASONING=gpt-4o
+
+# P1 — real internet
+AGENTOS_RESEARCH_LIVE_WEB=1
+AGENTOS_RESEARCH_SEARCH_PROVIDER=brave            # brave | bing
+AGENTOS_RESEARCH_SEARCH_KEY=...
+```
+
+Live backends: `webtools.BraveSearch` / `webtools.BingSearch` provider
+adapters behind one `Backend` interface, and `webtools.LiveFetch` — a
+hardened fetcher (SSRF policy incl. redirect re-checks, ≤5 hops, 10 MiB cap,
+20 s timeout, content-type allowlist, HTML→readable-text, final URL +
+stable source id). The deterministic corpus remains an in-process fallback.
+
+Gated acceptance tests (skip unless their env is present):
+
+| Test | Gate | Asserts |
+|---|---|---|
+| `TestResearchWorkflowLiveModel` | `AGENTOS_RESEARCH_LIVE=1` | SUCCEEDED, coverage ≥ 0.90, zero unsupported, all evidence grounded; prints §5 metrics JSON |
+| `TestResearchWorkflowLiveFull` | + `LIVE_WEB=1`, `…_GOAL="…"` | + grounded rate = 100 %, unique domains ≥ 3, no INSUFFICIENT_EVIDENCE |
+
+Metrics (workflowId, questions, sources, uniqueDomains, evidenceCount,
+groundedEvidenceRate, citationCoverage, unsupportedCitations, criticRounds,
+modelCalls/failures, toolCalls, recoveredAttempts, tokens, costUsd,
+duration) are aggregated from the durable store and logged with the run —
+identical shape for deterministic and live executions.
+
 ## End-to-end test suite
 
 Requires PostgreSQL at `AGENTOS_TEST_DATABASE_URL`. Each scenario gets its
@@ -159,6 +202,7 @@ go test -tags integration -count=1 -timeout 12m \
 | `ModelFailure` | provider 429 absorbed by bounded provider retry |
 | `Recovery` | SIGKILL-equivalent of both workers mid-run; lease expiry + recovery + restarted instances complete the workflow |
 | `BudgetStop` | undersized budget settles instead of running unbounded |
+| `LiveModel` / `LiveFull` (env-gated) | real-model and full live-internet acceptance with §5 metrics (see Live mode above) |
 | `100Concurrent` (gate `AGENTOS_RESEARCH_SCALE=1`) | 100 simultaneous workflows all reach SUCCEEDED |
 
 Kernel-level regression tests for the retry semantics live in

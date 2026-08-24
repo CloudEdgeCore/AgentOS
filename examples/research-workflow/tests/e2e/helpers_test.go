@@ -63,10 +63,10 @@ func (l *loggedRuntime) Restore(ctx context.Context, request agent.RestoreReques
 }
 
 // newAgentHandler hosts the multi-role runtime behind the Runtime Interface.
-func newAgentHandler(mcpURL string) (http.Handler, error) {
-	host, err := agent.NewHost(&loggedRuntime{inner: research.NewRuntime(mcpURL, research.Models{
-		Fast: fakeModelRef, Reader: fakeModelRef, Reasoning: fakeModelRef,
-	})}, agent.HostOptions{Adapter: "research-e2e", MaxConcurrent: 64})
+// models carries the ACTIVE logical model refs (deterministic fake refs or
+// live logical routes).
+func newAgentHandler(mcpURL string, models research.Models) (http.Handler, error) {
+	host, err := agent.NewHost(&loggedRuntime{inner: research.NewRuntime(mcpURL, models)}, agent.HostOptions{Adapter: "research-e2e", MaxConcurrent: 64})
 	if err != nil {
 		return nil, err
 	}
@@ -90,9 +90,9 @@ func (h *harness) publishAgents() {
 			h.t.Fatalf("read manifest %s: %v", name, err)
 		}
 		rendered := strings.NewReplacer(
-			"__MODEL_FAST__", fakeModelRef,
-			"__MODEL_READER__", fakeModelRef,
-			"__MODEL_REASONING__", fakeModelRef,
+			"__MODEL_FAST__", h.models.Fast,
+			"__MODEL_READER__", h.models.Reader,
+			"__MODEL_REASONING__", h.models.Reasoning,
 		).Replace(string(raw))
 		var document struct {
 			Metadata struct {
