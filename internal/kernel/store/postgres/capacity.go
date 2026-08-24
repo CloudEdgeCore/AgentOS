@@ -45,10 +45,22 @@ func (s *Store) reserveRuntimeCapacity(ctx context.Context, tx pgx.Tx, in kernel
 		return fmt.Errorf("%w: pool=%s cpu=%d memory=%d llm=%d", kernelstore.ErrCapacityExhausted,
 			in.RuntimePoolID, in.RequestedCPU, in.RequestedMemory, in.RequestedLLMSlots)
 	}
+	// The reservation row is task-scoped for the task's whole life
+	// (PRIMARY KEY tenant/task): a requeued task re-reserves after its
+	// previous attempt released, so the insert upgrades the released row.
 	if _, err := tx.Exec(ctx, `INSERT INTO runtime_capacity_reservations (
 		tenant_id, task_id, pool_id, cpu_millis, memory_mib, llm_slots,
 		owner_fencing_token, status, created_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', $8)`,
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', $8)
+	ON CONFLICT (tenant_id, task_id) DO UPDATE SET
+		pool_id = EXCLUDED.pool_id,
+		cpu_millis = EXCLUDED.cpu_millis,
+		memory_mib = EXCLUDED.memory_mib,
+		llm_slots = EXCLUDED.llm_slots,
+		owner_fencing_token = EXCLUDED.owner_fencing_token,
+		status = 'ACTIVE',
+		created_at = EXCLUDED.created_at,
+		released_at = NULL`,
 		in.TenantID, in.TaskID.String(), in.RuntimePoolID, in.RequestedCPU,
 		in.RequestedMemory, in.RequestedLLMSlots, in.ClaimFencingToken, now); err != nil {
 		return classify(err)

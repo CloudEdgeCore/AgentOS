@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
@@ -230,9 +232,11 @@ func invokeStatus(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrModelNotFound):
 		return status.Error(codes.NotFound, err.Error())
-	case errors.Is(err, store.ErrVersionConflict), errors.Is(err, store.ErrIdempotencyConflict):
+	case errors.Is(err, store.ErrVersionConflict), errors.Is(err, store.ErrIdempotencyConflict),
+		errors.Is(err, store.ErrInvalidTransition):
 		return status.Error(codes.Aborted, err.Error())
 	default:
+		slog.Warn("model invocation unmapped failure", "error", err.Error(), "cause", fmt.Sprintf("%+v", errors.Unwrap(err)))
 		return status.Error(codes.Internal, "model invocation failed")
 	}
 }

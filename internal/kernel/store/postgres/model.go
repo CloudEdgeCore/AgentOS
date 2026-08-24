@@ -144,6 +144,12 @@ func (s *Store) FinishModelCall(ctx context.Context, in kernelstore.FinishModelC
 		return zero, versionConflict("model call", in.ModelCallID, in.ExpectedVersion, current.ResourceVersion)
 	}
 	if !kernelstore.CanTransitionModelCall(current.Status, in.Status) {
+		// Terminal -> same terminal is an idempotent replay of an already
+		// finished invocation (duplicate delivery of the same idempotency
+		// key), not a lifecycle violation: return the recorded outcome.
+		if current.Status == in.Status {
+			return current, nil
+		}
 		return zero, fmt.Errorf("%w: model call %s -> %s", kernelstore.ErrInvalidTransition, current.Status, in.Status)
 	}
 	updated, err := scanModelCall(tx.QueryRow(ctx, `UPDATE model_calls

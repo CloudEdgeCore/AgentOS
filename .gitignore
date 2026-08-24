@@ -36,3 +36,7 @@ Thumbs.db
 # TLC scratch
 modelcheck/tla/states/
 modelcheck/tla/AgentOS_TTrace*
+
+research-e2e.log
+research-final.log
+research-scale.log

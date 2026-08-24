@@ -417,6 +417,17 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 			now, in.TenantID, run.ID.String(), attempt.ID.String(), in.FencingToken); err != nil {
 			return zero, classify(err)
 		}
+		// Terminate the run itself: a run left in RUNNING keeps claiming the
+		// runs_one_active_per_task partial unique index and blocks every
+		// future dispatch of this task (requeue or recovery alike).
+		if in.To == domain.AttemptFailed {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET phase = $1, completed_at = $2,
+				resource_version = resource_version + 1, updated_at = $2
+				WHERE tenant_id = $3 AND id = $4 AND phase = $5`,
+				domain.RunFailed, now, in.TenantID, run.ID.String(), domain.RunRunning); err != nil {
+				return zero, classify(err)
+			}
+		}
 		// v1.2: a cleanly failed attempt finalizes the task unless the
 		// workload declared a multi-attempt retryPolicy (those keep the
 		// recovery-driven requeue path). Without this, a task whose agent
@@ -426,7 +437,43 @@ func (s *Store) TransitionAttempt(ctx context.Context, in kernelstore.Transition
 		if taskErr != nil {
 			return zero, classify(taskErr)
 		}
-		if finalizesTask(task.Spec) {
+		maxAttempts := retryPolicyMaxAttempts(task.Spec)
+		// Attempt ordinals are per-run; the retry budget spans every dispatch
+		// of the task, so count all attempts ever placed for it.
+		var usedAttempts int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM attempts a
+			JOIN runs r ON r.tenant_id = a.tenant_id AND r.id = a.run_id
+			WHERE r.tenant_id = $1 AND r.task_id = $2`, in.TenantID, task.ID.String()).Scan(&usedAttempts); err != nil {
+			return zero, classify(err)
+		}
+		retriesRemain := in.To == domain.AttemptFailed && usedAttempts < maxAttempts
+		switch {
+		case retriesRemain:
+			// Requeue for a fresh dispatch: the next attempt is a brand-new
+			// run created by the standard admission/scheduling pipeline.
+			// Without this branch a multi-attempt task would sit RUNNING
+			// forever — the recovery controller only scans UNRELEASED
+			// leases, and this path just released ours.
+			if _, err := tx.Exec(ctx, `UPDATE tasks SET phase = $1, active_run_id = NULL,
+				resource_version = resource_version + 1, updated_at = $2 WHERE tenant_id = $3 AND id = $4`,
+				domain.TaskQueued, now, in.TenantID, task.ID.String()); err != nil {
+				return zero, classify(err)
+			}
+			if err := s.releaseTenantReservation(ctx, tx, task.TenantID, task.ID); err != nil {
+				return zero, err
+			}
+			if err := s.releaseRuntimeCapacity(ctx, tx, task.TenantID, task.ID, now); err != nil {
+				return zero, err
+			}
+			if err := insertEvent(ctx, tx, task.TenantID, "Task", task.ID, task.ResourceVersion+1,
+				"TaskRequeued", map[string]any{
+					"taskId": task.ID, "attemptId": attempt.ID, "attemptsUsed": usedAttempts,
+					"maxAttempts": maxAttempts, "failureCode": in.FailureCode, "trigger": "attempt." + string(in.To),
+				}, now, s.newID()); err != nil {
+				return zero, err
+			}
+		default:
+			// Retry budget exhausted (or a cancellation): finalize the task.
 			target := domain.TaskFailed
 			if in.To == domain.AttemptCancelled {
 				target = domain.TaskCancelled
@@ -952,18 +999,21 @@ func scanLease(row scanner) (kernelstore.Lease, error) {
 	return lease, nil
 }
 
-// finalizesTask reports whether a failed attempt should finalize the task:
-// workloads without an explicit multi-attempt retryPolicy run exactly one
-// attempt per task (the v1.2 default); retry budgets above one keep the
-// recovery-driven requeue semantics.
-func finalizesTask(spec []byte) bool {
+// retryPolicyMaxAttempts reports the declared per-task retry budget: the
+// v1.2 default runs exactly one attempt; budgets above one requeue the task
+// for a fresh dispatch when an attempt fails cleanly with retries left, and
+// finalize it once the budget is exhausted.
+func retryPolicyMaxAttempts(spec []byte) int {
 	var policy struct {
 		RetryPolicy struct {
 			MaxAttempts int `json:"maxAttempts"`
 		} `json:"retryPolicy"`
 	}
 	if json.Unmarshal(spec, &policy) != nil {
-		return true
+		return 1
 	}
-	return policy.RetryPolicy.MaxAttempts <= 1
+	if policy.RetryPolicy.MaxAttempts < 1 {
+		return 1
+	}
+	return policy.RetryPolicy.MaxAttempts
 }
