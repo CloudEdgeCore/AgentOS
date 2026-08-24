@@ -36,10 +36,12 @@ func TestRejectUnsafeURLMatrix(t *testing.T) {
 
 func TestLiveRedirectPolicyLimitsHops(t *testing.T) {
 	client := LiveHTTPClient()
-	target, _ := http.NewRequest(http.MethodGet, "https://public.example.com/final", nil)
+	// Public IP literals keep the SSRF re-check offline-resolvable: no DNS,
+	// no CI sandbox dependence (hostnames made this test environment-bound).
+	target, _ := http.NewRequest(http.MethodGet, "https://192.0.2.10/final", nil)
 	via := make([]*http.Request, 0, liveMaxRedirects+2)
 	for index := 0; index <= liveMaxRedirects; index++ {
-		request, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("https://public.example.com/hop%d", index), nil)
+		request, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("https://192.0.2.10/hop%d", index), nil)
 		via = append(via, request)
 		if err := client.CheckRedirect(target, via[:index]); err != nil {
 			t.Fatalf("hop %d rejected prematurely: %v", index, err)
