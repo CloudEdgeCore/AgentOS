@@ -1,6 +1,6 @@
 //go:build race
 
-package workflows
+package e2e
 
 // The P95 reconcile gate measures the orchestrator loop, not the race
 // detector. Instrumented builds inflate every store roundtrip 2-5x on
