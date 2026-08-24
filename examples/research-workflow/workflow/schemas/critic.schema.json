@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentos.dev/schemas/research/critic.schema.json",
+  "title": "CriticDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "score", "gaps"],
+  "properties": {
+    "status": { "type": "string", "enum": ["PASS", "NEEDS_MORE_RESEARCH"] },
+    "score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "gaps": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/gap" }
+    },
+    "passthrough": {
+      "type": "boolean",
+      "description": "True when this round carried an upstream PASS verdict forward without a model call."
+    }
+  },
+  "$defs": {
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gapId", "question", "severity", "suggestedQueries"],
+      "properties": {
+        "gapId": { "type": "string", "pattern": "^gap-[0-9]{3}$" },
+        "question": { "type": "string", "minLength": 8, "maxLength": 512 },
+        "severity": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH"] },
+        "suggestedQueries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": { "type": "string", "maxLength": 256 }
+        }
+      }
+    }
+  }
+}

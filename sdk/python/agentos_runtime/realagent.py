@@ -110,13 +110,17 @@ class RealAgent:
                     "role": "tool", "toolCallId": call.get("id", ""),
                     "content": json.dumps(result)[:65536],
                 })
+            # Persist confirmed external side effects before the next model
+            # turn. A worker crash after a tool succeeds must restore the
+            # tool-role message and continue reasoning without repeating the
+            # side effect. Waiting until the final answer leaves no durable
+            # recovery point during the second model invocation.
+            self._snapshot(execution_id, messages, None)
         if final is None:
             raise RuntimeError(f"no final answer within {self.max_turns} turns")
 
         memory_id = self._remember(mcp, execution_id, goal, final)
         emit("memory.written", {"id": memory_id, "namespace": self.memory_namespace})
-        with self._lock:
-            self._live.pop(execution_id, None)
         return {
             "answer": final,
             "turns": turns,
@@ -128,7 +132,14 @@ class RealAgent:
 
     def checkpoint(self, execution_id: str) -> dict[str, Any]:
         with self._lock:
-            state = dict(self._live.get(execution_id, {}))
+            state = copy.deepcopy(self._live.get(execution_id, {}))
+            # The adapter persists its final logical checkpoint after the
+            # Runtime Interface reports a terminal result. Keep the terminal
+            # snapshot alive until that read; deleting it in run() made fast
+            # executions publish an empty final checkpoint. Once delivered,
+            # release it so completed executions do not accumulate forever.
+            if state.get("final") is not None:
+                self._live.pop(execution_id, None)
         return {
             "schemaVersion": SCHEMA_VERSION,
             "state": state,

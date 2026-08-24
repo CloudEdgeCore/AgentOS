@@ -1,0 +1,98 @@
+{
+  "deadline": "__DEADLINE__",
+  "defaultTaskSpec": {
+    "priority": 50,
+    "budget": { "tokens": 40000, "costUsd": 5, "toolCalls": 40, "wallSeconds": 900 },
+    "placement": {
+      "runtimeClasses": ["adapter"],
+      "preferredClass": "adapter",
+      "region": "cn-east",
+      "cpuMillis": 250,
+      "memoryMiB": 256,
+      "workspaceBytes": 8388608,
+      "llmConcurrency": 2
+    },
+    "retryPolicy": { "maxAttempts": 3 }
+  },
+  "budget": { "maxTasks": 80, "maxTokens": 2000000, "maxCostUsd": 1000 },
+  "runtime": {
+    "dynamic": {
+      "enabled": true,
+      "maxDynamicSteps": 64,
+      "maxChildrenPerStep": 8,
+      "maxSpawnDepth": 1,
+      "maxWorkflowSteps": 96,
+      "maxSpawnTasks": 60,
+      "maxSpawnTokens": 800000,
+      "maxSpawnCostUsd": 400
+    }
+  },
+  "steps": [
+    {
+      "name": "planner",
+      "agentVersionRef": "research-planner@1.0.0",
+      "goal": "__ENVELOPE_PLANNER__"
+    },
+    {
+      "name": "analyst-r1",
+      "agentVersionRef": "research-analyst@1.0.0",
+      "goal": "__ENVELOPE_ANALYST_R1__",
+      "dependsOn": ["spawn:planner"]
+    },
+    {
+      "name": "critic-r1",
+      "agentVersionRef": "research-critic@1.0.0",
+      "goal": "__ENVELOPE_CRITIC_R1__",
+      "dependsOn": ["analyst-r1"]
+    },
+    {
+      "name": "collector-r2",
+      "agentVersionRef": "research-collector@1.0.0",
+      "goal": "__ENVELOPE_COLLECTOR_R2__",
+      "dependsOn": ["spawn:critic-r1"]
+    },
+    {
+      "name": "analyst-r2",
+      "agentVersionRef": "research-analyst@1.0.0",
+      "goal": "__ENVELOPE_ANALYST_R2__",
+      "dependsOn": ["critic-r1", "spawn:collector-r2"]
+    },
+    {
+      "name": "critic-r2",
+      "agentVersionRef": "research-critic@1.0.0",
+      "goal": "__ENVELOPE_CRITIC_R2__",
+      "dependsOn": ["analyst-r2", "critic-r1"]
+    },
+    {
+      "name": "collector-r3",
+      "agentVersionRef": "research-collector@1.0.0",
+      "goal": "__ENVELOPE_COLLECTOR_R3__",
+      "dependsOn": ["spawn:critic-r2"]
+    },
+    {
+      "name": "analyst-r3",
+      "agentVersionRef": "research-analyst@1.0.0",
+      "goal": "__ENVELOPE_ANALYST_R3__",
+      "dependsOn": ["critic-r2", "spawn:collector-r3"]
+    },
+    {
+      "name": "critic-final",
+      "agentVersionRef": "research-critic@1.0.0",
+      "goal": "__ENVELOPE_CRITIC_R3__",
+      "dependsOn": ["analyst-r3", "critic-r2"]
+    },
+    {
+      "name": "writer",
+      "agentVersionRef": "research-writer@1.0.0",
+      "goal": "__ENVELOPE_WRITER__",
+      "dependsOn": ["critic-final", "analyst-r3"]
+    },
+    {
+      "name": "citation-validator",
+      "agentVersionRef": "research-citation-validator@1.0.0",
+      "goal": "__ENVELOPE_VALIDATOR__",
+      "dependsOn": ["writer"],
+      "retry": { "maxAttempts": 4 }
+    }
+  ]
+}

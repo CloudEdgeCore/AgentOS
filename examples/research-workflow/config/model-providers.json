@@ -1,0 +1,18 @@
+{
+  "providers": [
+    {
+      "name": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "timeoutMs": 60000,
+      "maxAttempts": 2
+    }
+  ],
+  "routes": [
+    {
+      "modelRef": "openai/gpt-4o-mini",
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    }
+  ]
+}

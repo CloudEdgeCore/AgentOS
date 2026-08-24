@@ -1,0 +1,20 @@
+{
+  "apiVersion": "agentos.dev/v1",
+  "kind": "AgentVersion",
+  "metadata": { "name": "research-planner", "version": "1.0.0", "namespace": "default" },
+  "spec": {
+    "runtimeClassPolicy": { "allowed": ["adapter"], "preferred": "adapter" },
+    "lifecycle": { "maxAttempts": 4 },
+    "runtimes": [{ "class": "adapter", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
+    "capabilities": {
+      "tools": [],
+      "models": ["__MODEL_REASONING__"],
+      "memory": ["research/*"],
+      "secrets": [],
+      "spawnTasks": true,
+      "childAgents": ["research-search@1.0.0"]
+    },
+    "budget": { "tokens": 20000, "costUsd": 3.00, "toolCalls": 12, "wallSeconds": 600 },
+    "checkpoint": { "mode": "logical", "schemaVersion": "research/v1", "intervalSeconds": 30 }
+  }
+}

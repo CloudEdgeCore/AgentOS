@@ -1,0 +1,28 @@
+[
+  {
+    "id": "pool-research-a",
+    "tenantIds": ["research-tenant"],
+    "runtimeClass": "adapter",
+    "runtimeInstanceId": "research-worker-00",
+    "region": "cn-east",
+    "dataResidency": "cn",
+    "ready": true,
+    "availableCpuMillis": 8000,
+    "availableMemoryMiB": 16384,
+    "availableLlmSlots": 32,
+    "artifactRegions": ["cn-east"]
+  },
+  {
+    "id": "pool-research-b",
+    "tenantIds": ["research-tenant"],
+    "runtimeClass": "adapter",
+    "runtimeInstanceId": "research-worker-01",
+    "region": "cn-east",
+    "dataResidency": "cn",
+    "ready": true,
+    "availableCpuMillis": 8000,
+    "availableMemoryMiB": 16384,
+    "availableLlmSlots": 32,
+    "artifactRegions": ["cn-east"]
+  }
+]

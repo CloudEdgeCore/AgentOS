@@ -1,0 +1,18 @@
+{
+  "apiVersion": "agentos.dev/v1",
+  "kind": "AgentVersion",
+  "metadata": { "name": "research-search", "version": "1.0.0", "namespace": "default" },
+  "spec": {
+    "runtimeClassPolicy": { "allowed": ["adapter"], "preferred": "adapter" },
+    "lifecycle": { "maxAttempts": 4 },
+    "runtimes": [{ "class": "adapter", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
+    "capabilities": {
+      "tools": ["web.search@1.0.0"],
+      "models": ["__MODEL_FAST__"],
+      "memory": ["research/*"],
+      "secrets": []
+    },
+    "budget": { "tokens": 6000, "costUsd": 0.90, "toolCalls": 16, "wallSeconds": 300 },
+    "checkpoint": { "mode": "logical", "schemaVersion": "research/v1", "intervalSeconds": 30 }
+  }
+}

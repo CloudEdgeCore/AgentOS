@@ -14,6 +14,7 @@ import (
 
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
 	"github.com/google/uuid"
@@ -70,14 +71,18 @@ type fakeControl struct {
 	completed   *runtimev1.CompleteAttemptRequest
 	failure     string
 	checkpoints int
+	cancelled   bool
 }
 
 type conflictControl struct {
 	*fakeControl
-	mu                 sync.Mutex
-	failureConflicts   int
-	failureTransitions int
-	refreshPhase       string
+	mu                  sync.Mutex
+	failureConflicts    int
+	failureTransitions  int
+	refreshPhase        string
+	transitionConflicts map[runtimev1.AttemptPhase]int
+	transitionCalls     map[runtimev1.AttemptPhase]int
+	transitionErrors    map[runtimev1.AttemptPhase]error
 }
 
 func (c *conflictControl) GetAssignment(context.Context, *runtimev1.GetAssignmentRequest, ...grpc.CallOption) (*runtimev1.GetAssignmentResponse, error) {
@@ -92,6 +97,17 @@ func (c *conflictControl) GetAssignment(context.Context, *runtimev1.GetAssignmen
 func (c *conflictControl) TransitionAttempt(ctx context.Context, request *runtimev1.TransitionAttemptRequest, options ...grpc.CallOption) (*runtimev1.TransitionAttemptResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.transitionCalls != nil {
+		c.transitionCalls[request.GetTargetPhase()]++
+	}
+	if err := c.transitionErrors[request.GetTargetPhase()]; err != nil {
+		delete(c.transitionErrors, request.GetTargetPhase())
+		return nil, err
+	}
+	if c.transitionConflicts[request.GetTargetPhase()] > 0 {
+		c.transitionConflicts[request.GetTargetPhase()]--
+		return nil, status.Error(codes.Aborted, "attempt version changed")
+	}
 	if request.GetTargetPhase() == runtimev1.AttemptPhase_ATTEMPT_PHASE_FAILED {
 		c.failureTransitions++
 		if c.failureConflicts > 0 {
@@ -100,6 +116,63 @@ func (c *conflictControl) TransitionAttempt(ctx context.Context, request *runtim
 		}
 	}
 	return c.fakeControl.TransitionAttempt(ctx, request, options...)
+}
+
+func TestLifecycleTransitionRefreshesAndRetriesExpectedPredecessor(t *testing.T) {
+	identity := &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1}
+	base := &fakeControl{version: 4, assignment: &runtimev1.Assignment{
+		Identity: identity, AttemptVersion: 4, Phase: string(domain.AttemptStarting),
+	}}
+	control := &conflictControl{
+		fakeControl: base, refreshPhase: string(domain.AttemptStarting),
+		transitionConflicts: map[runtimev1.AttemptPhase]int{runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING: 1},
+		transitionCalls:     map[runtimev1.AttemptPhase]int{},
+	}
+	version, proceed, err := (&Worker{control: control}).advanceAttempt(context.Background(), identity, 3,
+		domain.AttemptStarting, domain.AttemptRunning, runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING)
+	if err != nil || !proceed {
+		t.Fatalf("version=%d proceed=%v error=%v", version, proceed, err)
+	}
+	if version != 5 || control.transitionCalls[runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING] != 2 {
+		t.Fatalf("version=%d transitions=%d, want refreshed retry to version 5", version,
+			control.transitionCalls[runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING])
+	}
+}
+
+func TestLifecycleTransitionAcknowledgesCancellation(t *testing.T) {
+	identity := &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1}
+	base := &fakeControl{version: 4, assignment: &runtimev1.Assignment{
+		Identity: identity, AttemptVersion: 4, Phase: string(domain.AttemptCancelRequested),
+	}}
+	control := &conflictControl{
+		fakeControl: base, refreshPhase: string(domain.AttemptCancelRequested),
+		transitionConflicts: map[runtimev1.AttemptPhase]int{runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING: 1},
+		transitionCalls:     map[runtimev1.AttemptPhase]int{},
+	}
+	version, proceed, err := (&Worker{control: control}).advanceAttempt(context.Background(), identity, 3,
+		domain.AttemptStarting, domain.AttemptRunning, runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING)
+	if err != nil || proceed || version != 4 || !base.cancelled {
+		t.Fatalf("version=%d proceed=%v error=%v, cancellation must win", version, proceed, err)
+	}
+	if control.transitionCalls[runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING] != 1 {
+		t.Fatalf("transitions=%d, want no retry after cancellation",
+			control.transitionCalls[runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING])
+	}
+}
+
+func TestLifecycleTransitionDropsFencedAssignmentWithoutStoppingWorker(t *testing.T) {
+	identity := &runtimev1.AttemptIdentity{TenantId: "tenant-a", AttemptId: uuid.NewString(), FencingToken: 1}
+	control := &conflictControl{
+		fakeControl: &fakeControl{version: 2},
+		transitionErrors: map[runtimev1.AttemptPhase]error{
+			runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING: status.Error(codes.PermissionDenied, "lease expired"),
+		},
+	}
+	version, proceed, err := (&Worker{control: control}).advanceAttempt(context.Background(), identity, 2,
+		domain.AttemptStarting, domain.AttemptRunning, runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING)
+	if err != nil || proceed || version != 0 {
+		t.Fatalf("version=%d proceed=%v error=%v, fenced assignment must be dropped", version, proceed, err)
+	}
 }
 
 func (f *fakeControl) PollAssignment(context.Context, *runtimev1.PollAssignmentRequest, ...grpc.CallOption) (*runtimev1.PollAssignmentResponse, error) {
@@ -128,6 +201,7 @@ func (f *fakeControl) CompleteAttempt(_ context.Context, request *runtimev1.Comp
 	return &runtimev1.CompleteAttemptResponse{AttemptVersion: f.version + 1}, nil
 }
 func (f *fakeControl) AcknowledgeCancellation(context.Context, *runtimev1.AcknowledgeCancellationRequest, ...grpc.CallOption) (*runtimev1.AcknowledgeCancellationResponse, error) {
+	f.cancelled = true
 	return &runtimev1.AcknowledgeCancellationResponse{}, nil
 }
 

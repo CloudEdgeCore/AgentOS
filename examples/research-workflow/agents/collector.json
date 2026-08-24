@@ -1,0 +1,20 @@
+{
+  "apiVersion": "agentos.dev/v1",
+  "kind": "AgentVersion",
+  "metadata": { "name": "research-collector", "version": "1.0.0", "namespace": "default" },
+  "spec": {
+    "runtimeClassPolicy": { "allowed": ["adapter"], "preferred": "adapter" },
+    "lifecycle": { "maxAttempts": 4 },
+    "runtimes": [{ "class": "adapter", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
+    "capabilities": {
+      "tools": [],
+      "models": [],
+      "memory": ["research/*"],
+      "secrets": [],
+      "spawnTasks": true,
+      "childAgents": ["research-reader@1.0.0"]
+    },
+    "budget": { "tokens": 1000, "costUsd": 0.15, "toolCalls": 40, "wallSeconds": 300 },
+    "checkpoint": { "mode": "logical", "schemaVersion": "research/v1", "intervalSeconds": 30 }
+  }
+}

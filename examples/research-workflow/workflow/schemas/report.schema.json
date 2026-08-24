@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentos.dev/schemas/research/report.schema.json",
+  "title": "FinalReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "summary", "sections", "citations"],
+  "properties": {
+    "title": { "type": "string", "minLength": 4, "maxLength": 256 },
+    "summary": { "type": "string", "minLength": 16, "maxLength": 4096 },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["heading", "body"],
+        "properties": {
+          "heading": { "type": "string", "maxLength": 256 },
+          "body": { "type": "string", "maxLength": 32768 }
+        }
+      }
+    },
+    "citations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/citation" }
+    }
+  },
+  "$defs": {
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marker", "evidenceId", "sourceId", "quote"],
+      "properties": {
+        "marker": { "type": "string", "pattern": "^\\[[0-9]+\\]$" },
+        "evidenceId": { "type": "string" },
+        "sourceId": { "type": "string" },
+        "quote": { "type": "string", "maxLength": 1024 }
+      }
+    }
+  }
+}

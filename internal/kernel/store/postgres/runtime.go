@@ -91,6 +91,25 @@ func (s *Store) RequestTaskCancellation(ctx context.Context, tenantID string, ta
 		return zero, classify(err)
 	}
 	if run.ActiveAttemptID == nil {
+		// A runtime may have acknowledged cancellation after the caller read
+		// the task but before this transaction locked the run. Surface the
+		// stale snapshot as a normal CAS conflict; an up-to-date replay of an
+		// already-cancelled task is idempotent. Returning an invalid lifecycle
+		// error here strands workflow cancellation controllers.
+		task, taskErr := scanTask(tx.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks
+			WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, tenantID, taskID.String()))
+		if taskErr != nil {
+			return zero, classify(taskErr)
+		}
+		if task.ResourceVersion != expectedVersion {
+			return zero, versionConflict("task", task.ID, expectedVersion, task.ResourceVersion)
+		}
+		if task.Phase == domain.TaskCancelled {
+			if err := tx.Commit(ctx); err != nil {
+				return zero, classify(err)
+			}
+			return task, nil
+		}
 		return zero, fmt.Errorf("%w: running task has no active attempt", kernelstore.ErrInvalidTransition)
 	}
 	attempt, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM attempts

@@ -1,0 +1,6 @@
+{
+  "endpoints": {
+    "web.search@1.0.0": "https://tools.research.example:8443",
+    "web.fetch@1.0.0": "https://tools.research.example:8443"
+  }
+}

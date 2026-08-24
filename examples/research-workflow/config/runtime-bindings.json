@@ -1,0 +1,12 @@
+{
+  "bindings": [
+    { "agentVersionRef": "research-planner@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-search@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-reader@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-collector@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-analyst@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-critic@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-writer@1.0.0", "endpoint": "http://127.0.0.1:8090" },
+    { "agentVersionRef": "research-citation-validator@1.0.0", "endpoint": "http://127.0.0.1:8090" }
+  ]
+}
