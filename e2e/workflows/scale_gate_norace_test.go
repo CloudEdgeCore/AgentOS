@@ -1,6 +1,6 @@
 //go:build !race
 
-package e2e
+package e2e_test
 
 // Calibrated orchestrator reconcile gate for uninstrumented builds
 // (Phase 3 acceptance: P95 < 500ms).
