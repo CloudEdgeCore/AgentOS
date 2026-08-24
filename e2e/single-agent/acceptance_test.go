@@ -239,7 +239,7 @@ func TestV11RecoveryFaultInjection(t *testing.T) {
 		rounds <- i
 	}
 	close(rounds)
-	results := make(chan bool, faults)
+	results := make(chan recoveryFaultResult, faults)
 	var wg sync.WaitGroup
 	for range instances {
 		wg.Add(1)
@@ -254,9 +254,15 @@ func TestV11RecoveryFaultInjection(t *testing.T) {
 	close(results)
 
 	succeeded := 0
-	for ok := range results {
-		if ok {
+	for result := range results {
+		if result.recovered {
 			succeeded++
+			continue
+		}
+		if result.safetyViolation {
+			t.Errorf("fault %d violated recovery safety: %s", result.index, result.diagnostic)
+		} else {
+			t.Logf("fault %d did not recover: %s", result.index, result.diagnostic)
 		}
 	}
 	rate := float64(succeeded) / float64(faults)
@@ -273,8 +279,16 @@ func TestV11RecoveryFaultInjection(t *testing.T) {
 	}
 }
 
+type recoveryFaultResult struct {
+	index           int
+	recovered       bool
+	safetyViolation bool
+	diagnostic      string
+}
+
 // injectOneFault runs one kill/recover cycle and reports success.
-func injectOneFault(ctx context.Context, t *testing.T, env *e2eEnv, fleet *workerFleet, index int) bool {
+func injectOneFault(ctx context.Context, t *testing.T, env *e2eEnv, fleet *workerFleet, index int) recoveryFaultResult {
+	result := recoveryFaultResult{index: index}
 	city := fmt.Sprintf("city-f%d", index)
 	task := submitTask(ctx, t, env, fmt.Sprintf("fault-%d", index), "Report the weather. city:"+city)
 
@@ -282,35 +296,50 @@ func injectOneFault(ctx context.Context, t *testing.T, env *e2eEnv, fleet *worke
 	// worker holds the attempt (its lease stops renewing; the attempt is
 	// stranded RUNNING — the real crash semantics).
 	deadline := time.Now().Add(30 * time.Second)
+	checkpointConfirmed := false
 	for time.Now().Before(deadline) {
 		if confirmedToolCheckpoint(ctx, t, env, task.ID) {
+			checkpointConfirmed = true
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if instance := executingInstance(ctx, t, env, task.ID); instance != "" {
-		fleet.killAndRespawn(instance)
+	if !checkpointConfirmed {
+		result.diagnostic = "timed out waiting for a checkpoint that confirms the tool turn"
+		return result
 	}
+	instance := executingInstance(ctx, t, env, task.ID)
+	if instance == "" {
+		result.diagnostic = "confirmed checkpoint had no executing worker to fault"
+		return result
+	}
+	fleet.killAndRespawn(instance)
 
 	finished := waitForTerminal(ctx, t, env, task.ID, 2*time.Minute)
 	if finished.Phase != domain.TaskSucceeded {
 		attempts := queryInt(ctx, t, env, `SELECT count(*) FROM attempts a JOIN runs r ON r.id = a.run_id WHERE r.task_id = $1`, task.ID)
-		t.Errorf("fault %d: task phase = %s (attempts=%d), want SUCCEEDED", index, finished.Phase, attempts)
-		return false
+		result.diagnostic = fmt.Sprintf("task phase=%s attempts=%d, want SUCCEEDED", finished.Phase, attempts)
+		return result
 	}
 	// The confirmed tool side effect happened exactly once.
 	if calls := env.webhook.count(city); calls != 1 {
-		t.Errorf("fault %d: weather webhook executed %d times for %s, want exactly 1", index, calls, city)
-		return false
+		result.diagnostic = fmt.Sprintf("weather webhook executed %d times for %s, want exactly 1", calls, city)
+		// A missing call is an availability failure covered by the >=99%
+		// recovery gate. Repeating a confirmed external side effect is a
+		// safety violation and must fail the test at any aggregate rate.
+		result.safetyViolation = calls > 1
+		return result
 	}
 	// Exactly one completed attempt owns the final result.
 	completed := queryInt(ctx, t, env, `SELECT count(*) FROM attempts a JOIN runs r ON r.id = a.run_id
 		WHERE r.task_id = $1 AND a.phase = 'COMPLETED'`, task.ID)
 	if completed != 1 {
-		t.Errorf("fault %d: completed attempts = %d, want 1", index, completed)
-		return false
+		result.diagnostic = fmt.Sprintf("completed attempts=%d, want exactly 1", completed)
+		result.safetyViolation = completed > 1
+		return result
 	}
-	return true
+	result.recovered = true
+	return result
 }
 
 // workerFleet manages the per-instance worker lifecycles of the fault test.

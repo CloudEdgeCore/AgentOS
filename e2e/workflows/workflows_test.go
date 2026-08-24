@@ -336,20 +336,29 @@ func TestV12WorkflowSemantics(t *testing.T) {
 	cancelOrchestrator := workflow.NewController(env.store, env.store, env.artifacts, "e2e-orchestrator-cancel", 100)
 	// Dispatch the research step.
 	deadline = time.Now().Add(30 * time.Second)
+	dispatched := false
 	for time.Now().Before(deadline) {
 		if _, err := cancelOrchestrator.Reconcile(ctx); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		if steps := workflowSteps(ctx, t, env, cancelID); steps[0].Status == kernelstore.StepRunning {
+			dispatched = true
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+	if !dispatched {
+		t.Fatal("cancellation workflow research step was not dispatched")
 	}
 	current := workflowStatus(ctx, t, env, cancelID)
 	if _, err := env.store.RequestWorkflowCancellation(ctx, e2eTenant, cancelID, current.ResourceVersion); err != nil {
 		t.Fatalf("request cancellation: %v", err)
 	}
-	for time.Now().Before(deadline) {
+	// Cancellation can take longer than the dispatch deadline under the race
+	// detector. Keep an orchestrator alive until it observes the terminal task
+	// and propagates that state into the step and workflow.
+	cancelDeadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(cancelDeadline) {
 		if _, err := cancelOrchestrator.Reconcile(ctx); err != nil {
 			t.Fatalf("reconcile cancel: %v", err)
 		}
@@ -358,7 +367,7 @@ func TestV12WorkflowSemantics(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	finalCancel := waitForWorkflowTerminal(ctx, t, env, cancelID, 120*time.Second)
+	finalCancel := workflowStatus(ctx, t, env, cancelID)
 	if finalCancel.Status != kernelstore.WorkflowCancelled {
 		t.Fatalf("cancelled workflow = %s", finalCancel.Status)
 	}

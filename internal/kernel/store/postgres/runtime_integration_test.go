@@ -247,6 +247,16 @@ func TestRunningTaskCancellationConvergesThroughRuntime(t *testing.T) {
 	if cancelled.Attempt.Phase != domain.AttemptCancelled || cancelled.Run.Phase != domain.RunCancelled || cancelled.Task.Phase != domain.TaskCancelled {
 		t.Fatalf("cancellation did not converge atomically: %+v", cancelled)
 	}
+	// An orchestrator that read the task just before the runtime acknowledgement
+	// receives a convergence conflict, not a fatal lifecycle error. Its next
+	// read can replay cancellation idempotently against the terminal task.
+	if _, err := repository.RequestTaskCancellation(ctx, "tenant-a", assignment.Task.ID, cancelRequested.ResourceVersion); !errors.Is(err, kernelstore.ErrVersionConflict) {
+		t.Fatalf("stale cancellation replay error=%v, want version conflict", err)
+	}
+	replayedTask, err := repository.RequestTaskCancellation(ctx, "tenant-a", assignment.Task.ID, cancelled.Task.ResourceVersion)
+	if err != nil || replayedTask.Phase != domain.TaskCancelled {
+		t.Fatalf("terminal cancellation replay=%+v err=%v", replayedTask, err)
+	}
 	retried, err := repository.AcknowledgeCancellation(ctx, input)
 	if err != nil || retried.Task.Phase != domain.TaskCancelled {
 		t.Fatalf("idempotent cancellation retry=%+v err=%v", retried, err)

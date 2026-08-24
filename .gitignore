@@ -41,3 +41,7 @@ research-e2e.log
 research-final.log
 research-scale.log
 research-*.log
+
+# Local acceptance-test captures
+/v*-local.log
+/v*-full.log

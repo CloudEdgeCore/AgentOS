@@ -110,6 +110,12 @@ class RealAgent:
                     "role": "tool", "toolCallId": call.get("id", ""),
                     "content": json.dumps(result)[:65536],
                 })
+            # Persist confirmed external side effects before the next model
+            # turn. A worker crash after a tool succeeds must restore the
+            # tool-role message and continue reasoning without repeating the
+            # side effect. Waiting until the final answer leaves no durable
+            # recovery point during the second model invocation.
+            self._snapshot(execution_id, messages, None)
         if final is None:
             raise RuntimeError(f"no final answer within {self.max_turns} turns")
 

@@ -20,6 +20,7 @@ import (
 
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 	"github.com/CloudEdgeCore/AgentOS/internal/platform/redact"
@@ -254,7 +255,18 @@ func refuseInsecureTransport(httpClient *http.Client, endpoint string) error {
 	return nil
 }
 
-func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
+func (w *Worker) RunOnce(ctx context.Context) (processed bool, runErr error) {
+	assignmentAcquired := false
+	defer func() {
+		// Once polling succeeded, PermissionDenied means this concrete fenced
+		// assignment was lost (expired lease or a newer recovery owner). The
+		// long-lived worker must continue polling instead of terminating and
+		// reducing fleet capacity. A real endpoint authorization failure is
+		// still surfaced by the next PollAssignment call.
+		if assignmentAcquired && status.Code(runErr) == codes.PermissionDenied {
+			processed, runErr = false, nil
+		}
+	}()
 	pollCtx, cancel := context.WithTimeout(ctx, controlRPCTimeout)
 	polled, err := w.control.PollAssignment(pollCtx, &runtimev1.PollAssignmentRequest{
 		TenantId: w.tenantID, RuntimeInstanceId: w.runtimeInstanceID,
@@ -273,6 +285,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if assignment.GetIdentity().GetTenantId() != w.tenantID || assignment.GetRuntimeInstanceId() != w.runtimeInstanceID {
 		return false, fmt.Errorf("runtime assignment identity does not match adapter worker")
 	}
+	assignmentAcquired = true
 	target, capabilities, checkpointPolicy, err := w.target(assignment)
 	if err != nil {
 		return w.fail(ctx, assignment.GetIdentity(), assignment.GetAttemptVersion(), "adapter_manifest_invalid", err)
@@ -286,18 +299,21 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("adapter assignment identity is invalid: %w", err)
 	}
-	version, err := w.transition(ctx, identity, assignment.GetAttemptVersion(),
-		runtimev1.AttemptPhase_ATTEMPT_PHASE_STARTING, "", "")
+	version, proceed, err := w.advanceAttempt(ctx, identity, assignment.GetAttemptVersion(),
+		domain.AttemptPlaced, domain.AttemptStarting, runtimev1.AttemptPhase_ATTEMPT_PHASE_STARTING)
 	if err != nil {
-		if status.Code(err) == codes.Aborted {
-			return false, nil
-		}
 		return false, err
 	}
-	version, err = w.transition(ctx, identity, version,
-		runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING, "", "")
+	if !proceed {
+		return false, nil
+	}
+	version, proceed, err = w.advanceAttempt(ctx, identity, version,
+		domain.AttemptStarting, domain.AttemptRunning, runtimev1.AttemptPhase_ATTEMPT_PHASE_RUNNING)
 	if err != nil {
 		return false, err
+	}
+	if !proceed {
+		return false, nil
 	}
 	if w.window != nil {
 		lineage := parseWorkflowLineage(assignment.GetWorkflowLineage())
@@ -739,11 +755,7 @@ func (w *Worker) heartbeat(ctx context.Context, assignment *runtimev1.Assignment
 		return nil, fmt.Errorf("renew adapter lease: %w", err)
 	}
 	if response.GetCancelRequested() {
-		_, err := w.control.AcknowledgeCancellation(rpcCtx, &runtimev1.AcknowledgeCancellationRequest{
-			Identity: assignment.GetIdentity(), ExpectedAttemptVersion: response.GetAttemptVersion(),
-			IdempotencyKey: operationKey(assignment, "cancel"),
-		})
-		if err != nil {
+		if err := w.acknowledgeCancellation(ctx, assignment.GetIdentity(), response.GetAttemptVersion()); err != nil {
 			return nil, fmt.Errorf("acknowledge adapter cancellation: %w", err)
 		}
 	}
@@ -768,6 +780,86 @@ func (w *Worker) transition(
 		return 0, fmt.Errorf("transition adapter attempt to %s: %w", phase, err)
 	}
 	return response.GetAttemptVersion(), nil
+}
+
+// advanceAttempt converges a normal lifecycle transition after an optimistic
+// concurrency conflict without weakening fencing. A conflict is retried only
+// while the fenced Attempt remains in the expected predecessor phase. If the
+// requested transition already committed, its refreshed version is accepted;
+// cancellation, terminal state, or an unrelated phase always wins and tells
+// the caller not to start another execution for the same assignment.
+func (w *Worker) advanceAttempt(
+	ctx context.Context,
+	identity *runtimev1.AttemptIdentity,
+	version int64,
+	from, to domain.AttemptPhase,
+	protoPhase runtimev1.AttemptPhase,
+) (int64, bool, error) {
+	const maxConflictRetries = 3
+	for conflict := 0; ; conflict++ {
+		nextVersion, err := w.transition(ctx, identity, version, protoPhase, "", "")
+		if err == nil {
+			return nextVersion, true, nil
+		}
+		// The assignment lease expired or a recovery controller installed a
+		// newer fenced owner. This worker no longer owns the Attempt; dropping
+		// the assignment is successful convergence, not a process-fatal error.
+		if status.Code(err) == codes.PermissionDenied {
+			return 0, false, nil
+		}
+		if status.Code(err) != codes.Aborted || conflict >= maxConflictRetries {
+			return 0, false, err
+		}
+		current, refreshErr := attemptstate.Refresh(ctx, w.control, identity, controlRPCTimeout)
+		if refreshErr != nil {
+			return 0, false, fmt.Errorf("converge adapter attempt to %s: %w", protoPhase, refreshErr)
+		}
+		switch {
+		case current.Phase == domain.AttemptCancelRequested:
+			if cancelErr := w.acknowledgeCancellation(ctx, identity, current.Version); cancelErr != nil {
+				return 0, false, fmt.Errorf("converge adapter cancellation: %w", cancelErr)
+			}
+			return current.Version, false, nil
+		case current.Phase.Terminal():
+			return current.Version, false, nil
+		case current.Phase == to:
+			return current.Version, true, nil
+		case current.Phase == from:
+			version = current.Version
+		default:
+			return current.Version, false, nil
+		}
+	}
+}
+
+// acknowledgeCancellation settles a cancellation observed before or during
+// execution. It converges a stale Attempt version through the fenced read API
+// so cancellation cannot strand an assignment between placement and the first
+// heartbeat, while a terminal or unrelated control-plane state always wins.
+func (w *Worker) acknowledgeCancellation(ctx context.Context, identity *runtimev1.AttemptIdentity, version int64) error {
+	const maxConflictRetries = 3
+	for conflict := 0; ; conflict++ {
+		rpcCtx, cancel := context.WithTimeout(ctx, controlRPCTimeout)
+		_, err := w.control.AcknowledgeCancellation(rpcCtx, &runtimev1.AcknowledgeCancellationRequest{
+			Identity: identity, ExpectedAttemptVersion: version,
+			IdempotencyKey: identity.GetAttemptId() + ":adapter:cancel",
+		})
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if status.Code(err) != codes.Aborted || conflict >= maxConflictRetries {
+			return err
+		}
+		current, refreshErr := attemptstate.Refresh(ctx, w.control, identity, controlRPCTimeout)
+		if refreshErr != nil {
+			return refreshErr
+		}
+		if current.Phase.Terminal() || current.Phase != domain.AttemptCancelRequested {
+			return nil
+		}
+		version = current.Version
+	}
 }
 
 func (w *Worker) fail(
