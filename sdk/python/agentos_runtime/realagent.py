@@ -121,8 +121,6 @@ class RealAgent:
 
         memory_id = self._remember(mcp, execution_id, goal, final)
         emit("memory.written", {"id": memory_id, "namespace": self.memory_namespace})
-        with self._lock:
-            self._live.pop(execution_id, None)
         return {
             "answer": final,
             "turns": turns,
@@ -134,7 +132,14 @@ class RealAgent:
 
     def checkpoint(self, execution_id: str) -> dict[str, Any]:
         with self._lock:
-            state = dict(self._live.get(execution_id, {}))
+            state = copy.deepcopy(self._live.get(execution_id, {}))
+            # The adapter persists its final logical checkpoint after the
+            # Runtime Interface reports a terminal result. Keep the terminal
+            # snapshot alive until that read; deleting it in run() made fast
+            # executions publish an empty final checkpoint. Once delivered,
+            # release it so completed executions do not accumulate forever.
+            if state.get("final") is not None:
+                self._live.pop(execution_id, None)
         return {
             "schemaVersion": SCHEMA_VERSION,
             "state": state,

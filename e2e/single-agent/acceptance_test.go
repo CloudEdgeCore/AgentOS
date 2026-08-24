@@ -289,30 +289,39 @@ type recoveryFaultResult struct {
 // injectOneFault runs one kill/recover cycle and reports success.
 func injectOneFault(ctx context.Context, t *testing.T, env *e2eEnv, fleet *workerFleet, index int) recoveryFaultResult {
 	result := recoveryFaultResult{index: index}
-	city := fmt.Sprintf("city-f%d", index)
-	task := submitTask(ctx, t, env, fmt.Sprintf("fault-%d", index), "Report the weather. city:"+city)
-
-	// Wait until a checkpoint confirmed the tool turn, then kill whichever
-	// worker holds the attempt (its lease stops renewing; the attempt is
-	// stranded RUNNING — the real crash semantics).
-	deadline := time.Now().Add(30 * time.Second)
-	checkpointConfirmed := false
-	for time.Now().Before(deadline) {
-		if confirmedToolCheckpoint(ctx, t, env, task.ID) {
-			checkpointConfirmed = true
-			break
+	var task kernelstore.Task
+	var city, instance string
+	// A checkpoint and a live attempt form the arming precondition for a real
+	// fault injection. Under scheduler jitter a small fixture can finish in
+	// the polling gap; that is not a failed recovery (no crash was injected),
+	// so arm a fresh uniquely-attributed fixture instead of weakening the
+	// measured recovery rate with a non-event.
+	const maxArmAttempts = 3
+	for arm := 0; arm < maxArmAttempts && instance == ""; arm++ {
+		city = fmt.Sprintf("city-f%d-arm%d", index, arm)
+		task = submitTask(ctx, t, env, fmt.Sprintf("fault-%d-arm-%d", index, arm), "Report the weather. city:"+city)
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if confirmedToolCheckpoint(ctx, t, env, task.ID) {
+				instance = executingInstance(ctx, t, env, task.ID)
+				if instance != "" {
+					break
+				}
+			}
+			if taskPhase(ctx, t, env, task.ID).Phase.Terminal() {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
-	if !checkpointConfirmed {
-		result.diagnostic = "timed out waiting for a checkpoint that confirms the tool turn"
-		return result
-	}
-	instance := executingInstance(ctx, t, env, task.ID)
 	if instance == "" {
-		result.diagnostic = "confirmed checkpoint had no executing worker to fault"
+		result.diagnostic = fmt.Sprintf("could not arm a live confirmed checkpoint after %d fixtures", maxArmAttempts)
 		return result
 	}
+
+	// Kill whichever worker holds the attempt. Its lease stops renewing and
+	// the attempt is stranded RUNNING until the recovery controller requeues
+	// it with the confirmed tool state.
 	fleet.killAndRespawn(instance)
 
 	finished := waitForTerminal(ctx, t, env, task.ID, 2*time.Minute)

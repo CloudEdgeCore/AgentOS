@@ -75,8 +75,9 @@ func waitForWorkflowTerminal(ctx context.Context, t *testing.T, env *e2eEnv, id 
 // contention instead of distributed orchestrator latency.
 func driveOrchestrators(ctx context.Context, t *testing.T, env *e2eEnv, n int, samples *latencySamples) {
 	t.Helper()
+	claimBatch := max(1, 100/n)
 	for i := 0; i < n; i++ {
-		controller := workflow.NewController(env.store, env.store, env.artifacts, fmt.Sprintf("e2e-orchestrator-%d", i), 100).
+		controller := workflow.NewController(env.store, env.store, env.artifacts, fmt.Sprintf("e2e-orchestrator-%d", i), claimBatch).
 			WithClaiming(5*time.Second, 0)
 		go func(controller *workflow.Controller) {
 			for ctx.Err() == nil {

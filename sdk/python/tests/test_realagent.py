@@ -76,6 +76,28 @@ class RealAgentCheckpointTests(unittest.TestCase):
             self.assertEqual(failure, [])
             self.assertEqual(output["answer"], "sunny")
 
+    def test_terminal_snapshot_survives_until_final_checkpoint(self):
+        with mock.patch.object(realagent, "MCPClient", _FakeMCP):
+            agent = _SnapshotAgent()
+            agent.release_second_turn.set()
+
+            output = agent.run(
+                {"executionId": "attempt-final", "goal": "weather in paris"},
+                lambda _kind, _payload: None,
+                threading.Event(),
+            )
+            self.assertEqual(output["answer"], "sunny")
+
+            final_checkpoint = agent.checkpoint("attempt-final")
+            self.assertEqual(final_checkpoint["state"]["final"], "sunny")
+            self.assertTrue(any(
+                message["role"] == "tool"
+                for message in final_checkpoint["state"]["messages"]
+            ))
+
+            # Delivering the terminal snapshot also releases its live state.
+            self.assertEqual(agent.checkpoint("attempt-final")["state"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
