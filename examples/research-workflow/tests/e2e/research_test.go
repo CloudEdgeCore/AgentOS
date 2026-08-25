@@ -297,41 +297,72 @@ func TestResearchWorkflowRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create research: %v", err)
 	}
-	// Wait until the fan-out is DEEP in flight (several live attempts, not
-	// just the planner pair) so killing both workers guarantees stranded
-	// leases exist to recover.
+	// Wait until the fan-out is DEEP in flight and both runtime instances
+	// actually own leases. RUNNING task counts alone are insufficient here:
+	// workflow tasks can remain RUNNING briefly between agent attempts.
 	deadline := time.Now().Add(90 * time.Second)
 	for {
-		var running, attempts int
+		var running, attempts, leasedInstances int
 		if err := h.pool.QueryRow(context.Background(),
 			`SELECT (SELECT COUNT(*) FROM tasks WHERE phase = 'RUNNING'),
-				(SELECT COUNT(*) FROM attempts)`).Scan(&running, &attempts); err != nil {
+				(SELECT COUNT(*) FROM attempts),
+				(SELECT COUNT(DISTINCT a.runtime_instance_id)
+				 FROM runtime_leases l
+				 JOIN attempts a ON a.id = l.attempt_id
+				 WHERE l.released_at IS NULL)`).Scan(&running, &attempts, &leasedInstances); err != nil {
 			t.Fatalf("count in-flight work: %v", err)
 		}
-		if running >= 3 && attempts >= 6 {
+		if running >= 3 && attempts >= 6 && leasedInstances >= 2 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("fan-out never went deep enough to crash: running=%d attempts=%d", running, attempts)
+			t.Fatalf("fan-out never went deep enough to crash: running=%d attempts=%d leasedInstances=%d",
+				running, attempts, leasedInstances)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 	h.KillWorker("research-worker-a")
 	h.KillWorker("research-worker-b")
-	// Leases expire (15s heartbeat TTL) -> recovery requeues. Wait for the
-	// replacement attempt to EXIST before restarting workers so the
-	// assertion below can never miss a slow-but-successful recovery.
+	// Advance at least one stranded lease to expiry rather than sleeping for
+	// the 15-second heartbeat TTL. Repeating the update closes the narrow race
+	// where an already-returning worker releases the first selected lease.
+	// Recovery itself remains responsible for fencing the old attempt and
+	// atomically placing its replacement.
 	recoverDeadline := time.Now().Add(45 * time.Second)
+	forcedExpirations := int64(0)
 	for {
 		var retried int
 		if err := h.pool.QueryRow(context.Background(),
 			`SELECT COUNT(*) FROM attempts WHERE ordinal >= 2`).Scan(&retried); err != nil {
 			t.Fatalf("count replacement attempts: %v", err)
 		}
-		if retried >= 1 || time.Now().After(recoverDeadline) {
+		if retried >= 1 {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		if time.Now().After(recoverDeadline) {
+			t.Fatalf("recovery placed no replacement attempt after %d forced lease expirations", forcedExpirations)
+		}
+		tag, err := h.pool.Exec(context.Background(), `
+			WITH candidate AS (
+				SELECT l.id
+				FROM runtime_leases l
+				JOIN attempts a ON a.id = l.attempt_id
+				JOIN runs r ON r.id = a.run_id
+				WHERE l.released_at IS NULL
+				  AND r.active_attempt_id = a.id
+				  AND r.current_fencing_token = a.fencing_token
+				ORDER BY l.acquired_at DESC
+				LIMIT 1
+			)
+			UPDATE runtime_leases l
+			SET expires_at = l.acquired_at + INTERVAL '1 microsecond'
+			FROM candidate c
+			WHERE l.id = c.id AND l.released_at IS NULL`)
+		if err != nil {
+			t.Fatalf("force stranded lease expiry: %v", err)
+		}
+		forcedExpirations += tag.RowsAffected()
+		time.Sleep(100 * time.Millisecond)
 	}
 	// Restart BOTH runtime instances because stranded runs may be bound to
 	// either pool.
