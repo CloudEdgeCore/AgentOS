@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -360,6 +361,44 @@ func TestDecodeReaderClaimsAcceptsStringAndObjectEvidence(t *testing.T) {
 	if len(claims) != 2 || claims[0].Claim != "First" || claims[0].Evidence != "verbatim one" ||
 		claims[1].Claim != "Second" || claims[1].Evidence != "verbatim two" {
 		t.Fatalf("normalized claims = %+v", claims)
+	}
+}
+
+func TestValidateAnalysisOutputAcceptsGroundedFindings(t *testing.T) {
+	analysis := analysisDoc{Findings: []analysisFinding{{
+		Statement:   "  Attempts are fenced.  ",
+		EvidenceIDs: []string{"claim-1", "claim-1", "claim-2"},
+		Confidence:  0.8,
+	}}}
+	bundles := []EvidenceBundle{{Claims: []Claim{{ClaimID: "claim-1"}, {ClaimID: "claim-2"}}}}
+	if err := validateAnalysisOutput(&analysis, bundles); err != nil {
+		t.Fatalf("validate analysis: %v", err)
+	}
+	if analysis.Findings[0].Statement != "Attempts are fenced." ||
+		!reflect.DeepEqual(analysis.Findings[0].EvidenceIDs, []string{"claim-1", "claim-2"}) {
+		t.Fatalf("normalized analysis = %+v", analysis)
+	}
+}
+
+func TestValidateAnalysisOutputRejectsEmptyFindingFields(t *testing.T) {
+	bundles := []EvidenceBundle{{Claims: []Claim{{ClaimID: "claim-1"}}}}
+	tests := []struct {
+		name     string
+		finding  analysisFinding
+		contains string
+	}{
+		{name: "statement", finding: analysisFinding{EvidenceIDs: []string{"claim-1"}}, contains: "empty statement"},
+		{name: "evidence", finding: analysisFinding{Statement: "Claim"}, contains: "no evidenceIds"},
+		{name: "unknown id", finding: analysisFinding{Statement: "Claim", EvidenceIDs: []string{"invented"}}, contains: "unknown evidenceId"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			analysis := analysisDoc{Findings: []analysisFinding{test.finding}}
+			err := validateAnalysisOutput(&analysis, bundles)
+			if err == nil || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("error = %v, want %q", err, test.contains)
+			}
+		})
 	}
 }
 

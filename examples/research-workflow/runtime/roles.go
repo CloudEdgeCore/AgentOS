@@ -731,19 +731,23 @@ func upstreamVerdict(goal string) string {
 
 // -- analyst -----------------------------------------------------------------
 
+type analysisFinding struct {
+	FindingID   string   `json:"findingId"`
+	Statement   string   `json:"statement"`
+	EvidenceIDs []string `json:"evidenceIds"`
+	Confidence  float64  `json:"confidence"`
+}
+
+type analysisContradiction struct {
+	Topic       string   `json:"topic"`
+	EvidenceIDs []string `json:"evidenceIds"`
+}
+
 type analysisDoc struct {
-	Findings []struct {
-		FindingID   string   `json:"findingId"`
-		Statement   string   `json:"statement"`
-		EvidenceIDs []string `json:"evidenceIds"`
-		Confidence  float64  `json:"confidence"`
-	} `json:"findings"`
-	Contradictions []struct {
-		Topic       string   `json:"topic"`
-		EvidenceIDs []string `json:"evidenceIds"`
-	} `json:"contradictions,omitempty"`
-	Unknowns    []string `json:"unknowns,omitempty"`
-	Passthrough bool     `json:"passthrough,omitempty"`
+	Findings       []analysisFinding       `json:"findings"`
+	Contradictions []analysisContradiction `json:"contradictions,omitempty"`
+	Unknowns       []string                `json:"unknowns,omitempty"`
+	Passthrough    bool                    `json:"passthrough,omitempty"`
 }
 
 func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -766,7 +770,9 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 		return nil, fmt.Errorf("analyst %s found no evidence bundles", current)
 	}
 	system := "You are a research analyst. Cluster the extracted claims into findings supported by explicit evidence IDs, " +
-		"list contradictions between sources and open unknowns. Keep at most 12 findings. " + jsonOnlyInstruction
+		"list contradictions between sources and open unknowns. Keep at most 12 findings. " +
+		"Every finding must have a non-empty statement and at least one evidenceId copied exactly from the supplied bundles; " +
+		"never invent an evidenceId. " + jsonOnlyInstruction
 	user := "Evidence bundles:\n" + renderBundles(bundles) +
 		fmt.Sprintf("\n\nReturn schema:\n%s", `{"findings":[{"findingId":"finding-001","statement":"...","evidenceIds":["src-001-claim-001"],"confidence":0.87}],"contradictions":[{"topic":"...","evidenceIds":["a","b"]}],"unknowns":["..."]}`)
 	content, err := chat(ctx, deps, executionID, system, truncate(user, 24000))
@@ -777,14 +783,11 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 	if err := decodeLoose(content, &analysis); err != nil {
 		return nil, fmt.Errorf("analyst output: %w", err)
 	}
+	if err := validateAnalysisOutput(&analysis, bundles); err != nil {
+		return nil, fmt.Errorf("analyst output: %w", err)
+	}
 	for index := range analysis.Findings {
 		analysis.Findings[index].FindingID = fmt.Sprintf("finding-%03d", index+1)
-		if len(analysis.Findings[index].EvidenceIDs) == 0 {
-			analysis.Findings[index].EvidenceIDs = []string{bundles[0].Claims[0].ClaimID}
-		}
-	}
-	if len(analysis.Findings) == 0 {
-		return nil, fmt.Errorf("analyst produced no findings")
 	}
 	analysis.Passthrough = false
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), current, "application/json", analysis); err != nil {
@@ -792,6 +795,77 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 	}
 	output, _ := json.Marshal(analysis)
 	return output, nil
+}
+
+func validateAnalysisOutput(analysis *analysisDoc, bundles []EvidenceBundle) error {
+	if len(analysis.Findings) == 0 {
+		return fmt.Errorf("produced no findings")
+	}
+	if len(analysis.Findings) > 12 {
+		return fmt.Errorf("produced %d findings; maximum is 12", len(analysis.Findings))
+	}
+	knownEvidence := make(map[string]struct{})
+	for _, bundle := range bundles {
+		for _, claim := range bundle.Claims {
+			if id := strings.TrimSpace(claim.ClaimID); id != "" {
+				knownEvidence[id] = struct{}{}
+			}
+		}
+	}
+	for index := range analysis.Findings {
+		finding := &analysis.Findings[index]
+		finding.Statement = strings.TrimSpace(finding.Statement)
+		if finding.Statement == "" {
+			return fmt.Errorf("finding %d has an empty statement", index+1)
+		}
+		if len(finding.EvidenceIDs) == 0 {
+			return fmt.Errorf("finding %d has no evidenceIds", index+1)
+		}
+		ids, err := validateEvidenceIDs(finding.EvidenceIDs, knownEvidence)
+		if err != nil {
+			return fmt.Errorf("finding %d: %w", index+1, err)
+		}
+		finding.EvidenceIDs = ids
+		if finding.Confidence < 0 || finding.Confidence > 1 {
+			return fmt.Errorf("finding %d has confidence outside [0,1]", index+1)
+		}
+	}
+	for index := range analysis.Contradictions {
+		contradiction := &analysis.Contradictions[index]
+		contradiction.Topic = strings.TrimSpace(contradiction.Topic)
+		if contradiction.Topic == "" {
+			return fmt.Errorf("contradiction %d has an empty topic", index+1)
+		}
+		ids, err := validateEvidenceIDs(contradiction.EvidenceIDs, knownEvidence)
+		if err != nil {
+			return fmt.Errorf("contradiction %d: %w", index+1, err)
+		}
+		if len(ids) < 2 {
+			return fmt.Errorf("contradiction %d needs at least two evidenceIds", index+1)
+		}
+		contradiction.EvidenceIDs = ids
+	}
+	return nil
+}
+
+func validateEvidenceIDs(ids []string, known map[string]struct{}) ([]string, error) {
+	validated := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return nil, fmt.Errorf("contains an empty evidenceId")
+		}
+		if _, ok := known[id]; !ok {
+			return nil, fmt.Errorf("references unknown evidenceId %q", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		validated = append(validated, id)
+	}
+	return validated, nil
 }
 
 func readAnalysis(ctx context.Context, deps Deps, executionID, key string) (analysisDoc, bool, error) {
