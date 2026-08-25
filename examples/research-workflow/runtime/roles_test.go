@@ -1,10 +1,39 @@
 package research
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 )
+
+type modelMCPStub struct {
+	args     map[string]any
+	response json.RawMessage
+}
+
+func (stub *modelMCPStub) CallTool(_ context.Context, _ string, _ string, args any) (json.RawMessage, error) {
+	stub.args, _ = args.(map[string]any)
+	return stub.response, nil
+}
+
+func TestInvokeModelRequestsBoundedResearchCompletion(t *testing.T) {
+	stub := &modelMCPStub{response: json.RawMessage(`{"content":"{}","finishReason":"stop"}`)}
+	if _, err := InvokeModel(context.Background(), stub, "exec-1", "provider/model", []ChatMessage{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatalf("invoke model: %v", err)
+	}
+	if got := stub.args["maxOutputTokens"]; got != researchMaxOutputTokens {
+		t.Fatalf("maxOutputTokens = %v, want %d", got, researchMaxOutputTokens)
+	}
+}
+
+func TestInvokeModelRejectsTruncatedCompletion(t *testing.T) {
+	stub := &modelMCPStub{response: json.RawMessage(`{"content":"{","finishReason":"length"}`)}
+	if _, err := InvokeModel(context.Background(), stub, "exec-1", "provider/model", []ChatMessage{{Role: "user", Content: "hi"}}); err == nil ||
+		!strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("truncation error = %v", err)
+	}
+}
 
 func TestParseEnvelopeToleratesTrailingUpstreamBlocks(t *testing.T) {
 	goal := `AGENTOS-RESEARCH/v1 {"role":"reader","goal":"","workflowId":"wf-1","round":2,` +
@@ -78,6 +107,83 @@ func TestFirstJSONObjectBalancedAndEscaped(t *testing.T) {
 	}
 	if firstJSONObject("no json here") != "" {
 		t.Fatal("expected empty extraction")
+	}
+}
+
+func TestDecodePlannerOutputNormalizesLiveModelAliases(t *testing.T) {
+	plan, err := decodePlannerOutput(`{"questions":[` +
+		`{"id":"model-id","text":"How do runtimes fence work?","priority":0,"queries":[" fencing tokens ",""]},` +
+		`{"question":"How are budgets enforced?","searchQueries":[]}]}`)
+	if err != nil {
+		t.Fatalf("decode planner: %v", err)
+	}
+	if len(plan.Questions) != 2 || plan.Questions[0].ID != "rq-001" ||
+		plan.Questions[0].Question != "How do runtimes fence work?" ||
+		len(plan.Questions[0].SearchQueries) != 1 || plan.Questions[0].SearchQueries[0] != "fencing tokens" ||
+		plan.Questions[1].SearchQueries[0] != plan.Questions[1].Question {
+		t.Fatalf("normalized plan = %+v", plan)
+	}
+}
+
+func TestDecodePlannerOutputRejectsSemanticallyEmptyQuestion(t *testing.T) {
+	if _, err := decodePlannerOutput(`{"questions":[{"question":" ","searchQueries":[""]}]}`); err == nil ||
+		!strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty question error = %v", err)
+	}
+}
+
+func TestDecodeCriticOutputNormalizesLiveModelAliases(t *testing.T) {
+	decision, err := decodeCriticOutput(`{"verdict":"needs_more_research","score":0.55,"gaps":[` +
+		`{"description":"Which isolation mechanisms are used?","queries":[" sandbox isolation ",""]}]}`)
+	if err != nil {
+		t.Fatalf("decode critic: %v", err)
+	}
+	if decision.Status != "NEEDS_MORE_RESEARCH" || len(decision.Gaps) != 1 ||
+		decision.Gaps[0].Question != "Which isolation mechanisms are used?" ||
+		len(decision.Gaps[0].SuggestedQueries) != 1 || decision.Gaps[0].SuggestedQueries[0] != "sandbox isolation" {
+		t.Fatalf("normalized decision = %+v", decision)
+	}
+}
+
+func TestDecodeCriticOutputRejectsUnsupportedStatus(t *testing.T) {
+	if _, err := decodeCriticOutput(`{"status":"MAYBE","score":0.9,"gaps":[]}`); err == nil ||
+		!strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported status error = %v", err)
+	}
+}
+
+func TestDecodeReportOutputNormalizesLiveModelAliases(t *testing.T) {
+	report, err := decodeReportOutput(`{"report":{"reportTitle":"Runtime evolution","executiveSummary":"A governed transition.",` +
+		`"sections":[{"title":"Control planes","content":"Fencing became explicit [1]."}],` +
+		`"citations":[{"claimId":"src-007-claim-002","evidence":"Fencing became explicit."}]}}`)
+	if err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.Title != "Runtime evolution" || report.Summary != "A governed transition." ||
+		len(report.Sections) != 1 || report.Sections[0].Heading != "Control planes" ||
+		len(report.Citations) != 1 || report.Citations[0].Marker != "[1]" ||
+		report.Citations[0].EvidenceID != "src-007-claim-002" || report.Citations[0].SourceID != "src-007" {
+		t.Fatalf("normalized report = %+v", report)
+	}
+}
+
+func TestDecodeReportOutputRejectsIncompleteDocument(t *testing.T) {
+	if _, err := decodeReportOutput(`{"title":"Only a title"}`); err == nil ||
+		!strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("incomplete report error = %v", err)
+	}
+}
+
+func TestDecodeReaderClaimsAcceptsStringAndObjectEvidence(t *testing.T) {
+	claims, err := decodeReaderClaims(`{"claims":[` +
+		`{"statement":"First","evidence":"verbatim one","confidence":0.8},` +
+		`{"claim":"Second","evidence":{"quote":"verbatim two"},"confidence":0.9}]}`)
+	if err != nil {
+		t.Fatalf("decode reader claims: %v", err)
+	}
+	if len(claims) != 2 || claims[0].Claim != "First" || claims[0].Evidence != "verbatim one" ||
+		claims[1].Claim != "Second" || claims[1].Evidence != "verbatim two" {
+		t.Fatalf("normalized claims = %+v", claims)
 	}
 }
 

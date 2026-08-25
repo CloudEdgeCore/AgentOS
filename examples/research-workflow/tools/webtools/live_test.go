@@ -5,11 +5,14 @@ package webtools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRejectUnsafeURLMatrix(t *testing.T) {
@@ -139,6 +142,85 @@ func TestBingSearchMapsResultsAndAuthFailure(t *testing.T) {
 	hits, err := search.Search(context.Background(), "fencing", 5)
 	if err != nil || len(hits) != 1 || hits[0].Snippet != "lease renewal" {
 		t.Fatalf("hits=%+v err=%v", hits, err)
+	}
+}
+
+func TestDoubaoSearchUsesDocumentedEnvelopeAndMapsResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.Header.Get("Authorization") != "Bearer doubao-key" ||
+			request.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("unexpected request: method=%s auth=%q content-type=%q", request.Method,
+				request.Header.Get("Authorization"), request.Header.Get("Content-Type"))
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		var payload struct {
+			Query      string `json:"Query"`
+			SearchType string `json:"SearchType"`
+			Count      int    `json:"Count"`
+			Filter     struct {
+				NeedContent bool `json:"NeedContent"`
+				NeedURL     bool `json:"NeedUrl"`
+			} `json:"Filter"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload.Query != "agent runtime" || payload.SearchType != "web" || payload.Count != 50 ||
+			payload.Filter.NeedContent || !payload.Filter.NeedURL {
+			t.Fatalf("payload = %+v", payload)
+		}
+		fmt.Fprint(writer, `{"ResponseMetadata":{"RequestId":"request-1"},"Result":{"WebResults":[`+
+			`{"Title":"Agent runtimes","Url":"https://volc.example/a","Snippet":"control planes","Summary":"long summary","PublishTime":"2026-08-24T10:00:00+08:00"},`+
+			`{"Title":"Summary fallback","Url":"https://volc.example/b","Snippet":"","Summary":"fallback summary"},`+
+			`{"Title":"No URL","Url":"","Snippet":"dropped"}]}}`)
+	}))
+	defer server.Close()
+
+	search := &DoubaoSearch{APIKey: "doubao-key", Endpoint: server.URL, Client: server.Client()}
+	hits, err := search.Search(context.Background(), " agent runtime ", 80)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 2 || hits[0].Snippet != "control planes" ||
+		hits[0].PublishedAt != "2026-08-24T10:00:00+08:00" || hits[1].Snippet != "fallback summary" {
+		t.Fatalf("hits = %+v", hits)
+	}
+}
+
+func TestDoubaoSearchRejectsMissingKeyAndApplicationError(t *testing.T) {
+	search := &DoubaoSearch{}
+	if _, err := search.Search(context.Background(), "query", 5); err == nil ||
+		!strings.Contains(err.Error(), "key is required") {
+		t.Fatalf("missing-key error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"ResponseMetadata":{"RequestId":"request-2","Error":{"Code":"700429","Message":"QPS exceeded"}},"Result":null}`)
+	}))
+	defer server.Close()
+	search = &DoubaoSearch{APIKey: "secret-must-not-leak", Endpoint: server.URL, Client: server.Client()}
+	_, err := search.Search(context.Background(), "query", 5)
+	if err == nil || !strings.Contains(err.Error(), "700429") ||
+		strings.Contains(err.Error(), search.APIKey) {
+		t.Fatalf("application error = %v", err)
+	}
+}
+
+func TestDoubaoSearchQuotaWaitHonorsCancellation(t *testing.T) {
+	search := &DoubaoSearch{}
+	if err := search.waitForQuota(context.Background()); err != nil {
+		t.Fatalf("first quota slot: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if err := search.waitForQuota(ctx); err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("canceled quota wait = %v", err)
+	}
+	if time.Since(started) > 100*time.Millisecond {
+		t.Fatal("canceled quota wait did not return promptly")
 	}
 }
 

@@ -157,13 +157,20 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	if databaseURL == "" {
 		t.Skip("AGENTOS_TEST_DATABASE_URL is not set")
 	}
-	schema := "agentos_research_" + name
+	normalizedName := strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '_' {
+			return character
+		}
+		return '_'
+	}, name)
+	schema := "agentos_research_" + normalizedName
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	admin, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
 	}
-	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, schema)); err != nil {
+	if _, err := admin.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
 	_ = admin.Close(ctx)
@@ -233,12 +240,14 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 		searchKey := os.Getenv("AGENTOS_RESEARCH_SEARCH_KEY")
 		var search webtools.SearchProvider
 		switch strings.ToLower(envOr("AGENTOS_RESEARCH_SEARCH_PROVIDER", "brave")) {
+		case "doubao", "volcengine":
+			search = &webtools.DoubaoSearch{APIKey: searchKey}
 		case "brave":
 			search = &webtools.BraveSearch{APIKey: searchKey}
 		case "bing":
 			search = &webtools.BingSearch{APIKey: searchKey}
 		default:
-			t.Fatalf("unknown AGENTOS_RESEARCH_SEARCH_PROVIDER %q (want brave or bing)",
+			t.Fatalf("unknown AGENTOS_RESEARCH_SEARCH_PROVIDER %q (want doubao, brave or bing)",
 				os.Getenv("AGENTOS_RESEARCH_SEARCH_PROVIDER"))
 		}
 		h.webtools = h.webtools.WithBackend(&webtools.CompositeBackend{

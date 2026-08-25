@@ -156,15 +156,21 @@ AGENTOS_RESEARCH_MODEL_REASONING=gpt-4o
 
 # P1 — real internet
 AGENTOS_RESEARCH_LIVE_WEB=1
-AGENTOS_RESEARCH_SEARCH_PROVIDER=brave            # brave | bing
+AGENTOS_RESEARCH_SEARCH_PROVIDER=doubao           # doubao | brave | bing
 AGENTOS_RESEARCH_SEARCH_KEY=...
 ```
 
-Live backends: `webtools.BraveSearch` / `webtools.BingSearch` provider
+Live backends: `webtools.DoubaoSearch` / `webtools.BraveSearch` /
+`webtools.BingSearch` provider
 adapters behind one `Backend` interface, and `webtools.LiveFetch` — a
 hardened fetcher (SSRF policy incl. redirect re-checks, ≤5 hops, 10 MiB cap,
 20 s timeout, content-type allowlist, HTML→readable-text, final URL +
 stable source id). The deterministic corpus remains an in-process fallback.
+The Doubao adapter follows the
+[official Search Custom API](https://docs.volcengine.com/docs/87772/2272953?lang=zh):
+Bearer API-key authentication, the documented `Query` / `SearchType` /
+`Count` / `Filter` envelope, URL-bearing web results only, and a client-side
+4 QPS limiter below the default 5 QPS quota.
 
 Gated acceptance tests (skip unless their env is present):
 

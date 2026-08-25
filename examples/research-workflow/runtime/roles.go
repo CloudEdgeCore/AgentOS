@@ -69,37 +69,80 @@ type plannerOutput struct {
 	Questions []Question `json:"questions"`
 }
 
+// plannerWireQuestion accepts the stable field names plus the concise
+// text/queries aliases commonly produced by OpenAI-compatible models. The
+// normalized durable output always uses Question's stable schema.
+type plannerWireQuestion struct {
+	ID            string   `json:"id"`
+	Question      string   `json:"question"`
+	Text          string   `json:"text"`
+	Priority      int      `json:"priority"`
+	SearchQueries []string `json:"searchQueries"`
+	Queries       []string `json:"queries"`
+}
+
+func decodePlannerOutput(content string) (plannerOutput, error) {
+	var wire struct {
+		Questions []plannerWireQuestion `json:"questions"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return plannerOutput{}, err
+	}
+	if len(wire.Questions) == 0 {
+		return plannerOutput{}, fmt.Errorf("planner produced no questions")
+	}
+	if len(wire.Questions) > 6 {
+		wire.Questions = wire.Questions[:6]
+	}
+	plan := plannerOutput{Questions: make([]Question, 0, len(wire.Questions))}
+	for index, candidate := range wire.Questions {
+		questionText := strings.TrimSpace(candidate.Question)
+		if questionText == "" {
+			questionText = strings.TrimSpace(candidate.Text)
+		}
+		if questionText == "" {
+			return plannerOutput{}, fmt.Errorf("planner question %d is empty", index+1)
+		}
+		queries := candidate.SearchQueries
+		if len(queries) == 0 {
+			queries = candidate.Queries
+		}
+		cleanQueries := make([]string, 0, min(len(queries), 4))
+		for _, query := range queries {
+			if query = strings.TrimSpace(query); query != "" {
+				cleanQueries = append(cleanQueries, query)
+				if len(cleanQueries) == 4 {
+					break
+				}
+			}
+		}
+		if len(cleanQueries) == 0 {
+			cleanQueries = []string{questionText}
+		}
+		priority := candidate.Priority
+		if priority <= 0 {
+			priority = index + 1
+		}
+		plan.Questions = append(plan.Questions, Question{
+			ID: fmt.Sprintf("rq-%03d", index+1), Question: questionText,
+			Priority: priority, SearchQueries: cleanQueries,
+		})
+	}
+	return plan, nil
+}
+
 func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
 	system := "You are a research planner. Decompose the user's goal into at most 6 focused, non-overlapping research questions. " +
 		"For each question provide 2-3 concrete web-search queries mixing broad and specific phrasing. " + jsonOnlyInstruction
 	user := fmt.Sprintf("Research goal:\n%s\n\nSchema hint:\n%s", strings.TrimSpace(strings.TrimPrefix(envelope.Goal, envelopePrefix)),
-		`{"questions":[{"id":"rq-001","text":"...","priority":1,"queries":["...","..."]}]}`)
+		`{"questions":[{"id":"rq-001","question":"...","priority":1,"searchQueries":["...","..."]}]}`)
 	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
 		return nil, err
 	}
-	var plan plannerOutput
-	if err := decodeLoose(content, &plan); err != nil {
+	plan, err := decodePlannerOutput(content)
+	if err != nil {
 		return nil, fmt.Errorf("planner output: %w", err)
-	}
-	if len(plan.Questions) == 0 {
-		return nil, fmt.Errorf("planner produced no questions")
-	}
-	for index := range plan.Questions {
-		question := &plan.Questions[index]
-		question.ID = fmt.Sprintf("rq-%03d", index+1)
-		if question.Priority <= 0 {
-			question.Priority = index + 1
-		}
-		if len(question.SearchQueries) == 0 {
-			question.SearchQueries = []string{question.Question}
-		}
-		if len(question.SearchQueries) > 4 {
-			question.SearchQueries = question.SearchQueries[:4]
-		}
-	}
-	if len(plan.Questions) > 8 {
-		plan.Questions = plan.Questions[:8]
 	}
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), "plan", "application/json", plan); err != nil {
 		return nil, err
@@ -125,6 +168,16 @@ func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Env
 type searchOutput struct {
 	Question *Question   `json:"question"`
 	Sources  []SourceHit `json:"sources"`
+}
+
+// searchSummary is intentionally compact. Dynamic child outputs are rendered
+// into downstream step goals, whose Runtime Interface limit is 16 KiB. The
+// complete source hits are already stored in durable memory, so returning
+// snippets, titles, and URLs here only risks rejecting the downstream start.
+type searchSummary struct {
+	QuestionID  string   `json:"questionId"`
+	SourceCount int      `json:"sourceCount"`
+	SourceIDs   []string `json:"sourceIds"`
 }
 
 func runSearch(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -195,7 +248,13 @@ func runSearch(ctx context.Context, deps Deps, executionID string, envelope Enve
 			return nil, err
 		}
 	}
-	output, _ := json.Marshal(searchOutput{Question: question, Sources: sources})
+	sourceIDs := make([]string, 0, len(sources))
+	for _, source := range sources {
+		sourceIDs = append(sourceIDs, source.SourceID)
+	}
+	output, _ := json.Marshal(searchSummary{
+		QuestionID: question.ID, SourceCount: len(sources), SourceIDs: sourceIDs,
+	})
 	return output, nil
 }
 
@@ -269,11 +328,11 @@ func runCollector(ctx context.Context, deps Deps, executionID string, envelope E
 	}
 	sort.Strings(order)
 	result := collectorOutput{SpawnedReaders: []string{}, Skipped: []string{}}
-	// One exact-key scan decides what still needs reading: "claimId" is the
-	// JSON field name shared by every stored evidence bundle, so the scan
-	// enumerates the whole namespace regardless of content wording.
+	// One exact-key scan decides what still needs reading: "sourceId" is shared
+	// by grounded bundles and audited skip markers, so both outcomes prevent a
+	// failed or redirected source from being spawned again in a later round.
 	readKeys := map[string]bool{}
-	evidenceRecords, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "claimId", 100)
+	evidenceRecords, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "sourceId", 100)
 	if err != nil {
 		return nil, fmt.Errorf("collector evidence scan: %w", err)
 	}
@@ -339,6 +398,74 @@ type EvidenceBundle struct {
 	Claims             []Claim `json:"claims"`
 }
 
+// readerSummary keeps dependency rendering bounded. The full grounded bundle
+// is written to evidence memory before this receipt is returned.
+type readerSummary struct {
+	SourceID    string   `json:"sourceId"`
+	ClaimCount  int      `json:"claimCount"`
+	EvidenceIDs []string `json:"evidenceIds"`
+	Skipped     bool     `json:"skipped,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
+type readerWireClaim struct {
+	Claim      string          `json:"claim"`
+	Statement  string          `json:"statement"`
+	Evidence   json.RawMessage `json:"evidence"`
+	Quote      string          `json:"quote"`
+	Confidence float64         `json:"confidence"`
+}
+
+func decodeReaderClaims(content string) ([]Claim, error) {
+	var wire struct {
+		Claims []readerWireClaim `json:"claims"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return nil, err
+	}
+	claims := make([]Claim, 0, len(wire.Claims))
+	for _, candidate := range wire.Claims {
+		statement := strings.TrimSpace(candidate.Claim)
+		if statement == "" {
+			statement = strings.TrimSpace(candidate.Statement)
+		}
+		evidence := strings.TrimSpace(candidate.Quote)
+		if evidence == "" && len(candidate.Evidence) > 0 {
+			_ = json.Unmarshal(candidate.Evidence, &evidence)
+			if evidence == "" {
+				var object struct {
+					Quote   string `json:"quote"`
+					Text    string `json:"text"`
+					Passage string `json:"passage"`
+				}
+				if json.Unmarshal(candidate.Evidence, &object) == nil {
+					evidence = strings.TrimSpace(object.Quote)
+					if evidence == "" {
+						evidence = strings.TrimSpace(object.Text)
+					}
+					if evidence == "" {
+						evidence = strings.TrimSpace(object.Passage)
+					}
+				}
+			}
+		}
+		if statement != "" && evidence != "" {
+			claims = append(claims, Claim{Claim: statement, Evidence: evidence, Confidence: candidate.Confidence})
+		}
+	}
+	return claims, nil
+}
+
+func skipReader(ctx context.Context, deps Deps, executionID string, source *SourceHit, cause error) (json.RawMessage, error) {
+	reason := truncate(strings.TrimSpace(cause.Error()), 240)
+	marker := readerSummary{SourceID: source.SourceID, EvidenceIDs: []string{}, Skipped: true, Reason: reason}
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "read-"+source.SourceID, "application/json", marker); err != nil {
+		return nil, err
+	}
+	output, _ := json.Marshal(marker)
+	return output, nil
+}
+
 func runReader(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
 	if envelope.Source == nil {
 		return nil, fmt.Errorf("reader envelope carries no source")
@@ -346,25 +473,25 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	source := envelope.Source
 	fetched, err := CallTenantTool(ctx, deps.MCP, executionID, "web.fetch", map[string]any{"url": source.URL})
 	if err != nil {
-		return nil, err
+		return skipReader(ctx, deps, executionID, source, err)
 	}
 	var document FetchedDocument
 	if err := json.Unmarshal(fetched, &document); err != nil {
-		return nil, fmt.Errorf("decode fetch result: %w", err)
+		return skipReader(ctx, deps, executionID, source, fmt.Errorf("decode fetch result: %w", err))
 	}
 	system := "You extract verifiable factual claims from a source document for a research pipeline. " +
-		"Extract 2-6 claims most relevant to the research question. Every claim needs the exact supporting passage as evidence. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Research question (%s):\n%s\n\nDocument id: %s\nDocument title: %s\nDocument body:\n%s",
-		source.ResearchQuestionID, source.QuestionText, document.SourceID, document.Title, document.Content)
+		"Extract 2-6 claims most relevant to the research question. Evidence MUST be one exact, contiguous, verbatim passage copied from the document body. " +
+		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
+	user := fmt.Sprintf("Research question (%s):\n%s\n\nDocument id: %s\nDocument title: %s\nDocument body:\n%s\n\nReturn schema:\n%s",
+		source.ResearchQuestionID, source.QuestionText, document.SourceID, document.Title, document.Content,
+		`{"claims":[{"claim":"...","evidence":"exact verbatim passage","confidence":0.87}]}`)
 	content, err := InvokeModelText(ctx, deps, executionID, deps.Models.Reader, system, user)
 	if err != nil {
-		return nil, err
+		return skipReader(ctx, deps, executionID, source, err)
 	}
-	var parsed struct {
-		Claims []Claim `json:"claims"`
-	}
-	if err := decodeLoose(content, &parsed); err != nil {
-		return nil, fmt.Errorf("reader output: %w", err)
+	claims, err := decodeReaderClaims(content)
+	if err != nil {
+		return skipReader(ctx, deps, executionID, source, fmt.Errorf("reader output: %w", err))
 	}
 	// Evidence → Original Source grounding (roadmap §3.4): every claim's
 	// evidence must appear verbatim in the fetched document text; claims
@@ -372,7 +499,7 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	bundle := EvidenceBundle{
 		SourceID: document.SourceID, ResearchQuestionID: source.ResearchQuestionID,
 		Title: document.Title, URL: document.URL,
-		Claims: groundClaims(parsed.Claims, document.Content),
+		Claims: groundClaims(claims, document.Content),
 	}
 	for index := range bundle.Claims {
 		bundle.Claims[index].ClaimID = fmt.Sprintf("%s-claim-%03d", bundle.SourceID, index+1)
@@ -384,17 +511,24 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 		bundle.Claims = bundle.Claims[:6]
 	}
 	if len(bundle.Claims) == 0 {
-		return nil, fmt.Errorf("reader produced no grounded claims for %s", bundle.SourceID)
+		return skipReader(ctx, deps, executionID, source,
+			fmt.Errorf("reader produced no grounded claims for %s", bundle.SourceID))
 	}
 	// "ev-" carries the (upgraded) evidence bundle; "read-" is the marker the
 	// collector checks to avoid re-spawning a completed source.
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "ev-"+bundle.SourceID, "application/json", bundle); err != nil {
 		return nil, err
 	}
-	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "read-"+bundle.SourceID, "application/json", bundle); err != nil {
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "read-"+source.SourceID, "application/json", bundle); err != nil {
 		return nil, err
 	}
-	output, _ := json.Marshal(bundle)
+	evidenceIDs := make([]string, 0, len(bundle.Claims))
+	for _, claim := range bundle.Claims {
+		evidenceIDs = append(evidenceIDs, claim.ClaimID)
+	}
+	output, _ := json.Marshal(readerSummary{
+		SourceID: bundle.SourceID, ClaimCount: len(bundle.Claims), EvidenceIDs: evidenceIDs,
+	})
 	return output, nil
 }
 
@@ -596,28 +730,103 @@ func collectEvidence(ctx context.Context, deps Deps, executionID string, envelop
 
 // -- critic ------------------------------------------------------------------
 
+type criticGap struct {
+	GapID            string   `json:"gapId"`
+	Question         string   `json:"question"`
+	Severity         string   `json:"severity"`
+	SuggestedQueries []string `json:"suggestedQueries"`
+}
+
 type criticDecision struct {
-	Status string  `json:"status"`
-	Score  float64 `json:"score"`
-	Gaps   []struct {
-		GapID            string   `json:"gapId"`
-		Question         string   `json:"question"`
-		Severity         string   `json:"severity"`
-		SuggestedQueries []string `json:"suggestedQueries"`
-	} `json:"gaps"`
-	Passthrough bool `json:"passthrough,omitempty"`
+	Status      string      `json:"status"`
+	Score       float64     `json:"score"`
+	Gaps        []criticGap `json:"gaps"`
+	Passthrough bool        `json:"passthrough,omitempty"`
+}
+
+type criticWireGap struct {
+	GapID            string   `json:"gapId"`
+	Question         string   `json:"question"`
+	Description      string   `json:"description"`
+	Gap              string   `json:"gap"`
+	Severity         string   `json:"severity"`
+	SuggestedQueries []string `json:"suggestedQueries"`
+	Queries          []string `json:"queries"`
+}
+
+func decodeCriticOutput(content string) (criticDecision, error) {
+	var wire struct {
+		Status  string          `json:"status"`
+		Verdict string          `json:"verdict"`
+		Score   float64         `json:"score"`
+		Gaps    []criticWireGap `json:"gaps"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return criticDecision{}, err
+	}
+	status := strings.ToUpper(strings.TrimSpace(wire.Status))
+	if status == "" {
+		status = strings.ToUpper(strings.TrimSpace(wire.Verdict))
+	}
+	decision := criticDecision{Status: status, Score: wire.Score, Gaps: make([]criticGap, 0, min(len(wire.Gaps), 4))}
+	for _, candidate := range wire.Gaps {
+		question := strings.TrimSpace(candidate.Question)
+		if question == "" {
+			question = strings.TrimSpace(candidate.Description)
+		}
+		if question == "" {
+			question = strings.TrimSpace(candidate.Gap)
+		}
+		if question == "" {
+			continue
+		}
+		queries := candidate.SuggestedQueries
+		if len(queries) == 0 {
+			queries = candidate.Queries
+		}
+		cleanQueries := make([]string, 0, min(len(queries), 3))
+		for _, query := range queries {
+			if query = strings.TrimSpace(query); query != "" {
+				cleanQueries = append(cleanQueries, query)
+				if len(cleanQueries) == 3 {
+					break
+				}
+			}
+		}
+		if len(cleanQueries) == 0 {
+			cleanQueries = []string{question}
+		}
+		decision.Gaps = append(decision.Gaps, criticGap{
+			GapID: candidate.GapID, Question: question,
+			Severity: strings.TrimSpace(candidate.Severity), SuggestedQueries: cleanQueries,
+		})
+		if len(decision.Gaps) == 4 {
+			break
+		}
+	}
+	if len(wire.Gaps) > 0 && len(decision.Gaps) == 0 {
+		return criticDecision{}, fmt.Errorf("critic produced gaps without usable questions")
+	}
+	if decision.Status == "" {
+		if decision.Score >= 0.75 && len(decision.Gaps) == 0 {
+			decision.Status = "PASS"
+		} else {
+			decision.Status = "NEEDS_MORE_RESEARCH"
+		}
+	}
+	switch decision.Status {
+	case "PASS", "NEEDS_MORE_RESEARCH", "INSUFFICIENT_EVIDENCE":
+	default:
+		return criticDecision{}, fmt.Errorf("unsupported status %q", decision.Status)
+	}
+	return decision, nil
 }
 
 func runCritic(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
 	decisionKey := fmt.Sprintf("critic-r%d", envelope.Round)
 	// Carried PASS: the previous round already accepted the analysis.
 	if upstreamVerdict(envelope.Goal) == "PASS" && envelope.Round > 1 {
-		decision := criticDecision{Status: "PASS", Score: -1, Gaps: []struct {
-			GapID            string   `json:"gapId"`
-			Question         string   `json:"question"`
-			Severity         string   `json:"severity"`
-			SuggestedQueries []string `json:"suggestedQueries"`
-		}{}, Passthrough: true}
+		decision := criticDecision{Status: "PASS", Score: -1, Gaps: []criticGap{}, Passthrough: true}
 		decision.Score = 0.99
 		if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("gaps"), decisionKey, "application/json", decision); err != nil {
 			return nil, err
@@ -647,14 +856,15 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	system := "You are a research critic. Judge whether the analysis answers the original goal rigorously. " +
 		"If specific, answerable sub-questions remain unaddressed, return NEEDS_MORE_RESEARCH with at most 4 gaps, each with 1-3 suggested search queries. " +
 		"A score below 0.75 means more research is needed. When Round >= 3 do not force PASS: if the evidence base is still too thin, return INSUFFICIENT_EVIDENCE. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Original goal summary:\n%s\n\nRound: %d of 3\n\nAnalysis under review:\n%s",
-		truncate(strings.TrimPrefix(envelope.Goal, envelopePrefix), 2000), envelope.Round, truncate(analysisRaw, 16000))
+	user := fmt.Sprintf("Original goal summary:\n%s\n\nRound: %d of 3\n\nAnalysis under review:\n%s\n\nReturn schema:\n%s",
+		truncate(strings.TrimPrefix(envelope.Goal, envelopePrefix), 2000), envelope.Round, truncate(analysisRaw, 16000),
+		`{"status":"PASS|NEEDS_MORE_RESEARCH|INSUFFICIENT_EVIDENCE","score":0.87,"gaps":[{"gapId":"gap-001","question":"...","severity":"high|medium|low","suggestedQueries":["..."]}]}`)
 	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
 		return nil, err
 	}
-	var decision criticDecision
-	if err := decodeLoose(content, &decision); err != nil {
+	decision, err := decodeCriticOutput(content)
+	if err != nil {
 		return nil, fmt.Errorf("critic output: %w", err)
 	}
 	if decision.Score >= 0 && decision.Score < 0.75 && decision.Status == "PASS" && envelope.Round < 3 {
@@ -666,12 +876,7 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	// acceptance.
 	applyCriticTerminalRule(&decision.Status, envelope.Round)
 	if decision.Gaps == nil {
-		decision.Gaps = []struct {
-			GapID            string   `json:"gapId"`
-			Question         string   `json:"question"`
-			Severity         string   `json:"severity"`
-			SuggestedQueries []string `json:"suggestedQueries"`
-		}{}
+		decision.Gaps = []criticGap{}
 	}
 	if decision.Status == "NEEDS_MORE_RESEARCH" && len(decision.Gaps) == 0 {
 		decision.Status = "PASS" // a demand for more research without gaps is vacuous
@@ -728,6 +933,103 @@ type reportDoc struct {
 	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
 }
 
+type reportWireSection struct {
+	Heading string `json:"heading"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	Content string `json:"content"`
+	Text    string `json:"text"`
+}
+
+type reportWireCitation struct {
+	Marker     string `json:"marker"`
+	Citation   string `json:"citation"`
+	EvidenceID string `json:"evidenceId"`
+	ClaimID    string `json:"claimId"`
+	SourceID   string `json:"sourceId"`
+	Quote      string `json:"quote"`
+	Evidence   string `json:"evidence"`
+}
+
+type reportWire struct {
+	Title            string               `json:"title"`
+	ReportTitle      string               `json:"reportTitle"`
+	Summary          string               `json:"summary"`
+	ExecutiveSummary string               `json:"executiveSummary"`
+	Abstract         string               `json:"abstract"`
+	Sections         []reportWireSection  `json:"sections"`
+	Citations        []reportWireCitation `json:"citations"`
+	Report           *reportWire          `json:"report"`
+}
+
+func decodeReportOutput(content string) (reportDoc, error) {
+	var wire reportWire
+	if err := decodeLoose(content, &wire); err != nil {
+		return reportDoc{}, err
+	}
+	if wire.Report != nil && strings.TrimSpace(wire.Title) == "" && len(wire.Sections) == 0 {
+		wire = *wire.Report
+	}
+	title := strings.TrimSpace(wire.Title)
+	if title == "" {
+		title = strings.TrimSpace(wire.ReportTitle)
+	}
+	summary := strings.TrimSpace(wire.Summary)
+	if summary == "" {
+		summary = strings.TrimSpace(wire.ExecutiveSummary)
+	}
+	if summary == "" {
+		summary = strings.TrimSpace(wire.Abstract)
+	}
+	report := reportDoc{Title: title, Summary: summary, Sections: make([]section, 0, len(wire.Sections)), Citations: make([]citation, 0, len(wire.Citations))}
+	for _, candidate := range wire.Sections {
+		heading := strings.TrimSpace(candidate.Heading)
+		if heading == "" {
+			heading = strings.TrimSpace(candidate.Title)
+		}
+		body := strings.TrimSpace(candidate.Body)
+		if body == "" {
+			body = strings.TrimSpace(candidate.Content)
+		}
+		if body == "" {
+			body = strings.TrimSpace(candidate.Text)
+		}
+		if heading != "" && body != "" {
+			report.Sections = append(report.Sections, section{Heading: heading, Body: body})
+		}
+	}
+	for index, candidate := range wire.Citations {
+		marker := strings.TrimSpace(candidate.Marker)
+		if marker == "" {
+			marker = strings.TrimSpace(candidate.Citation)
+		}
+		if marker == "" {
+			marker = fmt.Sprintf("[%d]", index+1)
+		}
+		evidenceID := strings.TrimSpace(candidate.EvidenceID)
+		if evidenceID == "" {
+			evidenceID = strings.TrimSpace(candidate.ClaimID)
+		}
+		quote := strings.TrimSpace(candidate.Quote)
+		if quote == "" {
+			quote = strings.TrimSpace(candidate.Evidence)
+		}
+		sourceID := strings.TrimSpace(candidate.SourceID)
+		if sourceID == "" {
+			if prefix, _, ok := strings.Cut(evidenceID, "-claim-"); ok {
+				sourceID = prefix
+			}
+		}
+		report.Citations = append(report.Citations, citation{
+			Marker: marker, EvidenceID: evidenceID, SourceID: sourceID, Quote: quote,
+		})
+	}
+	if report.Title == "" || report.Summary == "" || len(report.Sections) == 0 {
+		return reportDoc{}, fmt.Errorf("writer produced an incomplete report")
+	}
+	return report, nil
+}
+
 func runWriter(ctx context.Context, deps Deps, executionID string, envelope Envelope, feedback string) (json.RawMessage, string, error) {
 	bundles := collectEvidence(ctx, deps, executionID, envelope)
 	if len(bundles) == 0 {
@@ -741,8 +1043,11 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 		}
 	}
 	system := "You write the final research report strictly from the supplied findings and evidence. " +
-		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s", truncate(analysisRaw, 12000), truncate(renderBundles(bundles), 20000))
+		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " +
+		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
+	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s\n\nReturn schema:\n%s",
+		truncate(analysisRaw, 12000), truncate(renderBundles(bundles), 20000),
+		`{"title":"...","summary":"...","sections":[{"heading":"...","body":"... [1]"}],"citations":[{"marker":"[1]","evidenceId":"src-001-claim-001","sourceId":"src-001","quote":"exact verbatim passage"}]}`)
 	if feedback != "" {
 		user += "\n\nRevision feedback from the citation validator:\n" + feedback
 	}
@@ -750,12 +1055,9 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if err != nil {
 		return nil, "", err
 	}
-	var report reportDoc
-	if err := decodeLoose(content, &report); err != nil {
+	report, err := decodeReportOutput(content)
+	if err != nil {
 		return nil, "", fmt.Errorf("writer output: %w", err)
-	}
-	if report.Title == "" || report.Summary == "" || len(report.Sections) == 0 {
-		return nil, "", fmt.Errorf("writer produced an incomplete report")
 	}
 	report.InsufficientEvidence = upstreamVerdict(envelope.Goal) == "INSUFFICIENT_EVIDENCE"
 	encoded, _ := json.Marshal(report)

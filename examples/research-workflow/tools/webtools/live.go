@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -26,6 +27,8 @@ const (
 	liveFetchTimeout   = 20 * time.Second
 	braveSearchAPI     = "https://api.search.brave.com/res/v1/web/search"
 	bingSearchAPI      = "https://api.bing.microsoft.com/v7.0/search"
+	doubaoSearchAPI    = "https://open.feedcoopapi.com/search_api/web_search"
+	doubaoMinInterval  = 250 * time.Millisecond // 4 QPS, below the documented default 5 QPS quota
 	liveUserAgent      = "AgentOS-Research/1.0 (+https://agentos.example/bot)"
 	liveSourceIDPrefix = "live-"
 )
@@ -148,6 +151,130 @@ func (b *BingSearch) Search(ctx context.Context, query string, limit int) ([]Sea
 		}
 		hits = append(hits, SearchHit{
 			SourceID: liveSourceID(item.URL), Title: item.Name, URL: item.URL, Snippet: item.Snippet,
+		})
+	}
+	return hits, nil
+}
+
+// DoubaoSearch implements Backend.Search against Volcengine Doubao Search
+// Custom. The public tool contract remains web.search@1.0.0; only this
+// provider adapter knows the vendor request/response envelope.
+type DoubaoSearch struct {
+	APIKey   string
+	Endpoint string // overridable for tests; defaults to doubaoSearchAPI
+	Client   *http.Client
+	rateMu   sync.Mutex
+	nextCall time.Time
+}
+
+func (d *DoubaoSearch) waitForQuota(ctx context.Context) error {
+	d.rateMu.Lock()
+	now := time.Now()
+	scheduled := now
+	if d.nextCall.After(scheduled) {
+		scheduled = d.nextCall
+	}
+	d.nextCall = scheduled.Add(doubaoMinInterval)
+	d.rateMu.Unlock()
+	if delay := time.Until(scheduled); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+// Search queries Doubao Search Custom using its recommended API-key access
+// mode. Search results without an original URL are excluded because the
+// research workflow must be able to fetch and independently ground them.
+func (d *DoubaoSearch) Search(ctx context.Context, query string, limit int) ([]SearchHit, error) {
+	if strings.TrimSpace(d.APIKey) == "" {
+		return nil, fmt.Errorf("doubao search API key is required")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("doubao search query is required")
+	}
+	if err := d.waitForQuota(ctx); err != nil {
+		return nil, fmt.Errorf("doubao search quota wait: %w", err)
+	}
+	endpoint := d.Endpoint
+	if endpoint == "" {
+		endpoint = doubaoSearchAPI
+	}
+	client := d.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	body, err := json.Marshal(struct {
+		Query      string `json:"Query"`
+		SearchType string `json:"SearchType"`
+		Count      int    `json:"Count"`
+		Filter     struct {
+			NeedContent bool `json:"NeedContent"`
+			NeedURL     bool `json:"NeedUrl"`
+		} `json:"Filter"`
+	}{Query: query, SearchType: "web", Count: min(max(limit, 1), 50), Filter: struct {
+		NeedContent bool `json:"NeedContent"`
+		NeedURL     bool `json:"NeedUrl"`
+	}{NeedContent: false, NeedURL: true}})
+	if err != nil {
+		return nil, fmt.Errorf("encode doubao search request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(d.APIKey))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", liveUserAgent)
+	var document struct {
+		ResponseMetadata struct {
+			RequestID string `json:"RequestId"`
+			Error     *struct {
+				Code    string `json:"Code"`
+				Message string `json:"Message"`
+			} `json:"Error"`
+		} `json:"ResponseMetadata"`
+		Result *struct {
+			WebResults []struct {
+				Title       string `json:"Title"`
+				URL         string `json:"Url"`
+				Snippet     string `json:"Snippet"`
+				Summary     string `json:"Summary"`
+				PublishTime string `json:"PublishTime"`
+			} `json:"WebResults"`
+		} `json:"Result"`
+	}
+	if err := decodeLiveJSON(client, request, &document); err != nil {
+		return nil, err
+	}
+	if document.ResponseMetadata.Error != nil {
+		providerErr := document.ResponseMetadata.Error
+		return nil, fmt.Errorf("doubao search error %s: %s",
+			providerErr.Code, strings.TrimSpace(providerErr.Message))
+	}
+	if document.Result == nil {
+		return nil, fmt.Errorf("doubao search response has no result (request %s)",
+			document.ResponseMetadata.RequestID)
+	}
+	hits := make([]SearchHit, 0, len(document.Result.WebResults))
+	for _, item := range document.Result.WebResults {
+		if strings.TrimSpace(item.URL) == "" {
+			continue
+		}
+		snippet := strings.TrimSpace(item.Snippet)
+		if snippet == "" {
+			snippet = strings.TrimSpace(item.Summary)
+		}
+		hits = append(hits, SearchHit{
+			SourceID: liveSourceID(item.URL), Title: item.Title, URL: item.URL,
+			Snippet: snippet, PublishedAt: item.PublishTime,
 		})
 	}
 	return hits, nil

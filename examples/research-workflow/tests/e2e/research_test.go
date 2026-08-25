@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const settleTimeout = 4 * time.Minute
+const (
+	settleTimeout    = 4 * time.Minute
+	liveModelTimeout = 12 * time.Minute
+	liveFullTimeout  = 15 * time.Minute
+)
 
 // Phase 1 acceptance: one goal -> >=3 questions -> >=10 sources -> >=30
 // evidence claims, every artifact stored in the workflow's memory tree.
@@ -503,7 +508,11 @@ func (h *harness) collectLiveMetrics(id uuid.UUID, started time.Time) liveMetric
 		if end < 0 {
 			continue
 		}
-		parsed, err := url.Parse("https://" + strings.TrimRight(raw[:end+1], `",`))
+		candidate, err := strconv.Unquote(`"` + raw[:end] + `"`)
+		if err != nil {
+			continue
+		}
+		parsed, err := url.Parse(candidate)
 		if err != nil {
 			continue
 		}
@@ -535,7 +544,7 @@ func (h *harness) collectLiveMetrics(id uuid.UUID, started time.Time) liveMetric
 		query  string
 		target *int
 	}{
-		{`SELECT COUNT(DISTINCT name) FROM workflow_steps WHERE workflow_id = $1 AND name LIKE 'critic-r%' AND phase = 'SUCCEEDED'`, &metrics.CriticRounds},
+		{`SELECT COUNT(DISTINCT name) FROM workflow_steps WHERE workflow_id = $1 AND name LIKE 'critic-r%' AND status = 'SUCCEEDED'`, &metrics.CriticRounds},
 		{`SELECT COUNT(*) FROM model_calls mc JOIN tasks t ON t.id = mc.task_id WHERE t.workflow_id = $1 AND mc.status = 'COMPLETED'`, &metrics.ModelCalls},
 		{`SELECT COUNT(*) FROM model_calls mc JOIN tasks t ON t.id = mc.task_id WHERE t.workflow_id = $1 AND mc.status = 'FAILED'`, &metrics.ModelFailures},
 		{`SELECT COUNT(*) FROM tool_calls tc JOIN tasks t ON t.id = tc.task_id WHERE t.workflow_id = $1`, &metrics.ToolCalls},
@@ -547,7 +556,8 @@ func (h *harness) collectLiveMetrics(id uuid.UUID, started time.Time) liveMetric
 		}
 	}
 	if err := h.pool.QueryRow(ctx, `SELECT
-			COALESCE(SUM(input_tokens + output_tokens), 0), COALESCE(SUM(cost_usd), 0)
+			COALESCE(SUM(input_tokens + output_tokens), 0),
+			COALESCE(SUM(cost_micro_usd), 0)::double precision / 1000000.0
 			FROM model_calls mc JOIN tasks t ON t.id = mc.task_id
 			WHERE t.workflow_id = $1 AND mc.status = 'COMPLETED'`, id).Scan(&metrics.Tokens, &metrics.CostUSD); err != nil {
 		h.t.Fatalf("usage query: %v", err)
@@ -570,7 +580,7 @@ func TestResearchWorkflowLiveModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create research: %v", err)
 	}
-	workflow := h.requireCompleted(id, settleTimeout+time.Minute)
+	workflow := h.requireCompleted(id, liveModelTimeout)
 
 	var validation struct {
 		CitationCoverage  float64 `json:"citationCoverage"`
@@ -605,7 +615,7 @@ func TestResearchWorkflowLiveFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create research: %v", err)
 	}
-	h.requireCompleted(id, settleTimeout+4*time.Minute)
+	h.requireCompleted(id, liveFullTimeout)
 
 	metrics := h.collectLiveMetrics(id, started)
 	// Acceptance gates from implementation plan §5.
