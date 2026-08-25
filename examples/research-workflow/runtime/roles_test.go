@@ -18,6 +18,7 @@ type readerMCPStub struct {
 	modelResult json.RawMessage
 	modelErr    error
 	putKeys     []string
+	records     map[string]string
 }
 
 func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, args any) (json.RawMessage, error) {
@@ -30,9 +31,22 @@ func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, ar
 		if values, ok := args.(map[string]any); ok {
 			if key, ok := values["key"].(string); ok {
 				stub.putKeys = append(stub.putKeys, key)
+				if stub.records == nil {
+					stub.records = map[string]string{}
+				}
+				if content, ok := values["content"].(string); ok {
+					stub.records[key] = content
+				}
 			}
 		}
 		return json.RawMessage(`{}`), nil
+	case "agentos.memory.search":
+		records := make([]MemoryRecord, 0, len(stub.records))
+		for key, content := range stub.records {
+			records = append(records, MemoryRecord{Key: key, Content: content})
+		}
+		page, _ := json.Marshal(map[string]any{"records": records})
+		return page, nil
 	default:
 		return nil, nil
 	}
@@ -80,8 +94,13 @@ func TestReaderRetryableFetchDoesNotWriteMarker(t *testing.T) {
 		!strings.Contains(err.Error(), "retryable") {
 		t.Fatalf("reader retry error = %v", err)
 	}
-	if len(stub.putKeys) != 0 {
-		t.Fatalf("transient failure wrote permanent markers: %v", stub.putKeys)
+	if len(stub.putKeys) != 1 || stub.putKeys[0] != "retry-src-reader" {
+		t.Fatalf("transient failure marker state = %v", stub.putKeys)
+	}
+	for _, key := range stub.putKeys {
+		if strings.HasPrefix(key, "read-") {
+			t.Fatalf("transient failure wrote permanent read marker: %v", stub.putKeys)
+		}
 	}
 }
 
@@ -108,11 +127,45 @@ func TestReaderModelFailureDoesNotWriteMarker(t *testing.T) {
 		modelErr:    &MCPToolError{Code: "PROVIDER_UNAVAILABLE", Message: "temporary"},
 	}
 	if _, err := runReader(context.Background(), readerTestDeps(stub), "exec-reader", readerTestEnvelope()); err == nil ||
-		!strings.Contains(err.Error(), "reader model") {
+		!strings.Contains(err.Error(), "retryable model") {
 		t.Fatalf("reader model error = %v", err)
 	}
-	if len(stub.putKeys) != 0 {
-		t.Fatalf("model failure wrote permanent markers: %v", stub.putKeys)
+	if len(stub.putKeys) != 1 || stub.putKeys[0] != "retry-src-reader" {
+		t.Fatalf("model failure retry state = %v", stub.putKeys)
+	}
+	for _, key := range stub.putKeys {
+		if strings.HasPrefix(key, "read-") {
+			t.Fatalf("model failure wrote permanent read marker: %v", stub.putKeys)
+		}
+	}
+}
+
+func TestReaderRetryExhaustionBecomesAuditedSkip(t *testing.T) {
+	stub := &readerMCPStub{fetchErr: &MCPToolError{Code: "TOOL_ENDPOINT_HTTP_503"}}
+	for attempt := 1; attempt <= readerMaxTransientFailures; attempt++ {
+		result, err := runReader(context.Background(), readerTestDeps(stub), "exec-reader", readerTestEnvelope())
+		if attempt < readerMaxTransientFailures {
+			if err == nil || result != nil {
+				t.Fatalf("attempt %d must request retry: result=%s err=%v", attempt, result, err)
+			}
+			if _, exists := stub.records["read-src-reader"]; exists {
+				t.Fatalf("attempt %d wrote read marker before exhaustion", attempt)
+			}
+			continue
+		}
+		if err != nil || !strings.Contains(string(result), `"skipped":true`) {
+			t.Fatalf("final attempt must degrade to skip: result=%s err=%v", result, err)
+		}
+	}
+	var state readerRetryState
+	if err := json.Unmarshal([]byte(stub.records["retry-src-reader"]), &state); err != nil {
+		t.Fatalf("decode retry audit: %v", err)
+	}
+	if state.Failures != readerMaxTransientFailures || state.Disposition != "SKIP_RETRY_EXHAUSTED" {
+		t.Fatalf("retry audit = %+v", state)
+	}
+	if _, exists := stub.records["read-src-reader"]; !exists {
+		t.Fatal("exhausted retry did not write terminal read marker")
 	}
 }
 

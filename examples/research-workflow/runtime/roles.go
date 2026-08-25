@@ -273,7 +273,10 @@ type collectorOutput struct {
 // maxChildrenPerStep guard. Exceeding it would fail the collector step, and
 // a failed spawn parent leaves its join group permanently open — so the
 // collector defers surplus sources to a later round instead.
-const maxReadersPerDrain = 8
+const (
+	maxReadersPerDrain         = 8
+	readerMaxTransientFailures = 3 // kept equal to spawned Reader maxAttempts
+)
 
 // runCollector drains every source discovered by its dependency group and
 // spawns one reader task per unread source. It performs no model call: the
@@ -359,7 +362,7 @@ func runCollector(ctx context.Context, deps Deps, executionID string, envelope E
 		childGoal := encodeEnvelope(Envelope{
 			Role: "reader", Workflow: envelope.Workflow, Round: envelope.Round, Source: &hit,
 		})
-		if err := SpawnChild(ctx, deps.MCP, executionID, name, "research-reader@1.0.0", childGoal, 3); err != nil {
+		if err := SpawnChild(ctx, deps.MCP, executionID, name, "research-reader@1.0.0", childGoal, readerMaxTransientFailures); err != nil {
 			return nil, err
 		}
 		result.SpawnedReaders = append(result.SpawnedReaders, name)
@@ -469,6 +472,51 @@ func skipReader(ctx context.Context, deps Deps, executionID string, source *Sour
 	return output, nil
 }
 
+type readerRetryState struct {
+	SourceID    string `json:"sourceId"`
+	Failures    int    `json:"failures"`
+	LastReason  string `json:"lastReason"`
+	Disposition string `json:"disposition"`
+}
+
+// retryReader records a non-terminal failure without writing read-<source>.
+// On the final configured attempt it degrades explicitly to an audited SKIP,
+// preventing one permanently unreachable URL from poisoning the dynamic
+// Reader join while retaining proof that retries were exhausted.
+func retryReader(ctx context.Context, deps Deps, executionID string, source *SourceHit, label string, cause error) (json.RawMessage, error) {
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("reader %s interrupted: %w", label, cause)
+	}
+	key := "retry-" + source.SourceID
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), source.SourceID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("load Reader retry state: %w", err)
+	}
+	state := readerRetryState{SourceID: source.SourceID}
+	for _, record := range records {
+		if record.Key == key {
+			_ = json.Unmarshal([]byte(record.Content), &state)
+			break
+		}
+	}
+	state.SourceID = source.SourceID
+	state.Failures++
+	state.LastReason = truncate(strings.TrimSpace(cause.Error()), 240)
+	state.Disposition = "RETRY"
+	if state.Failures >= readerMaxTransientFailures {
+		state.Disposition = "SKIP_RETRY_EXHAUSTED"
+	}
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), key, "application/json", state); err != nil {
+		return nil, fmt.Errorf("persist Reader retry state: %w", err)
+	}
+	if state.Failures >= readerMaxTransientFailures {
+		return skipReader(ctx, deps, executionID, source,
+			fmt.Errorf("%s retry exhausted after %d attempts: %w", label, state.Failures, cause))
+	}
+	return nil, fmt.Errorf("reader retryable %s failure %d/%d: %w",
+		label, state.Failures, readerMaxTransientFailures, cause)
+}
+
 type ReaderErrorDisposition int
 
 const (
@@ -522,7 +570,7 @@ func handleReaderFetchError(ctx context.Context, deps Deps, executionID string, 
 	case ReaderFail:
 		return nil, fmt.Errorf("reader terminal fetch failure: %w", err)
 	default:
-		return nil, fmt.Errorf("reader retryable fetch failure: %w", err)
+		return retryReader(ctx, deps, executionID, source, "fetch", err)
 	}
 }
 
@@ -537,7 +585,10 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	var document FetchedDocument
 	if err := json.Unmarshal(fetched, &document); err != nil {
-		return nil, fmt.Errorf("decode fetch result: %w", err)
+		return retryReader(ctx, deps, executionID, source, "fetch decode", err)
+	}
+	if strings.TrimSpace(document.SourceID) == "" || strings.TrimSpace(document.URL) == "" || strings.TrimSpace(document.Content) == "" {
+		return retryReader(ctx, deps, executionID, source, "fetch contract", fmt.Errorf("fetched document is incomplete"))
 	}
 	system := "You extract verifiable factual claims from a source document for a research pipeline. " +
 		"Extract 2-6 claims most relevant to the research question. Evidence MUST be one exact, contiguous, verbatim passage copied from the document body. " +
@@ -547,11 +598,11 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 		`{"claims":[{"claim":"...","evidence":"exact verbatim passage","confidence":0.87}]}`)
 	content, err := InvokeModelText(ctx, deps, executionID, deps.Models.Reader, system, user)
 	if err != nil {
-		return nil, fmt.Errorf("reader model: %w", err)
+		return retryReader(ctx, deps, executionID, source, "model", err)
 	}
 	claims, err := decodeReaderClaims(content)
 	if err != nil {
-		return nil, fmt.Errorf("reader output: %w", err)
+		return retryReader(ctx, deps, executionID, source, "model output", err)
 	}
 	// Evidence → Original Source grounding (roadmap §3.4): every claim's
 	// evidence must appear verbatim in the fetched document text; claims
