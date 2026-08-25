@@ -157,9 +157,21 @@ func SpawnChild(ctx context.Context, mcp MCPClient, executionID, name, childRef,
 	}
 	if json.Unmarshal(raw, &outcome) == nil && outcome.Outcome != "" &&
 		outcome.Outcome != "created" && outcome.Outcome != "replayed" {
-		return fmt.Errorf("spawn %s denied: %s (%s)", name, outcome.Outcome, outcome.Message)
+		return &SpawnOutcomeError{Name: name, Outcome: outcome.Outcome, Message: outcome.Message}
 	}
 	return nil
+}
+
+// SpawnOutcomeError preserves the stable denial code so callers can treat
+// idempotent name conflicts differently from policy or budget denials.
+type SpawnOutcomeError struct {
+	Name    string
+	Outcome string
+	Message string
+}
+
+func (e *SpawnOutcomeError) Error() string {
+	return fmt.Sprintf("spawn %s denied: %s (%s)", e.Name, e.Outcome, e.Message)
 }
 
 // Envelope is the structured task payload every role finds inside its goal.

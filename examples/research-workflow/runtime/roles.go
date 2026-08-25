@@ -363,6 +363,14 @@ func runCollector(ctx context.Context, deps Deps, executionID string, envelope E
 			Role: "reader", Workflow: envelope.Workflow, Round: envelope.Round, Source: &hit,
 		})
 		if err := SpawnChild(ctx, deps.MCP, executionID, name, "research-reader@1.0.0", childGoal, readerMaxTransientFailures); err != nil {
+			// Reader step names are source-stable across rounds. A later
+			// collector—or a retried collector that created only part of its
+			// batch—may legitimately encounter an already-created step.
+			var outcome *SpawnOutcomeError
+			if errors.As(err, &outcome) && outcome.Outcome == "SPAWN_NAME_CONFLICT" {
+				result.Skipped = append(result.Skipped, hit.SourceID)
+				continue
+			}
 			return nil, err
 		}
 		result.SpawnedReaders = append(result.SpawnedReaders, name)
@@ -488,7 +496,7 @@ func retryReader(ctx context.Context, deps Deps, executionID string, source *Sou
 		return nil, fmt.Errorf("reader %s interrupted: %w", label, cause)
 	}
 	key := "retry-" + source.SourceID
-	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), source.SourceID, 20)
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("audit"), source.SourceID, 20)
 	if err != nil {
 		return nil, fmt.Errorf("load Reader retry state: %w", err)
 	}
@@ -506,7 +514,7 @@ func retryReader(ctx context.Context, deps Deps, executionID string, source *Sou
 	if state.Failures >= readerMaxTransientFailures {
 		state.Disposition = "SKIP_RETRY_EXHAUSTED"
 	}
-	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), key, "application/json", state); err != nil {
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("audit"), key, "application/json", state); err != nil {
 		return nil, fmt.Errorf("persist Reader retry state: %w", err)
 	}
 	if state.Failures >= readerMaxTransientFailures {

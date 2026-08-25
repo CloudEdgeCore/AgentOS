@@ -3,6 +3,7 @@ package research
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,7 @@ type readerMCPStub struct {
 	modelErr    error
 	putKeys     []string
 	records     map[string]string
+	namespaces  map[string]string
 }
 
 func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, args any) (json.RawMessage, error) {
@@ -34,8 +36,14 @@ func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, ar
 				if stub.records == nil {
 					stub.records = map[string]string{}
 				}
+				if stub.namespaces == nil {
+					stub.namespaces = map[string]string{}
+				}
 				if content, ok := values["content"].(string); ok {
 					stub.records[key] = content
+				}
+				if namespace, ok := values["namespace"].(string); ok {
+					stub.namespaces[key] = namespace
 				}
 			}
 		}
@@ -88,6 +96,15 @@ func TestInvokeModelRejectsTruncatedCompletion(t *testing.T) {
 	}
 }
 
+func TestSpawnChildPreservesNameConflictOutcome(t *testing.T) {
+	stub := &modelMCPStub{response: json.RawMessage(`{"outcome":"SPAWN_NAME_CONFLICT","message":"already exists"}`)}
+	err := SpawnChild(context.Background(), stub, "exec-1", "reader-source", "research-reader@1.0.0", "goal", 3)
+	var outcome *SpawnOutcomeError
+	if !errors.As(err, &outcome) || outcome.Outcome != "SPAWN_NAME_CONFLICT" || outcome.Name != "reader-source" {
+		t.Fatalf("spawn outcome = %#v, err=%v", outcome, err)
+	}
+}
+
 func TestReaderRetryableFetchDoesNotWriteMarker(t *testing.T) {
 	stub := &readerMCPStub{fetchErr: &MCPToolError{Code: "TOOL_ENDPOINT_HTTP_500"}}
 	if _, err := runReader(context.Background(), readerTestDeps(stub), "exec-reader", readerTestEnvelope()); err == nil ||
@@ -96,6 +113,9 @@ func TestReaderRetryableFetchDoesNotWriteMarker(t *testing.T) {
 	}
 	if len(stub.putKeys) != 1 || stub.putKeys[0] != "retry-src-reader" {
 		t.Fatalf("transient failure marker state = %v", stub.putKeys)
+	}
+	if stub.namespaces["retry-src-reader"] != "research/wf-reader/audit" {
+		t.Fatalf("retry audit namespace = %q", stub.namespaces["retry-src-reader"])
 	}
 	for _, key := range stub.putKeys {
 		if strings.HasPrefix(key, "read-") {
