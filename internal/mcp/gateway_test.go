@@ -9,6 +9,8 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var testIdentity = AttemptContext{
@@ -66,6 +68,34 @@ func TestAdapterCallsToolWithMappedIdentityAndDeterministicKey(t *testing.T) {
 	}
 	if invoker.keys[0] != invoker.keys[1] {
 		t.Fatalf("idempotency keys differ across identical calls: %v", invoker.keys)
+	}
+}
+
+func TestAdapterPreservesOnlyBoundedEndpointHTTPCode(t *testing.T) {
+	invoker := &fakeInvoker{descriptors: []store.ToolDescriptor{{
+		Name: "web.fetch", Version: "1.0.0", Actions: []string{"invoke"}, ResourcePatterns: []string{"web:fetch:*"},
+	}}}
+	adapter := NewToolAdapter(invoker, StaticIdentity{Context: testIdentity})
+	params := json.RawMessage(`{"name":"web.fetch","arguments":{"url":"https://example.com"}}`)
+
+	invoker.err = status.Error(codes.Aborted, "TOOL_ENDPOINT_HTTP_503")
+	result, rpcErr := adapter.CallTool(context.Background(), params)
+	if rpcErr != nil {
+		t.Fatalf("CallTool: %v", rpcErr)
+	}
+	text := result.(map[string]any)["content"].([]map[string]any)[0]["text"].(string)
+	if !strings.Contains(text, "TOOL_ENDPOINT_HTTP_503") {
+		t.Fatalf("bounded status code lost: %s", text)
+	}
+
+	invoker.err = status.Error(codes.Internal, "arbitrary sensitive detail")
+	result, rpcErr = adapter.CallTool(context.Background(), params)
+	if rpcErr != nil {
+		t.Fatalf("CallTool fallback: %v", rpcErr)
+	}
+	text = result.(map[string]any)["content"].([]map[string]any)[0]["text"].(string)
+	if !strings.Contains(text, "TOOL_INVOCATION_FAILED") || strings.Contains(text, "sensitive") {
+		t.Fatalf("unbounded status was exposed: %s", text)
 	}
 }
 
@@ -235,6 +265,7 @@ type fakeInvoker struct {
 	denied      bool
 	approvalID  uuid.UUID
 	replay      bool
+	err         error
 }
 
 func (f *fakeInvoker) ListTools(context.Context, string) ([]store.ToolDescriptor, error) {
@@ -245,6 +276,9 @@ func (f *fakeInvoker) InvokeTool(_ context.Context, in tool.InvokeInput) (tool.I
 	f.calls++
 	f.input = in
 	f.keys = append(f.keys, in.IdempotencyKey)
+	if f.err != nil {
+		return tool.InvokeResult{}, f.err
+	}
 	if f.denied {
 		return tool.InvokeResult{Outcome: tool.OutcomeDenied, DenyReasons: []string{"TOOL_NOT_ALLOWED"}}, nil
 	}

@@ -12,6 +12,45 @@ type modelMCPStub struct {
 	response json.RawMessage
 }
 
+type readerMCPStub struct {
+	fetchResult json.RawMessage
+	fetchErr    error
+	modelResult json.RawMessage
+	modelErr    error
+	putKeys     []string
+}
+
+func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, args any) (json.RawMessage, error) {
+	switch name {
+	case "web.fetch":
+		return stub.fetchResult, stub.fetchErr
+	case "agentos.model.invoke":
+		return stub.modelResult, stub.modelErr
+	case "agentos.memory.put":
+		if values, ok := args.(map[string]any); ok {
+			if key, ok := values["key"].(string); ok {
+				stub.putKeys = append(stub.putKeys, key)
+			}
+		}
+		return json.RawMessage(`{}`), nil
+	default:
+		return nil, nil
+	}
+}
+
+func readerTestEnvelope() Envelope {
+	return Envelope{Role: "reader", Workflow: "wf-reader", Source: &SourceHit{
+		SourceID: "src-reader", ResearchQuestionID: "rq-1", QuestionText: "How are attempts recovered?",
+		Title: "Runtime recovery", URL: "https://source.example/recovery",
+	}}
+}
+
+func readerTestDeps(stub MCPClient) Deps {
+	return Deps{MCP: stub, Models: Models{Reader: "research/reader"}, Workdir: func(leaf string) string {
+		return "research/wf-reader/" + leaf
+	}}
+}
+
 func (stub *modelMCPStub) CallTool(_ context.Context, _ string, _ string, args any) (json.RawMessage, error) {
 	stub.args, _ = args.(map[string]any)
 	return stub.response, nil
@@ -32,6 +71,70 @@ func TestInvokeModelRejectsTruncatedCompletion(t *testing.T) {
 	if _, err := InvokeModel(context.Background(), stub, "exec-1", "provider/model", []ChatMessage{{Role: "user", Content: "hi"}}); err == nil ||
 		!strings.Contains(err.Error(), "truncated") {
 		t.Fatalf("truncation error = %v", err)
+	}
+}
+
+func TestReaderRetryableFetchDoesNotWriteMarker(t *testing.T) {
+	stub := &readerMCPStub{fetchErr: &MCPToolError{Code: "TOOL_ENDPOINT_HTTP_500"}}
+	if _, err := runReader(context.Background(), readerTestDeps(stub), "exec-reader", readerTestEnvelope()); err == nil ||
+		!strings.Contains(err.Error(), "retryable") {
+		t.Fatalf("reader retry error = %v", err)
+	}
+	if len(stub.putKeys) != 0 {
+		t.Fatalf("transient failure wrote permanent markers: %v", stub.putKeys)
+	}
+}
+
+func TestReaderTerminalFetchWritesSkipMarker(t *testing.T) {
+	stub := &readerMCPStub{fetchErr: &MCPToolError{Code: "TOOL_ENDPOINT_HTTP_404"}}
+	result, err := runReader(context.Background(), readerTestDeps(stub), "exec-reader", readerTestEnvelope())
+	if err != nil {
+		t.Fatalf("terminal source must skip cleanly: %v", err)
+	}
+	if len(stub.putKeys) != 1 || stub.putKeys[0] != "read-src-reader" {
+		t.Fatalf("terminal skip markers = %v", stub.putKeys)
+	}
+	if !strings.Contains(string(result), `"skipped":true`) {
+		t.Fatalf("skip result = %s", result)
+	}
+}
+
+func TestReaderModelFailureDoesNotWriteMarker(t *testing.T) {
+	document := FetchedDocument{SourceID: "src-reader", Title: "Runtime recovery",
+		URL: "https://source.example/recovery", Content: "Attempts recover after lease expiry."}
+	fetched, _ := json.Marshal(document)
+	stub := &readerMCPStub{
+		fetchResult: fetched,
+		modelErr:    &MCPToolError{Code: "PROVIDER_UNAVAILABLE", Message: "temporary"},
+	}
+	if _, err := runReader(context.Background(), readerTestDeps(stub), "exec-reader", readerTestEnvelope()); err == nil ||
+		!strings.Contains(err.Error(), "reader model") {
+		t.Fatalf("reader model error = %v", err)
+	}
+	if len(stub.putKeys) != 0 {
+		t.Fatalf("model failure wrote permanent markers: %v", stub.putKeys)
+	}
+}
+
+func TestClassifyReaderError(t *testing.T) {
+	tests := []struct {
+		code string
+		want ReaderErrorDisposition
+	}{
+		{"TOOL_ENDPOINT_HTTP_429", ReaderRetry},
+		{"TOOL_ENDPOINT_HTTP_503", ReaderRetry},
+		{"TOOL_ENDPOINT_HTTP_404", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_410", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_415", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_422", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_403", ReaderFail},
+		{"PROVIDER_UNAVAILABLE", ReaderRetry},
+		{"PROVIDER_REJECTED", ReaderFail},
+	}
+	for _, test := range tests {
+		if got := classifyReaderError(&MCPToolError{Code: test.code}); got != test.want {
+			t.Fatalf("classify %s = %v, want %v", test.code, got, test.want)
+		}
 	}
 }
 

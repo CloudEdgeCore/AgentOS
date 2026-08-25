@@ -8,10 +8,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -319,16 +322,44 @@ func liveSourceID(rawURL string) string {
 // HTML→readable-text extraction, final URL preserved.
 type LiveFetch struct {
 	Client *http.Client
+
+	// Test seams are intentionally private: production callers always use the
+	// system resolver and net.Dialer, while package tests can prove pinning
+	// without making real connections to documentation-only public addresses.
+	resolver    hostResolver
+	dialContext func(context.Context, string, string) (net.Conn, error)
+}
+
+type fetchPolicyError struct{ reason string }
+
+func (e *fetchPolicyError) Error() string { return "blocked by fetch policy: " + e.reason }
+
+type fetchStatusError struct {
+	status int
+	detail string
+}
+
+func (e *fetchStatusError) Error() string {
+	if e.detail != "" {
+		return e.detail
+	}
+	return fmt.Sprintf("upstream status %d", e.status)
+}
+
+type fetchContentTypeError struct{ mediaType string }
+
+func (e *fetchContentTypeError) Error() string {
+	return fmt.Sprintf("unsupported content type %q", e.mediaType)
 }
 
 // Fetch downloads one public document and returns readable text.
 func (l *LiveFetch) Fetch(ctx context.Context, target string) (*FetchResult, error) {
-	if reason := rejectUnsafeURL(target); reason != "" {
-		return nil, fmt.Errorf("blocked by fetch policy: %s", reason)
+	if _, reason := validateFetchURL(target); reason != "" {
+		return nil, &fetchPolicyError{reason: reason}
 	}
-	client := l.Client
-	if client == nil {
-		client = LiveHTTPClient()
+	client, err := l.pinnedClient()
+	if err != nil {
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -342,14 +373,14 @@ func (l *LiveFetch) Fetch(ctx context.Context, target string) (*FetchResult, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream status %d", response.StatusCode)
+		return nil, &fetchStatusError{status: response.StatusCode}
 	}
 	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(
 		response.Header.Get("Content-Type"), ";", 2)[0]))
 	switch mediaType {
 	case "text/html", "application/xhtml+xml", "text/plain", "application/json", "":
 	default:
-		return nil, fmt.Errorf("unsupported content type %q", mediaType)
+		return nil, &fetchContentTypeError{mediaType: mediaType}
 	}
 	body, err := clampBody(response.Body)
 	if err != nil {
@@ -366,17 +397,116 @@ func (l *LiveFetch) Fetch(ctx context.Context, target string) (*FetchResult, err
 // LiveHTTPClient returns the production fetch client: bounded redirects to
 // public hosts only, request timeout, and the research user agent contract.
 func LiveHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: liveFetchTimeout,
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) > liveMaxRedirects {
-				return fmt.Errorf("more than %d redirects", liveMaxRedirects)
+	fetch := &LiveFetch{}
+	client, err := fetch.pinnedClient()
+	if err != nil {
+		panic(err) // the default transport is always cloneable
+	}
+	return client
+}
+
+// pinnedClient constructs a client whose only network path is the guarded
+// DialContext below. Proxy and DialTLS hooks are disabled because either can
+// bypass address pinning and delegate target DNS resolution elsewhere.
+func (l *LiveFetch) pinnedClient() (*http.Client, error) {
+	client := &http.Client{}
+	if l.Client != nil {
+		*client = *l.Client
+	}
+	client.Timeout = liveFetchTimeout
+
+	var transport *http.Transport
+	switch configured := client.Transport.(type) {
+	case nil:
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	case *http.Transport:
+		transport = configured.Clone()
+	default:
+		return nil, fmt.Errorf("live fetch requires an *http.Transport to enforce DNS pinning")
+	}
+	resolver := l.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	dial := l.dialContext
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: liveFetchTimeout, KeepAlive: 30 * time.Second}
+		dial = dialer.DialContext
+	}
+	transport.Proxy = nil
+	pinnedDial := pinnedDialContext(resolver, dial)
+	transport.DialContext = pinnedDial
+	// A non-nil DialTLSContext takes precedence over the legacy DialTLS hook.
+	// Performing the handshake here prevents a caller-supplied legacy hook
+	// from bypassing address validation while preserving hostname/SNI checks.
+	transport.DialTLSContext = pinnedTLSDialContext(pinnedDial, transport.TLSClientConfig)
+	client.Transport = transport
+
+	configuredRedirect := client.CheckRedirect
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if len(via) > liveMaxRedirects {
+			return fmt.Errorf("more than %d redirects", liveMaxRedirects)
+		}
+		if _, reason := validateFetchURL(request.URL.String()); reason != "" {
+			return &fetchPolicyError{reason: "redirect: " + reason}
+		}
+		if configuredRedirect != nil {
+			return configuredRedirect(request, via)
+		}
+		return nil
+	}
+	return client, nil
+}
+
+func pinnedTLSDialContext(dial func(context.Context, string, string) (net.Conn, error), baseConfig *tls.Config) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		raw, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			_ = raw.Close()
+			return nil, fmt.Errorf("invalid TLS dial address %q: %w", address, err)
+		}
+		config := &tls.Config{MinVersion: tls.VersionTLS12}
+		if baseConfig != nil {
+			config = baseConfig.Clone()
+			if config.MinVersion == 0 {
+				config.MinVersion = tls.VersionTLS12
 			}
-			if reason := rejectUnsafeURL(request.URL.String()); reason != "" {
-				return fmt.Errorf("redirect blocked by fetch policy: %s", reason)
+		}
+		if config.ServerName == "" {
+			config.ServerName = host
+		}
+		secured := tls.Client(raw, config)
+		if err := secured.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		return secured, nil
+	}
+}
+
+// pinnedDialContext makes DNS validation and network use one indivisible
+// path: resolve every address, reject the whole mixed answer if any member is
+// unsafe, then pass the selected numeric IP—not the hostname—to net.Dialer.
+func pinnedDialContext(resolver hostResolver, dial func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dial address %q: %w", address, err)
+		}
+		addresses, err := resolvePublicIPs(ctx, resolver, host)
+		if err != nil {
+			var resolution *hostResolutionError
+			if errors.As(err, &resolution) {
+				return nil, resolution
 			}
-			return nil
-		},
+			return nil, &fetchPolicyError{reason: err.Error()}
+		}
+		pinned := net.JoinHostPort(addresses[0].IP.String(), port)
+		return dial(ctx, network, pinned)
 	}
 }
 

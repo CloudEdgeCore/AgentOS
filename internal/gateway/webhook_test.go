@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
@@ -34,6 +35,28 @@ func TestWebhookExecutorPinsHTTPSDestinationAndBoundsProtocol(t *testing.T) {
 	})
 	if err != nil || string(result.Output) != `{"ok":true}` {
 		t.Fatalf("result=%s err=%v", result.Output, err)
+	}
+}
+
+func TestWebhookExecutorPreservesBoundedHTTPFailureCode(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`sensitive upstream detail`))
+	}))
+	defer server.Close()
+	executor, err := NewWebhookExecutor(map[string]string{"fetch@1.0.0": server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), tool.ExecutionRequest{
+		Descriptor: store.ToolDescriptor{Name: "fetch", Version: "1.0.0"},
+		Action:     "fetch", Resource: "web:fetch:*", Args: json.RawMessage(`{}`),
+	})
+	if err == nil || result.FailureCode != "TOOL_ENDPOINT_HTTP_503" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if strings.Contains(err.Error(), "sensitive upstream detail") {
+		t.Fatalf("upstream response body leaked: %v", err)
 	}
 }
 

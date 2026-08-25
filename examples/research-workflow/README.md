@@ -163,9 +163,12 @@ AGENTOS_RESEARCH_SEARCH_KEY=...
 Live backends: `webtools.DoubaoSearch` / `webtools.BraveSearch` /
 `webtools.BingSearch` provider
 adapters behind one `Backend` interface, and `webtools.LiveFetch` — a
-hardened fetcher (SSRF policy incl. redirect re-checks, ≤5 hops, 10 MiB cap,
-20 s timeout, content-type allowlist, HTML→readable-text, final URL +
-stable source id). The deterministic corpus remains an in-process fallback.
+hardened fetcher (DNS resolve/validate/IP-pin/dial with mixed-address
+rejection, SSRF policy incl. per-hop redirect re-checks, ≤5 hops, 10 MiB
+cap, 20 s timeout, content-type allowlist, HTML→readable-text, final URL +
+stable source id). Proxy and alternate TLS dial hooks are disabled at this
+boundary so they cannot bypass DNS pinning. The deterministic corpus remains
+an in-process fallback.
 The Doubao adapter follows the
 [official Search Custom API](https://docs.volcengine.com/docs/87772/2272953?lang=zh):
 Bearer API-key authentication, the documented `Query` / `SearchType` /
@@ -178,12 +181,18 @@ Gated acceptance tests (skip unless their env is present):
 |---|---|---|
 | `TestResearchWorkflowLiveModel` | `AGENTOS_RESEARCH_LIVE=1` | SUCCEEDED, coverage ≥ 0.90, zero unsupported, all evidence grounded; prints §5 metrics JSON |
 | `TestResearchWorkflowLiveFull` | + `LIVE_WEB=1`, `…_GOAL="…"` | + grounded rate = 100 %, unique domains ≥ 3, no INSUFFICIENT_EVIDENCE |
+| `TestResearchWorkflowLiveRecovery` | same as LiveFull | + kills one active Reader worker, expires/fences its lease, requires a recovered Attempt and final SUCCEEDED |
 
 Metrics (workflowId, questions, sources, uniqueDomains, evidenceCount,
 groundedEvidenceRate, citationCoverage, unsupportedCitations, criticRounds,
 modelCalls/failures, toolCalls, recoveredAttempts, tokens, costUsd,
 duration) are aggregated from the durable store and logged with the run —
-identical shape for deterministic and live executions.
+identical shape for deterministic and live executions. Every live acceptance
+also writes a credential-scanned JSON evidence document containing the exact
+commit SHA and all metrics. The default output directory is
+`artifacts/research-live/` (generated files are git-ignored); override it with
+`AGENTOS_RESEARCH_EVIDENCE_DIR` when a CI job will upload the documents as PR
+or release artifacts.
 
 ## End-to-end test suite
 
@@ -205,10 +214,11 @@ go test -tags integration -count=1 -timeout 12m \
 | `CitationCoverage` | fabricated quotes trigger writer revision; gate ≥0.90 enforced honestly |
 | `InvalidCitation` | persistent unknown-evidence citations never pass the hardened validator; honest best-effort ships |
 | `ToolFailureRecovery` | injected `web.fetch` 500s absorbed by attempt retries, no duplicate side effects |
+| `ReaderModelRetry` | Reader provider failure creates a failed Attempt and a new Run/Attempt without prematurely writing the read marker |
 | `ModelFailure` | provider 429 absorbed by bounded provider retry |
 | `Recovery` | SIGKILL-equivalent of both workers mid-run; lease expiry + recovery + restarted instances complete the workflow |
 | `BudgetStop` | undersized budget settles instead of running unbounded |
-| `LiveModel` / `LiveFull` (env-gated) | real-model and full live-internet acceptance with §5 metrics (see Live mode above) |
+| `LiveModel` / `LiveFull` / `LiveRecovery` (env-gated) | real-model, full live-internet, and live worker-recovery acceptance with durable §5 evidence (see Live mode above) |
 | `100Concurrent` (gate `AGENTOS_RESEARCH_SCALE=1`) | 100 simultaneous workflows all reach SUCCEEDED |
 
 Kernel-level regression tests for the retry semantics live in

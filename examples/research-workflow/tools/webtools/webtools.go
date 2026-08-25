@@ -174,7 +174,7 @@ func (s *Server) handleFetch(writer http.ResponseWriter, request *http.Request, 
 	}
 	result, err := s.backend.Fetch(request.Context(), args.URL)
 	if err != nil {
-		writeError(writer, http.StatusBadGateway, "fetch backend: "+err.Error())
+		writeError(writer, fetchErrorStatus(err), "fetch backend: "+err.Error())
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
@@ -210,9 +210,32 @@ func (c *corpusBackend) Fetch(_ context.Context, target string) (*FetchResult, e
 		}
 	}
 	if reason := rejectUnsafeURL(target); reason != "" {
-		return nil, fmt.Errorf("blocked by fetch policy: %s", reason)
+		return nil, &fetchPolicyError{reason: reason}
 	}
-	return nil, fmt.Errorf("document not in corpus: %s", target)
+	return nil, &fetchStatusError{status: http.StatusNotFound, detail: "document not in corpus: " + target}
+}
+
+func fetchErrorStatus(err error) int {
+	var policy *fetchPolicyError
+	if errors.As(err, &policy) {
+		return http.StatusUnprocessableEntity
+	}
+	var upstream *fetchStatusError
+	if errors.As(err, &upstream) {
+		return upstream.status
+	}
+	var contentType *fetchContentTypeError
+	if errors.As(err, &contentType) {
+		return http.StatusUnsupportedMediaType
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 // InjectFetchFailures fails the next count fetches matching token.
@@ -245,41 +268,88 @@ func (s *Server) shouldFailFetch(target string) bool {
 // restricts every fetch to known document URLs, which turns the guard into an
 // allowlist; deployments pointing at the live web keep the same checks.
 func rejectUnsafeURL(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return "unparsable url"
+	parsed, reason := validateFetchURL(raw)
+	if reason != "" {
+		return reason
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "scheme must be http or https (file:// and others are forbidden)"
-	}
-	if parsed.User != nil {
-		return "credentials are forbidden"
-	}
-	host := parsed.Hostname()
-	if host == "" {
-		return "host is required"
-	}
-	if host == "localhost" || strings.EqualFold(host, "localhost.localdomain") || strings.HasSuffix(host, ".localhost") ||
-		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return "loopback and internal hosts are forbidden"
-	}
-	addresses, err := net.LookupIP(host)
-	if err != nil {
-		// Unknown hosts cannot be resolved by the sandbox egress anyway;
-		// treat them as blocked rather than leaking DNS failures.
-		return "host did not resolve to a public address"
-	}
-	for _, address := range addresses {
-		if isPrivate(address) {
-			return "private network addresses are forbidden"
-		}
+	if _, err := resolvePublicIPs(context.Background(), net.DefaultResolver, parsed.Hostname()); err != nil {
+		return err.Error()
 	}
 	return ""
 }
 
+// validateFetchURL performs the syntax and hostname portion of the fetch
+// policy. Live fetches deliberately keep DNS resolution out of this phase:
+// their transport resolves, validates, pins, and dials one address in a
+// single operation so DNS rebinding cannot create a check/use gap.
+func validateFetchURL(raw string) (*url.URL, string) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, "unparsable url"
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, "scheme must be http or https (file:// and others are forbidden)"
+	}
+	if parsed.User != nil {
+		return nil, "credentials are forbidden"
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return nil, "host is required"
+	}
+	canonicalHost := strings.TrimSuffix(strings.ToLower(host), ".")
+	if canonicalHost == "localhost" || canonicalHost == "localhost.localdomain" ||
+		strings.HasSuffix(canonicalHost, ".localhost") || strings.HasSuffix(canonicalHost, ".local") ||
+		strings.HasSuffix(canonicalHost, ".internal") {
+		return nil, "loopback and internal hosts are forbidden"
+	}
+	if literal := net.ParseIP(host); literal != nil && isPrivate(literal) {
+		return nil, "private network addresses are forbidden"
+	}
+	return parsed, ""
+}
+
+type hostResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type hostResolutionError struct{ cause error }
+
+func (e *hostResolutionError) Error() string { return "host did not resolve to a public address" }
+func (e *hostResolutionError) Unwrap() error { return e.cause }
+
+type unsafeAddressError struct{}
+
+func (*unsafeAddressError) Error() string { return "private network addresses are forbidden" }
+
+// resolvePublicIPs rejects the complete answer when any address is unsafe.
+// Accepting only a public subset would let an attacker steer a later client
+// or retry toward a private member of a mixed DNS response.
+func resolvePublicIPs(ctx context.Context, resolver hostResolver, host string) ([]net.IPAddr, error) {
+	if literal := net.ParseIP(host); literal != nil {
+		if isPrivate(literal) {
+			return nil, &unsafeAddressError{}
+		}
+		return []net.IPAddr{{IP: literal}}, nil
+	}
+	addresses, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, &hostResolutionError{cause: err}
+	}
+	if len(addresses) == 0 {
+		return nil, &hostResolutionError{cause: fmt.Errorf("empty DNS answer")}
+	}
+	for _, address := range addresses {
+		if address.IP == nil || isPrivate(address.IP) {
+			return nil, &unsafeAddressError{}
+		}
+	}
+	return addresses, nil
+}
+
 func isPrivate(address net.IP) bool {
 	return address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() ||
-		address.IsLinkLocalMulticast() || address.IsUnspecified()
+		address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified()
 }
 
 func tokenize(query string) []string {

@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -466,6 +469,63 @@ func skipReader(ctx context.Context, deps Deps, executionID string, source *Sour
 	return output, nil
 }
 
+type ReaderErrorDisposition int
+
+const (
+	ReaderRetry ReaderErrorDisposition = iota
+	ReaderSkip
+	ReaderFail
+)
+
+// classifyReaderError is deliberately conservative: an unknown transport or
+// provider failure must not become a permanent "read" marker. Only explicit,
+// deterministic source outcomes are safe to skip.
+func classifyReaderError(err error) ReaderErrorDisposition {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ReaderRetry
+	}
+	var outcome *MCPToolError
+	if !errors.As(err, &outcome) {
+		return ReaderRetry
+	}
+	if strings.HasPrefix(outcome.Code, "TOOL_ENDPOINT_HTTP_") {
+		statusCode, parseErr := strconv.Atoi(strings.TrimPrefix(outcome.Code, "TOOL_ENDPOINT_HTTP_"))
+		if parseErr != nil {
+			return ReaderFail
+		}
+		switch statusCode {
+		case http.StatusNotFound, http.StatusGone, http.StatusUnsupportedMediaType,
+			http.StatusBadRequest, http.StatusUnprocessableEntity:
+			return ReaderSkip
+		case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+			return ReaderRetry
+		}
+		if statusCode >= 500 && statusCode <= 599 {
+			return ReaderRetry
+		}
+		return ReaderFail
+	}
+	switch outcome.Code {
+	case "PROVIDER_UNAVAILABLE", "RESOURCE_VERSION_CONFLICT", "SPAWN_RECONCILIATION_PENDING":
+		return ReaderRetry
+	case "PROVIDER_REJECTED", "POLICY_DENIED", "BUDGET_EXHAUSTED":
+		return ReaderFail
+	default:
+		return ReaderRetry
+	}
+}
+
+func handleReaderFetchError(ctx context.Context, deps Deps, executionID string, source *SourceHit, err error) (json.RawMessage, error) {
+	switch classifyReaderError(err) {
+	case ReaderSkip:
+		return skipReader(ctx, deps, executionID, source, err)
+	case ReaderFail:
+		return nil, fmt.Errorf("reader terminal fetch failure: %w", err)
+	default:
+		return nil, fmt.Errorf("reader retryable fetch failure: %w", err)
+	}
+}
+
 func runReader(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
 	if envelope.Source == nil {
 		return nil, fmt.Errorf("reader envelope carries no source")
@@ -473,11 +533,11 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	source := envelope.Source
 	fetched, err := CallTenantTool(ctx, deps.MCP, executionID, "web.fetch", map[string]any{"url": source.URL})
 	if err != nil {
-		return skipReader(ctx, deps, executionID, source, err)
+		return handleReaderFetchError(ctx, deps, executionID, source, err)
 	}
 	var document FetchedDocument
 	if err := json.Unmarshal(fetched, &document); err != nil {
-		return skipReader(ctx, deps, executionID, source, fmt.Errorf("decode fetch result: %w", err))
+		return nil, fmt.Errorf("decode fetch result: %w", err)
 	}
 	system := "You extract verifiable factual claims from a source document for a research pipeline. " +
 		"Extract 2-6 claims most relevant to the research question. Evidence MUST be one exact, contiguous, verbatim passage copied from the document body. " +
@@ -487,11 +547,11 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 		`{"claims":[{"claim":"...","evidence":"exact verbatim passage","confidence":0.87}]}`)
 	content, err := InvokeModelText(ctx, deps, executionID, deps.Models.Reader, system, user)
 	if err != nil {
-		return skipReader(ctx, deps, executionID, source, err)
+		return nil, fmt.Errorf("reader model: %w", err)
 	}
 	claims, err := decodeReaderClaims(content)
 	if err != nil {
-		return skipReader(ctx, deps, executionID, source, fmt.Errorf("reader output: %w", err))
+		return nil, fmt.Errorf("reader output: %w", err)
 	}
 	// Evidence → Original Source grounding (roadmap §3.4): every claim's
 	// evidence must appear verbatim in the fetched document text; claims

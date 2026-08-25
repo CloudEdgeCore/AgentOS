@@ -21,6 +21,8 @@ type scriptedProvider struct {
 	calls           int
 	injectRemaining int
 	injectStatus    int
+	injectRole      string
+	injectTarget    string
 }
 
 // InjectHTTPFailures makes the next count provider calls fail with the given
@@ -29,6 +31,21 @@ func (p *scriptedProvider) InjectHTTPFailures(status int, count int) {
 	p.mu.Lock()
 	p.injectStatus = status
 	p.injectRemaining = count
+	p.injectRole = ""
+	p.injectTarget = ""
+	p.mu.Unlock()
+}
+
+// InjectRoleHTTPFailures exhausts the provider executor's retries for one
+// concrete invocation of the selected role. The first matching user prompt
+// is pinned as the target, so concurrent Reader calls cannot each consume a
+// single failure and accidentally recover inside the provider layer.
+func (p *scriptedProvider) InjectRoleHTTPFailures(roleToken string, status int, count int) {
+	p.mu.Lock()
+	p.injectStatus = status
+	p.injectRemaining = count
+	p.injectRole = roleToken
+	p.injectTarget = ""
 	p.mu.Unlock()
 }
 
@@ -48,15 +65,6 @@ func (p *scriptedProvider) ServeHTTP(writer http.ResponseWriter, request *http.R
 	p.mu.Lock()
 	p.calls++
 	call := p.calls
-	injected := p.injectRemaining > 0
-	if injected {
-		p.injectRemaining--
-		status := p.injectStatus
-		p.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[research-provider] injected failure %d on call %d\n", status, call)
-		http.Error(writer, "injected model failure", status)
-		return
-	}
 	p.mu.Unlock()
 	var body struct {
 		Messages []struct {
@@ -78,6 +86,23 @@ func (p *scriptedProvider) ServeHTTP(writer http.ResponseWriter, request *http.R
 		case "user":
 			user = message.Content
 		}
+	}
+	p.mu.Lock()
+	roleMatches := p.injectRole == "" || strings.Contains(system, p.injectRole)
+	if roleMatches && p.injectRole != "" && p.injectTarget == "" {
+		p.injectTarget = user
+	}
+	targetMatches := p.injectRole == "" || p.injectTarget == user
+	injected := p.injectRemaining > 0 && roleMatches && targetMatches
+	status := p.injectStatus
+	if injected {
+		p.injectRemaining--
+	}
+	p.mu.Unlock()
+	if injected {
+		fmt.Fprintf(os.Stderr, "[research-provider] injected failure %d on call %d\n", status, call)
+		http.Error(writer, "injected model failure", status)
+		return
 	}
 	content := p.render(system, user)
 	writer.Header().Set("x-request-id", fmt.Sprintf("req-research-%d", call))

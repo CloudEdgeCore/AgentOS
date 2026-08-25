@@ -45,3 +45,6 @@ research-*.log
 # Local acceptance-test captures
 /v*-local.log
 /v*-full.log
+
+# Generated live acceptance evidence (attach to PR/release; never commit)
+/artifacts/research-live/*.json

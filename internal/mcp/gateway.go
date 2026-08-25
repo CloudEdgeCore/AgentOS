@@ -7,12 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/tool"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/status"
 )
+
+var toolEndpointHTTPCode = regexp.MustCompile(`^TOOL_ENDPOINT_HTTP_[1-5][0-9]{2}$`)
 
 // AttemptContext is the fenced execution identity an MCP call is bound to.
 // The adapter never trusts MCP-supplied identity: it comes from the resolver,
@@ -189,7 +193,13 @@ func (a *ToolAdapter) CallTool(ctx context.Context, params json.RawMessage) (any
 		Args: args, IdempotencyKey: mcpIdempotencyKey(identity, descriptor.Name, descriptor.Version, args),
 	})
 	if err != nil {
-		return toolErrorResult("TOOL_INVOCATION_FAILED"), nil
+		failureCode := "TOOL_INVOCATION_FAILED"
+		// The gateway exposes only a bounded machine code in the gRPC status;
+		// never reflect arbitrary downstream error text into MCP responses.
+		if grpcStatus, ok := status.FromError(err); ok && toolEndpointHTTPCode.MatchString(grpcStatus.Message()) {
+			failureCode = grpcStatus.Message()
+		}
+		return toolErrorResult(failureCode), nil
 	}
 	switch result.Outcome {
 	case tool.OutcomeExecuted, tool.OutcomeReplayed:

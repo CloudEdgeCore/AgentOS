@@ -22,6 +22,24 @@ type HTTPMCPClient struct {
 	http     *http.Client
 }
 
+// MCPToolError is the bounded, machine-readable failure returned by an MCP
+// tool outcome. Payload preserves the structured document for diagnostics;
+// Code is safe to classify without parsing provider or endpoint prose.
+type MCPToolError struct {
+	Code    string
+	Message string
+}
+
+func (e *MCPToolError) Error() string {
+	if e.Message == "" || e.Message == e.Code {
+		return e.Code
+	}
+	if e.Code == "" {
+		return e.Message
+	}
+	return e.Code + ": " + e.Message
+}
+
 // NewHTTPMCPClient binds the client to the MCP endpoint URL.
 func NewHTTPMCPClient(endpoint string) *HTTPMCPClient {
 	return &HTTPMCPClient{endpoint: strings.TrimRight(endpoint, "/"), http: &http.Client{Timeout: 10 * time.Minute}}
@@ -85,7 +103,14 @@ func (c *HTTPMCPClient) CallTool(ctx context.Context, executionID, name string, 
 	}
 	text := document.Result.Content[0].Text
 	if document.Result.IsError {
-		return json.RawMessage(text), fmt.Errorf("%s", text)
+		var outcome struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(text), &outcome) == nil && outcome.Error != "" {
+			return json.RawMessage(text), &MCPToolError{Code: outcome.Error, Message: outcome.Message}
+		}
+		return json.RawMessage(text), &MCPToolError{Message: text}
 	}
 	return json.RawMessage(text), nil
 }
