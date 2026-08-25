@@ -148,16 +148,19 @@ func SpawnChild(ctx context.Context, mcp MCPClient, executionID, name, childRef,
 	raw, err := mcp.CallTool(ctx, executionID, "agentos.task.spawn", map[string]any{
 		"name": name, "goal": goal, "agentVersionRef": childRef, "maxAttempts": maxAttempts,
 	})
-	if err != nil {
-		return fmt.Errorf("spawn %s: %w", name, err)
-	}
 	var outcome struct {
 		Outcome string `json:"outcome"`
 		Message string `json:"message"`
 	}
-	if json.Unmarshal(raw, &outcome) == nil && outcome.Outcome != "" &&
-		outcome.Outcome != "created" && outcome.Outcome != "replayed" {
+	decoded := json.Unmarshal(raw, &outcome) == nil && outcome.Outcome != ""
+	if decoded && outcome.Outcome != "created" && outcome.Outcome != "replayed" {
 		return &SpawnOutcomeError{Name: name, Outcome: outcome.Outcome, Message: outcome.Message}
+	}
+	if err != nil {
+		// MCP tool denials deliberately return both a structured payload and an
+		// error outcome. Decode the payload before wrapping the transport error
+		// so stable spawn codes survive the HTTP/JSON-RPC boundary.
+		return fmt.Errorf("spawn %s: %w", name, err)
 	}
 	return nil
 }

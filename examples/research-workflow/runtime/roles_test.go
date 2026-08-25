@@ -12,6 +12,7 @@ import (
 type modelMCPStub struct {
 	args     map[string]any
 	response json.RawMessage
+	err      error
 }
 
 type readerMCPStub struct {
@@ -76,7 +77,7 @@ func readerTestDeps(stub MCPClient) Deps {
 
 func (stub *modelMCPStub) CallTool(_ context.Context, _ string, _ string, args any) (json.RawMessage, error) {
 	stub.args, _ = args.(map[string]any)
-	return stub.response, nil
+	return stub.response, stub.err
 }
 
 func TestInvokeModelRequestsBoundedResearchCompletion(t *testing.T) {
@@ -98,7 +99,10 @@ func TestInvokeModelRejectsTruncatedCompletion(t *testing.T) {
 }
 
 func TestSpawnChildPreservesNameConflictOutcome(t *testing.T) {
-	stub := &modelMCPStub{response: json.RawMessage(`{"outcome":"SPAWN_NAME_CONFLICT","message":"already exists"}`)}
+	stub := &modelMCPStub{
+		response: json.RawMessage(`{"outcome":"SPAWN_NAME_CONFLICT","message":"already exists"}`),
+		err:      &MCPToolError{Message: `{"outcome":"SPAWN_NAME_CONFLICT"}`},
+	}
 	err := SpawnChild(context.Background(), stub, "exec-1", "reader-source", "research-reader@1.0.0", "goal", 3)
 	var outcome *SpawnOutcomeError
 	if !errors.As(err, &outcome) || outcome.Outcome != "SPAWN_NAME_CONFLICT" || outcome.Name != "reader-source" {
