@@ -16,13 +16,14 @@ type modelMCPStub struct {
 }
 
 type readerMCPStub struct {
-	fetchResult json.RawMessage
-	fetchErr    error
-	modelResult json.RawMessage
-	modelErr    error
-	putKeys     []string
-	records     map[string]string
-	namespaces  map[string]string
+	fetchResult   json.RawMessage
+	fetchErr      error
+	modelResult   json.RawMessage
+	modelErr      error
+	putKeys       []string
+	records       map[string]string
+	namespaces    map[string]string
+	searchQueries []string
 }
 
 func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, args any) (json.RawMessage, error) {
@@ -51,6 +52,11 @@ func (stub *readerMCPStub) CallTool(_ context.Context, _ string, name string, ar
 		}
 		return json.RawMessage(`{}`), nil
 	case "agentos.memory.search":
+		if values, ok := args.(map[string]any); ok {
+			if query, ok := values["query"].(string); ok {
+				stub.searchQueries = append(stub.searchQueries, query)
+			}
+		}
 		records := make([]MemoryRecord, 0, len(stub.records))
 		for key, content := range stub.records {
 			records = append(records, MemoryRecord{Key: key, Content: content})
@@ -377,6 +383,9 @@ func TestLoadWriterAnalysisFallsBackToDurableRoundMemory(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"findingId":"finding-001"`) {
 		t.Fatalf("analysis = %s", raw)
+	}
+	if len(stub.searchQueries) != 1 || stub.searchQueries[0] != "findings" {
+		t.Fatalf("analysis lookup queries = %v, want content token findings", stub.searchQueries)
 	}
 }
 

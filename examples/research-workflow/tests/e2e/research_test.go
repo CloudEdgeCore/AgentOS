@@ -837,6 +837,18 @@ func TestResearchWorkflowLiveModel(t *testing.T) {
 		string(workflow.Status), started, metrics)
 }
 
+func TestLiveModelScenarioKeepsDeterministicWebBoundary(t *testing.T) {
+	if liveWebForScenario("live-model", true) {
+		t.Fatal("live-model must not inherit the process-level live-web gate")
+	}
+	if !liveWebForScenario("live-full", true) || !liveWebForScenario("live-recovery", true) {
+		t.Fatal("full and recovery scenarios must retain live web when enabled")
+	}
+	if liveWebForScenario("live-full", false) {
+		t.Fatal("disabled live-web gate must remain disabled")
+	}
+}
+
 func TestResearchWorkflowLiveFull(t *testing.T) {
 	requireLiveModelEnv(t)
 	if os.Getenv("AGENTOS_RESEARCH_LIVE_WEB") != "1" {

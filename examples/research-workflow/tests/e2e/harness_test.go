@@ -225,7 +225,13 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 			Reasoning: "research/reasoning",
 		}
 	}
-	h.liveWeb = os.Getenv("AGENTOS_RESEARCH_LIVE_WEB") == "1"
+	// LiveModel proves the real model path against the deterministic corpus.
+	// The nightly job also enables LIVE_WEB for the Full and Recovery cases;
+	// do not let that broader process-level gate silently turn LiveModel into a
+	// second full-web run. Besides violating the documented test boundary, that
+	// multiplied provider usage and made the three-case acceptance unnecessarily
+	// vulnerable to external fetch failures and model quota exhaustion.
+	h.liveWeb = liveWebForScenario(name, os.Getenv("AGENTOS_RESEARCH_LIVE_WEB") == "1")
 
 	providerListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -529,6 +535,10 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 		h.loopWG.Wait()
 	})
 	return h
+}
+
+func liveWebForScenario(name string, enabled bool) bool {
+	return enabled && name != "live-model"
 }
 
 func (h *harness) startWorker(loopCtx context.Context, instance string) {

@@ -1020,7 +1020,11 @@ func validateEvidenceIDs(ids []string, known map[string]struct{}) ([]string, err
 }
 
 func readAnalysis(ctx context.Context, deps Deps, executionID, key string) (analysisDoc, bool, error) {
-	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), key, 10)
+	// Memory search ranks tokens from record content; the storage key is only
+	// metadata and is not guaranteed to participate in the full-text index.
+	// Every valid analysis document carries the "findings" field, so query that
+	// stable content token and select the requested round by record key below.
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), "findings", 10)
 	if err != nil {
 		return analysisDoc{}, false, err
 	}
