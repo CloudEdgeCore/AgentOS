@@ -322,6 +322,64 @@ func TestDecodePlannerOutputRejectsSemanticallyEmptyQuestion(t *testing.T) {
 	}
 }
 
+func TestPlannerFallbackProducesAuditedMinimumDecomposition(t *testing.T) {
+	plan := fallbackPlannerOutput("Compare production agent runtimes", errors.New("truncated JSON"))
+	if len(plan.Questions) < 3 {
+		t.Fatalf("fallback questions = %d, want >= 3", len(plan.Questions))
+	}
+	if !strings.Contains(plan.RecoveryReason, "truncated JSON") {
+		t.Fatalf("recovery reason = %q", plan.RecoveryReason)
+	}
+	wantIDs := []string{"rq-001", "rq-002", "rq-003"}
+	for index, question := range plan.Questions {
+		if question.ID != wantIDs[index] || strings.TrimSpace(question.Question) == "" || len(question.SearchQueries) < 2 {
+			t.Fatalf("fallback question %d = %+v", index, question)
+		}
+	}
+}
+
+func TestPlannerCompletionPreservesModelQuestionAndAddsMinimum(t *testing.T) {
+	plan := completePlannerOutput(plannerOutput{Questions: []Question{{
+		Question: "Which runtime architecture is dominant?", SearchQueries: []string{"runtime architecture"},
+	}}}, "Compare production agent runtimes", errors.New("only one question"))
+	if len(plan.Questions) != 3 {
+		t.Fatalf("completed questions = %d, want 3", len(plan.Questions))
+	}
+	if plan.Questions[0].Question != "Which runtime architecture is dominant?" || plan.Questions[0].ID != "rq-001" {
+		t.Fatalf("model question was not preserved: %+v", plan.Questions[0])
+	}
+}
+
+func TestResearchGoalTextExtractsEnvelopeGoal(t *testing.T) {
+	raw := envelopePrefix + `{"role":"planner","goal":"  Compare runtime recovery  ","workflowId":"wf-1"}` +
+		"\n\nUpstream result [ignored]:\n{}"
+	if got := researchGoalText(raw); got != "Compare runtime recovery" {
+		t.Fatalf("goal text = %q", got)
+	}
+}
+
+func TestLoadWriterAnalysisFallsBackToDurableRoundMemory(t *testing.T) {
+	stored := analysisDoc{Findings: []analysisFinding{{
+		FindingID: "finding-001", Statement: "Leases fence stale workers.",
+		EvidenceIDs: []string{"src-1-claim-1"}, Confidence: 0.9,
+	}}}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &readerMCPStub{records: map[string]string{"analysis-r3": string(encoded)}}
+	deps := readerTestDeps(stub)
+	envelope := Envelope{Workflow: "wf-reader", Round: 3, Goal: envelopePrefix +
+		`{"role":"validator","goal":"Compare runtime recovery","workflowId":"wf-reader","round":3}`}
+	raw, err := loadWriterAnalysis(context.Background(), deps, "exec-validator", envelope)
+	if err != nil {
+		t.Fatalf("load writer analysis: %v", err)
+	}
+	if !strings.Contains(raw, `"findingId":"finding-001"`) {
+		t.Fatalf("analysis = %s", raw)
+	}
+}
+
 func TestDecodeCriticOutputNormalizesLiveModelAliases(t *testing.T) {
 	decision, err := decodeCriticOutput(`{"verdict":"needs_more_research","score":0.55,"gaps":[` +
 		`{"description":"Which isolation mechanisms are used?","queries":[" sandbox isolation ",""]}]}`)

@@ -70,7 +70,8 @@ const jsonOnlyInstruction = "Respond with ONE minified JSON document and nothing
 // -- planner -----------------------------------------------------------------
 
 type plannerOutput struct {
-	Questions []Question `json:"questions"`
+	Questions      []Question `json:"questions"`
+	RecoveryReason string     `json:"recoveryReason,omitempty"`
 }
 
 // plannerWireQuestion accepts the stable field names plus the concise
@@ -136,9 +137,10 @@ func decodePlannerOutput(content string) (plannerOutput, error) {
 }
 
 func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
+	goal := researchGoalText(envelope.Goal)
 	system := "You are a research planner. Decompose the user's goal into at most 6 focused, non-overlapping research questions. " +
 		"For each question provide 2-3 concrete web-search queries mixing broad and specific phrasing. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Research goal:\n%s\n\nSchema hint:\n%s", strings.TrimSpace(strings.TrimPrefix(envelope.Goal, envelopePrefix)),
+	user := fmt.Sprintf("Research goal:\n%s\n\nSchema hint:\n%s", goal,
 		`{"questions":[{"id":"rq-001","question":"...","priority":1,"searchQueries":["...","..."]}]}`)
 	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
@@ -146,7 +148,15 @@ func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Env
 	}
 	plan, err := decodePlannerOutput(content)
 	if err != nil {
-		return nil, fmt.Errorf("planner output: %w", err)
+		// A real provider can occasionally return a truncated object or an
+		// empty questions array while still reporting a successful completion.
+		// Planning is recoverable: preserve the failure reason in the durable
+		// plan and use a conservative goal-derived decomposition. The remaining
+		// roles still exercise the configured model and all evidence gates.
+		plan = fallbackPlannerOutput(goal, err)
+	} else if len(plan.Questions) < 3 {
+		plan = completePlannerOutput(plan, goal,
+			fmt.Errorf("planner produced only %d questions", len(plan.Questions)))
 	}
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), "plan", "application/json", plan); err != nil {
 		return nil, err
@@ -165,6 +175,78 @@ func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Env
 	}
 	output, _ := json.Marshal(plan)
 	return output, nil
+}
+
+func fallbackPlannerOutput(goal string, cause error) plannerOutput {
+	return completePlannerOutput(plannerOutput{}, goal, cause)
+}
+
+func researchGoalText(raw string) string {
+	if payload, ok := strings.CutPrefix(raw, envelopePrefix); ok {
+		var envelope struct {
+			Goal string `json:"goal"`
+		}
+		if json.NewDecoder(strings.NewReader(payload)).Decode(&envelope) == nil && strings.TrimSpace(envelope.Goal) != "" {
+			return strings.TrimSpace(envelope.Goal)
+		}
+	}
+	return strings.TrimSpace(raw)
+}
+
+func completePlannerOutput(plan plannerOutput, goal string, cause error) plannerOutput {
+	subject := strings.TrimSpace(goal)
+	if subject == "" {
+		subject = "the research goal"
+	}
+	templates := []struct {
+		question string
+		queries  []string
+	}{
+		{
+			question: "What architectures, control-plane mechanisms, and standards define " + subject + "?",
+			queries:  []string{subject + " architecture control plane", subject + " standards implementation"},
+		},
+		{
+			question: "How have the leading implementations and operational practices for " + subject + " evolved?",
+			queries:  []string{subject + " evolution timeline", subject + " production implementation"},
+		},
+		{
+			question: "What reliability, security, cost, and scalability trade-offs distinguish approaches to " + subject + "?",
+			queries:  []string{subject + " reliability security scalability", subject + " cost tradeoffs"},
+		},
+		{
+			question: "Which representative projects and primary sources best demonstrate the current and next direction of " + subject + "?",
+			queries:  []string{subject + " representative projects", subject + " roadmap primary sources"},
+		},
+	}
+	seen := make(map[string]struct{}, len(plan.Questions))
+	for _, question := range plan.Questions {
+		seen[strings.ToLower(normalizeSpace(question.Question))] = struct{}{}
+	}
+	for _, candidate := range templates {
+		if len(plan.Questions) >= 3 {
+			break
+		}
+		key := strings.ToLower(normalizeSpace(candidate.question))
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		plan.Questions = append(plan.Questions, Question{
+			Question: candidate.question, Priority: len(plan.Questions) + 1,
+			SearchQueries: candidate.queries,
+		})
+		seen[key] = struct{}{}
+	}
+	for index := range plan.Questions {
+		plan.Questions[index].ID = fmt.Sprintf("rq-%03d", index+1)
+		if plan.Questions[index].Priority <= 0 {
+			plan.Questions[index].Priority = index + 1
+		}
+	}
+	if cause != nil {
+		plan.RecoveryReason = truncate(cause.Error(), 240)
+	}
+	return plan
 }
 
 // -- search ------------------------------------------------------------------
@@ -1408,12 +1490,9 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if len(bundles) == 0 {
 		return nil, "", fmt.Errorf("writer found no evidence")
 	}
-	analysisRaw := ""
-	for _, raw := range ExtractUpstreamOutputs(envelope.Goal) {
-		if strings.Contains(raw, `"findings"`) {
-			analysisRaw = raw
-			break
-		}
+	analysisRaw, err := loadWriterAnalysis(ctx, deps, executionID, envelope)
+	if err != nil {
+		return nil, "", err
 	}
 	system := "You write the final research report strictly from the supplied findings and evidence. " +
 		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " +
@@ -1443,6 +1522,31 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 		return nil, "", err
 	}
 	return encoded, "report-draft", nil
+}
+
+func loadWriterAnalysis(ctx context.Context, deps Deps, executionID string, envelope Envelope) (string, error) {
+	for _, raw := range ExtractUpstreamOutputs(envelope.Goal) {
+		if strings.Contains(raw, `"findings"`) {
+			return raw, nil
+		}
+	}
+	// Validator-triggered revisions intentionally depend only on the Writer
+	// step so the rendered Runtime Interface goal stays below 16 KiB. Recover
+	// the final analysis from durable memory instead of duplicating the large
+	// analyst output in the validator's start request.
+	key := fmt.Sprintf("analysis-r%d", maxInt(envelope.Round, 1))
+	stored, ok, err := readAnalysis(ctx, deps, executionID, key)
+	if err != nil {
+		return "", fmt.Errorf("load writer analysis %s: %w", key, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("writer found no analysis")
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		return "", fmt.Errorf("encode writer analysis %s: %w", key, err)
+	}
+	return string(encoded), nil
 }
 
 type validationVerdict struct {
