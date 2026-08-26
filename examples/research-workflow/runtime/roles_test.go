@@ -406,6 +406,36 @@ func TestValidateAnalysisOutputRejectsEmptyFindingFields(t *testing.T) {
 	}
 }
 
+func TestValidateAnalysisOutputDropsOnlyInvalidItems(t *testing.T) {
+	analysis := analysisDoc{
+		Findings: []analysisFinding{
+			{Statement: "Valid", EvidenceIDs: []string{"claim-1"}, Confidence: 0.9},
+			{Statement: "Missing evidence"},
+		},
+		Contradictions: []analysisContradiction{{}, {Topic: "Conflict", EvidenceIDs: []string{"claim-1", "claim-2"}}},
+	}
+	bundles := []EvidenceBundle{{Claims: []Claim{{ClaimID: "claim-1"}, {ClaimID: "claim-2"}}}}
+	if err := validateAnalysisOutput(&analysis, bundles); err != nil {
+		t.Fatalf("validate analysis: %v", err)
+	}
+	if len(analysis.Findings) != 1 || analysis.DroppedFindings != 1 ||
+		len(analysis.Contradictions) != 1 || analysis.DroppedContradictions != 1 {
+		t.Fatalf("filtered analysis = %+v", analysis)
+	}
+}
+
+func TestDecodeAnalysisOutputNormalizesObjectUnknowns(t *testing.T) {
+	content := `{"findings":[{"statement":"Valid","evidenceIds":["claim-1"],"confidence":0.8}],` +
+		`"unknowns":[{"question":"What remains open?"},"  Another gap  "]}`
+	analysis, err := decodeAnalysisOutput(content, []EvidenceBundle{{Claims: []Claim{{ClaimID: "claim-1"}}}})
+	if err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	if !reflect.DeepEqual(analysis.Unknowns, []string{"What remains open?", "Another gap"}) {
+		t.Fatalf("unknowns = %#v", analysis.Unknowns)
+	}
+}
+
 func TestCitationAcceptsExactGroundedQuote(t *testing.T) {
 	bundles := []EvidenceBundle{{
 		SourceID: "src-1",

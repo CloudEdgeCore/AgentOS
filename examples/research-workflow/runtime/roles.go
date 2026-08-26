@@ -744,10 +744,12 @@ type analysisContradiction struct {
 }
 
 type analysisDoc struct {
-	Findings       []analysisFinding       `json:"findings"`
-	Contradictions []analysisContradiction `json:"contradictions,omitempty"`
-	Unknowns       []string                `json:"unknowns,omitempty"`
-	Passthrough    bool                    `json:"passthrough,omitempty"`
+	Findings              []analysisFinding       `json:"findings"`
+	Contradictions        []analysisContradiction `json:"contradictions,omitempty"`
+	Unknowns              []string                `json:"unknowns,omitempty"`
+	DroppedFindings       int                     `json:"droppedFindings,omitempty"`
+	DroppedContradictions int                     `json:"droppedContradictions,omitempty"`
+	Passthrough           bool                    `json:"passthrough,omitempty"`
 }
 
 func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -772,18 +774,15 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 	system := "You are a research analyst. Cluster the extracted claims into findings supported by explicit evidence IDs, " +
 		"list contradictions between sources and open unknowns. Keep at most 12 findings. " +
 		"Every finding must have a non-empty statement and at least one evidenceId copied exactly from the supplied bundles; " +
-		"never invent an evidenceId. " + jsonOnlyInstruction
+		"never invent an evidenceId. Omit empty optional contradictions, and return unknowns as strings. " + jsonOnlyInstruction
 	user := "Evidence bundles:\n" + renderBundles(bundles) +
 		fmt.Sprintf("\n\nReturn schema:\n%s", `{"findings":[{"findingId":"finding-001","statement":"...","evidenceIds":["src-001-claim-001"],"confidence":0.87}],"contradictions":[{"topic":"...","evidenceIds":["a","b"]}],"unknowns":["..."]}`)
 	content, err := chat(ctx, deps, executionID, system, truncate(user, 24000))
 	if err != nil {
 		return nil, err
 	}
-	var analysis analysisDoc
-	if err := decodeLoose(content, &analysis); err != nil {
-		return nil, fmt.Errorf("analyst output: %w", err)
-	}
-	if err := validateAnalysisOutput(&analysis, bundles); err != nil {
+	analysis, err := decodeAnalysisOutput(content, bundles)
+	if err != nil {
 		return nil, fmt.Errorf("analyst output: %w", err)
 	}
 	for index := range analysis.Findings {
@@ -797,12 +796,58 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 	return output, nil
 }
 
+func decodeAnalysisOutput(content string, bundles []EvidenceBundle) (analysisDoc, error) {
+	var wire struct {
+		Findings       []analysisFinding       `json:"findings"`
+		Contradictions []analysisContradiction `json:"contradictions,omitempty"`
+		Unknowns       json.RawMessage         `json:"unknowns,omitempty"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return analysisDoc{}, err
+	}
+	analysis := analysisDoc{
+		Findings:       wire.Findings,
+		Contradictions: wire.Contradictions,
+		Unknowns:       decodeAnalysisUnknowns(wire.Unknowns),
+	}
+	if err := validateAnalysisOutput(&analysis, bundles); err != nil {
+		return analysisDoc{}, err
+	}
+	return analysis, nil
+}
+
+func decodeAnalysisUnknowns(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var entries []json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil {
+		entries = []json.RawMessage{raw}
+	}
+	unknowns := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		var value string
+		if json.Unmarshal(entry, &value) != nil {
+			var object map[string]json.RawMessage
+			if json.Unmarshal(entry, &object) != nil {
+				continue
+			}
+			for _, key := range []string{"unknown", "question", "topic", "description", "gap"} {
+				if json.Unmarshal(object[key], &value) == nil && strings.TrimSpace(value) != "" {
+					break
+				}
+			}
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			unknowns = append(unknowns, value)
+		}
+	}
+	return unknowns
+}
+
 func validateAnalysisOutput(analysis *analysisDoc, bundles []EvidenceBundle) error {
 	if len(analysis.Findings) == 0 {
 		return fmt.Errorf("produced no findings")
-	}
-	if len(analysis.Findings) > 12 {
-		return fmt.Errorf("produced %d findings; maximum is 12", len(analysis.Findings))
 	}
 	knownEvidence := make(map[string]struct{})
 	for _, bundle := range bundles {
@@ -812,39 +857,59 @@ func validateAnalysisOutput(analysis *analysisDoc, bundles []EvidenceBundle) err
 			}
 		}
 	}
+	validFindings := make([]analysisFinding, 0, min(len(analysis.Findings), 12))
+	firstFindingError := ""
+	droppedFindings := 0
 	for index := range analysis.Findings {
-		finding := &analysis.Findings[index]
+		finding := analysis.Findings[index]
 		finding.Statement = strings.TrimSpace(finding.Statement)
+		var invalid string
 		if finding.Statement == "" {
-			return fmt.Errorf("finding %d has an empty statement", index+1)
+			invalid = "has an empty statement"
+		} else if len(finding.EvidenceIDs) == 0 {
+			invalid = "has no evidenceIds"
+		} else if ids, err := validateEvidenceIDs(finding.EvidenceIDs, knownEvidence); err != nil {
+			invalid = err.Error()
+		} else {
+			finding.EvidenceIDs = ids
 		}
-		if len(finding.EvidenceIDs) == 0 {
-			return fmt.Errorf("finding %d has no evidenceIds", index+1)
+		if invalid == "" && (finding.Confidence < 0 || finding.Confidence > 1) {
+			invalid = "has confidence outside [0,1]"
 		}
-		ids, err := validateEvidenceIDs(finding.EvidenceIDs, knownEvidence)
-		if err != nil {
-			return fmt.Errorf("finding %d: %w", index+1, err)
+		if invalid != "" || len(validFindings) >= 12 {
+			droppedFindings++
+			if firstFindingError == "" && invalid != "" {
+				firstFindingError = fmt.Sprintf("finding %d %s", index+1, invalid)
+			}
+			continue
 		}
-		finding.EvidenceIDs = ids
-		if finding.Confidence < 0 || finding.Confidence > 1 {
-			return fmt.Errorf("finding %d has confidence outside [0,1]", index+1)
-		}
+		validFindings = append(validFindings, finding)
 	}
+	if len(validFindings) == 0 {
+		if firstFindingError == "" {
+			firstFindingError = "produced no valid findings"
+		}
+		return fmt.Errorf("produced no valid findings: %s", firstFindingError)
+	}
+	analysis.Findings = validFindings
+	analysis.DroppedFindings = droppedFindings
+
+	validContradictions := make([]analysisContradiction, 0, len(analysis.Contradictions))
 	for index := range analysis.Contradictions {
-		contradiction := &analysis.Contradictions[index]
+		contradiction := analysis.Contradictions[index]
 		contradiction.Topic = strings.TrimSpace(contradiction.Topic)
 		if contradiction.Topic == "" {
-			return fmt.Errorf("contradiction %d has an empty topic", index+1)
+			continue
 		}
 		ids, err := validateEvidenceIDs(contradiction.EvidenceIDs, knownEvidence)
-		if err != nil {
-			return fmt.Errorf("contradiction %d: %w", index+1, err)
-		}
-		if len(ids) < 2 {
-			return fmt.Errorf("contradiction %d needs at least two evidenceIds", index+1)
+		if err != nil || len(ids) < 2 {
+			continue
 		}
 		contradiction.EvidenceIDs = ids
+		validContradictions = append(validContradictions, contradiction)
 	}
+	analysis.DroppedContradictions = len(analysis.Contradictions) - len(validContradictions)
+	analysis.Contradictions = validContradictions
 	return nil
 }
 
