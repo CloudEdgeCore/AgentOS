@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -551,7 +552,10 @@ func classifyReaderError(err error) ReaderErrorDisposition {
 		}
 		switch statusCode {
 		case http.StatusNotFound, http.StatusGone, http.StatusUnsupportedMediaType,
-			http.StatusBadRequest, http.StatusUnprocessableEntity:
+			http.StatusBadRequest, http.StatusUnprocessableEntity,
+			// Bot protection, login walls, paywalls and geo blocks (401/403/451)
+			// mean THIS source is unreadable — not that the research failed.
+			http.StatusUnauthorized, http.StatusForbidden, http.StatusUnavailableForLegalReasons:
 			return ReaderSkip
 		case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
 			return ReaderRetry
@@ -1377,6 +1381,25 @@ func groundReportCitations(report *reportDoc, bundles []EvidenceBundle, analysis
 	}
 	report.Citations = grounded
 	report.CanonicalizedCitations = len(grounded)
+	// Body-marker closure (implementation-plan §2): the strict validator
+	// requires every citation marker to appear in the report body. Models
+	// may omit inline markers (or cite evidence the canonicalizer replaced),
+	// so append any missing markers to the summary as a references line —
+	// the validator then audits the completed statement→marker→citation→
+	// evidence→source chain instead of failing reports for formatting.
+	markers := collectReportMarkers(*report)
+	missingMarkers := make([]string, 0, len(grounded))
+	for _, cite := range grounded {
+		key := normalizeMarker(cite.Marker)
+		if key != "" && markers[key] == 0 {
+			missingMarkers = append(missingMarkers, cite.Marker)
+			markers[key] = 1
+		}
+	}
+	if len(missingMarkers) > 0 {
+		sort.Strings(missingMarkers)
+		report.Summary = strings.TrimSpace(report.Summary) + "\n\nReferences: " + strings.Join(missingMarkers, " ")
+	}
 	return nil
 }
 
@@ -1394,6 +1417,8 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	system := "You write the final research report strictly from the supplied findings and evidence. " +
 		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " +
+		"Each citation marker MUST appear verbatim in the summary or a section body next to the statement it supports — a citation that is never referenced in the body is rejected, " +
+		"a marker may back at most one citation, and every marker you write must have exactly one citation object. " +
 		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
 	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s\n\nReturn schema:\n%s",
 		truncate(analysisRaw, 12000), renderBundlesBounded(bundles, 20000),
@@ -1427,7 +1452,8 @@ type validationVerdict struct {
 	Retries           int     `json:"retries"`
 	// InsufficientEvidence mirrors the final critic's honest verdict when
 	// the evidence base could not answer the goal within the round budget.
-	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
+	InsufficientEvidence bool     `json:"insufficientEvidence,omitempty"`
+	MarkerIssues         []string `json:"markerIssues,omitempty"`
 }
 
 func runValidator(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -1481,6 +1507,9 @@ func runValidator(ctx context.Context, deps Deps, executionID string, envelope E
 		feedback := fmt.Sprintf(
 			"Revision %d: citation coverage %.2f is below %.2f with %d unsupported citations. Re-quote passages verbatim from the listed evidence and cover every finding.",
 			retries, verdict.CitationCoverage, threshold, verdict.UnsupportedClaims)
+		for _, issue := range verdict.MarkerIssues {
+			feedback += "\n- " + issue
+		}
 		if _, _, err := runWriter(ctx, deps, executionID, envelope, feedback); err != nil {
 			return nil, fmt.Errorf("writer revision failed: %w", err)
 		}
@@ -1511,12 +1540,61 @@ func loadReportDraft(ctx context.Context, deps Deps, executionID string, envelop
 	return nil, "", fmt.Errorf("no report draft found for validation")
 }
 
+// markerPattern matches in-body citation markers like [1], [12].
+var markerPattern = regexp.MustCompile(`\[(\d{1,3})\]`)
+
+// normalizeMarker reduces a citation marker to its bare number key so
+// "[1]", "[ 1 ]" and "1" all bind to the same body occurrence.
+func normalizeMarker(marker string) string {
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, marker)
+	if digits == "" {
+		return ""
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return "0"
+	}
+	return digits
+}
+
+// collectReportMarkers extracts every in-body citation marker from the
+// report summary and section bodies, counting occurrences per key. The
+// validator requires each citation to be referenced here and every body
+// marker to be bound by exactly one citation.
+func collectReportMarkers(report reportDoc) map[string]int {
+	markers := map[string]int{}
+	scan := func(text string) {
+		for _, match := range markerPattern.FindAllStringSubmatch(text, -1) {
+			markers[match[1]]++
+		}
+	}
+	scan(report.Summary)
+	for _, section := range report.Sections {
+		scan(section.Body)
+	}
+	return markers
+}
+
 // gradeCitations scores a report against the evidence base under STRICT
-// grounding rules (roadmap §3.3): a citation counts as supported only when
-// its evidenceId names an existing claim AND its quote is a non-empty,
-// whitespace-normalized substring of THAT claim's evidence. Empty quotes,
-// unknown claim ids, and passages borrowed from different evidence are all
-// rejected — there is no corpus-wide fallback.
+// grounding rules (roadmap §3.3) plus FULL body-marker closure
+// (implementation-plan §2): a citation counts as supported only when
+//  1. its evidenceId names an existing claim,
+//  2. its quote is a non-empty whitespace-normalized substring of THAT
+//     claim's evidence,
+//  3. it carries a non-empty marker that actually appears in the report
+//     summary or a section body, and
+//  4. no other citation already bound the same body marker.
+//
+// Everything else — empty quotes, unknown evidenceIds, cross-evidence
+// passages, unbound citations, duplicated bindings and dangling body
+// markers with no citation object — counts as unsupported. Coverage is
+// computed over the union of citations and dangling body markers, so the
+// citations array alone can never manufacture a high score.
 func gradeCitations(raw json.RawMessage, bundles []EvidenceBundle) validationVerdict {
 	var report reportDoc
 	if err := json.Unmarshal(raw, &report); err != nil {
@@ -1528,27 +1606,50 @@ func gradeCitations(raw json.RawMessage, bundles []EvidenceBundle) validationVer
 			evidenceText[claim.ClaimID] = normalizeSpace(claim.Evidence)
 		}
 	}
+	bodyMarkers := collectReportMarkers(report)
+	bound := map[string]bool{}
+	citedKeys := map[string]bool{}
 	supported := 0
 	unsupported := 0
+	var markerIssues []string
 	for _, cite := range report.Citations {
+		key := normalizeMarker(cite.Marker)
 		text, known := evidenceText[cite.EvidenceID]
 		switch {
-		case cite.Quote == "", !known:
+		case key == "", cite.Quote == "", !known:
 			unsupported++
+		case bound[key]:
+			unsupported++ // one body marker binds exactly one citation
+			markerIssues = append(markerIssues, fmt.Sprintf("marker [%s] is bound by more than one citation", key))
 			continue
-		case strings.Contains(text, normalizeSpace(cite.Quote)):
-			supported++
-		default:
+		case !strings.Contains(text, normalizeSpace(cite.Quote)):
 			unsupported++
+		case bodyMarkers[key] == 0:
+			unsupported++ // citation exists but body never references it
+			markerIssues = append(markerIssues, fmt.Sprintf("citation marker [%s] never appears in the report body", key))
+		default:
+			supported++
+			bound[key] = true
+		}
+		if key != "" {
+			citedKeys[key] = true
 		}
 	}
-	total := len(report.Citations)
+	dangling := 0
+	for key := range bodyMarkers {
+		if !citedKeys[key] {
+			dangling++ // body references [N] but no citation object backs it
+			markerIssues = append(markerIssues, fmt.Sprintf("body marker [%s] has no citation object", key))
+		}
+	}
+	unsupported += dangling
+	total := len(report.Citations) + dangling
 	coverage := 0.0
 	if total > 0 {
 		coverage = float64(supported) / float64(total)
 	}
-	return validationVerdict{Valid: total > 0 && coverage >= 0.90 && unsupported == 0,
-		CitationCoverage: coverage, UnsupportedClaims: unsupported}
+	return validationVerdict{Valid: total > 0 && coverage >= 0.90 && unsupported == 0 && dangling == 0,
+		CitationCoverage: coverage, UnsupportedClaims: unsupported, MarkerIssues: markerIssues}
 }
 
 // -- helpers -----------------------------------------------------------------

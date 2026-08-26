@@ -79,6 +79,75 @@ jobs:
         # log proves the real model→tool→model closed loop ran.
         run: go test -tags=integration -count=1 -run '^(TestV11RealModel|TestRealModelToolCalling)' -v ./e2e/single-agent/
 
+  research-live-acceptance:
+    # Multi-agent research acceptance against a real model and the real web
+    # (implementation plan §15): LiveModel, LiveFull and LiveRecovery emit
+    # §5 metrics plus schema-versioned evidence JSON, uploaded as an artifact.
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: agentos_test
+          POSTGRES_USER: agentos
+          POSTGRES_PASSWORD: agentos-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos -d agentos_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
+      AGENTOS_RESEARCH_LIVE: "1"
+      AGENTOS_RESEARCH_LIVE_WEB: "1"
+      AGENTOS_RESEARCH_LIVE_GOAL: "Assess how agent runtime control planes evolved between 2023 and 2025 and what defines their next cycle"
+      AGENTOS_RESEARCH_MODEL_BASE_URL: ${{ secrets.AGENTOS_RESEARCH_MODEL_BASE_URL }}
+      AGENTOS_RESEARCH_MODEL_KEY: ${{ secrets.AGENTOS_RESEARCH_MODEL_KEY }}
+      AGENTOS_RESEARCH_MODEL_PROVIDER: ${{ vars.AGENTOS_RESEARCH_MODEL_PROVIDER }}
+      AGENTOS_RESEARCH_MODEL_FAST: ${{ vars.AGENTOS_RESEARCH_MODEL_FAST }}
+      AGENTOS_RESEARCH_MODEL_READER: ${{ vars.AGENTOS_RESEARCH_MODEL_READER }}
+      AGENTOS_RESEARCH_MODEL_REASONING: ${{ vars.AGENTOS_RESEARCH_MODEL_REASONING }}
+      AGENTOS_RESEARCH_SEARCH_PROVIDER: ${{ vars.AGENTOS_RESEARCH_SEARCH_PROVIDER }}
+      AGENTOS_RESEARCH_SEARCH_KEY: ${{ secrets.AGENTOS_RESEARCH_SEARCH_KEY }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: go.sum
+
+      - name: Require live credentials or mark the run neutral
+        id: credentials
+        run: |
+          if [ -z "$AGENTOS_RESEARCH_MODEL_BASE_URL" ] || [ -z "$AGENTOS_RESEARCH_SEARCH_KEY" ]; then
+            echo "::notice::research-live secrets are not configured on this repository; the acceptance leg is skipped"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run gated live research acceptance
+        if: steps.credentials.outputs.configured == 'true'
+        run: >
+          go test -tags=integration -count=1 -timeout 60m
+          -run '^TestResearchWorkflowLive(Model|Full|Recovery)$' -v
+          ./examples/research-workflow/tests/e2e/
+
+      - name: Upload live evidence bundle
+        if: steps.credentials.outputs.configured == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: research-live-evidence
+          path: artifacts/research-live/*.json
+          if-no-files-found: warn
+
   firecracker-kvm:
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'
     runs-on: [self-hosted, Linux, X64, agentos-kvm]

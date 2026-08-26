@@ -205,7 +205,16 @@ func TestClassifyReaderError(t *testing.T) {
 		{"TOOL_ENDPOINT_HTTP_410", ReaderSkip},
 		{"TOOL_ENDPOINT_HTTP_415", ReaderSkip},
 		{"TOOL_ENDPOINT_HTTP_422", ReaderSkip},
-		{"TOOL_ENDPOINT_HTTP_403", ReaderFail},
+		{"TOOL_ENDPOINT_HTTP_400", ReaderSkip},
+		// Bot protection / login walls / geo+legal blocks: skip the source,
+		// never fail the research (implementation-plan §3).
+		{"TOOL_ENDPOINT_HTTP_401", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_403", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_451", ReaderSkip},
+		{"TOOL_ENDPOINT_HTTP_408", ReaderRetry},
+		{"TOOL_ENDPOINT_HTTP_425", ReaderRetry},
+		{"TOOL_ENDPOINT_HTTP_429", ReaderRetry},
+		{"TOOL_ENDPOINT_HTTP_503", ReaderRetry},
 		{"PROVIDER_UNAVAILABLE", ReaderRetry},
 		{"PROVIDER_REJECTED", ReaderFail},
 	}
@@ -376,10 +385,13 @@ func TestGroundReportCitationsBindsOnlyAnalysisEvidence(t *testing.T) {
 		},
 	}}
 	analysisRaw := `{"findings":[{"statement":"Finding","evidenceIds":["claim-1","claim-2"]}]}`
-	report := reportDoc{Citations: []citation{
-		{Marker: "[1]", EvidenceID: "claim-1", SourceID: "wrong", Quote: "fabricated"},
-		{Marker: "[2]", EvidenceID: "unknown", Quote: "unsupported"},
-	}}
+	report := reportDoc{
+		Summary: "Chained findings [1] and [2].",
+		Citations: []citation{
+			{Marker: "[1]", EvidenceID: "claim-1", SourceID: "wrong", Quote: "fabricated"},
+			{Marker: "[2]", EvidenceID: "unknown", Quote: "unsupported"},
+		},
+	}
 	if err := groundReportCitations(&report, bundles, analysisRaw); err != nil {
 		t.Fatalf("ground report citations: %v", err)
 	}
@@ -496,7 +508,7 @@ func TestCitationAcceptsExactGroundedQuote(t *testing.T) {
 		},
 	}}
 	raw, _ := json.Marshal(reportDoc{
-		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B [1]"}},
 		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001",
 			Quote: "schedule attempts with   fencing tokens."}},
 	})
@@ -512,7 +524,7 @@ func TestCitationRejectsEmptyQuote(t *testing.T) {
 		Claims:   []Claim{{ClaimID: "src-1-claim-001", Evidence: "Runtimes fence attempts."}},
 	}}
 	raw, _ := json.Marshal(reportDoc{
-		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B [1]"}},
 		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: ""}},
 	})
 	verdict := gradeCitations(raw, bundles)
@@ -528,7 +540,7 @@ func TestCitationRejectsUnknownEvidenceID(t *testing.T) {
 		Claims: []Claim{{ClaimID: "src-1-claim-001", Evidence: "Evidence memory is namespaced per workflow."}},
 	}}
 	raw, _ := json.Marshal(reportDoc{
-		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B [1]"}},
 		Citations: []citation{{Marker: "[1]", EvidenceID: "src-999-claim-042",
 			Quote: "Evidence memory is namespaced"}},
 	})
@@ -547,13 +559,112 @@ func TestCitationRejectsQuoteFromDifferentEvidence(t *testing.T) {
 		},
 	}}
 	raw, _ := json.Marshal(reportDoc{
-		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B [1]"}},
 		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001",
 			Quote: "namespaced per workflow"}},
 	})
 	verdict := gradeCitations(raw, bundles)
 	if verdict.Valid || verdict.CitationCoverage != 0 || verdict.UnsupportedClaims != 1 {
 		t.Fatalf("cross-evidence quote must be unsupported: %+v", verdict)
+	}
+}
+
+func TestCitationMarkerMustAppearInReportBody(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims:   []Claim{{ClaimID: "src-1-claim-001", Evidence: "Runtimes schedule attempts with fencing tokens."}},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "Body without any marker."}},
+		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001",
+			Quote: "schedule attempts with fencing tokens."}},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.UnsupportedClaims != 1 || verdict.CitationCoverage != 0 {
+		t.Fatalf("citation absent from the body must be unsupported: %+v", verdict)
+	}
+}
+
+func TestReportMarkerWithoutCitationFails(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims:   []Claim{{ClaimID: "src-1-claim-001", Evidence: "Runtimes fence attempts."}},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "Grounded point [1]. Stray marker [9]."}},
+		Citations: []citation{{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "fence attempts"}},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.UnsupportedClaims != 1 || verdict.CitationCoverage != 0.5 {
+		t.Fatalf("dangling body marker must count as unsupported and dilute coverage: %+v", verdict)
+	}
+}
+
+func TestCitationWithoutBodyMarkerFails(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims: []Claim{
+			{ClaimID: "src-1-claim-001", Evidence: "Runtimes fence attempts."},
+			{ClaimID: "src-1-claim-002", Evidence: "Recovery replays checkpoints."},
+		},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S",
+		Sections: []section{{Heading: "H", Body: "Only the first claim is cited [1]; the second never appears."}},
+		Citations: []citation{
+			{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "fence attempts"},
+			{Marker: "[2]", EvidenceID: "src-1-claim-002", Quote: "replays checkpoints"},
+		},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.UnsupportedClaims != 1 || verdict.CitationCoverage != 0.5 {
+		t.Fatalf("citations array alone must not manufacture coverage: %+v", verdict)
+	}
+}
+
+func TestDuplicateCitationMarkerFails(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims: []Claim{
+			{ClaimID: "src-1-claim-001", Evidence: "Runtimes fence attempts."},
+			{ClaimID: "src-1-claim-002", Evidence: "Recovery replays checkpoints."},
+		},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "One marker cannot back two claims [1]."}},
+		Citations: []citation{
+			{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "fence attempts"},
+			{Marker: "[1]", EvidenceID: "src-1-claim-002", Quote: "replays checkpoints"},
+		},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if verdict.Valid || verdict.UnsupportedClaims != 1 || verdict.CitationCoverage != 0.5 {
+		t.Fatalf("a body marker bound twice must reject the second citation: %+v", verdict)
+	}
+}
+
+// TestStatementMarkerEvidenceChainPasses walks the full §2 chain:
+// statement → body marker → citation object → evidence claim → source.
+func TestStatementMarkerEvidenceChainPasses(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims: []Claim{
+			{ClaimID: "src-1-claim-001", Evidence: "Runtimes fence every attempt."},
+			{ClaimID: "src-1-claim-002", Evidence: "Recovery replays from durable checkpoints."},
+		},
+	}}
+	raw, _ := json.Marshal(reportDoc{
+		Title:    "T",
+		Summary:  "Fencing and recovery hold end to end.",
+		Sections: []section{{Heading: "H", Body: "The kernel fences every attempt [1] and recovery replays from durable checkpoints [2]."}},
+		Citations: []citation{
+			{Marker: "[1]", SourceID: "src-1", EvidenceID: "src-1-claim-001", Quote: "fence every attempt."},
+			{Marker: "[2]", SourceID: "src-1", EvidenceID: "src-1-claim-002", Quote: "replays from durable checkpoints."},
+		},
+	})
+	verdict := gradeCitations(raw, bundles)
+	if !verdict.Valid || verdict.CitationCoverage != 1 || verdict.UnsupportedClaims != 0 {
+		t.Fatalf("complete marker chain must pass: %+v", verdict)
 	}
 }
 
@@ -566,7 +677,7 @@ func TestGradeCitationsMixedFabricationCounts(t *testing.T) {
 		},
 	}}
 	raw, _ := json.Marshal(reportDoc{
-		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B"}},
+		Title: "T", Summary: "S", Sections: []section{{Heading: "H", Body: "B [1] [2]"}},
 		Citations: []citation{
 			{Marker: "[1]", EvidenceID: "src-1-claim-001", Quote: "fabricated quote that exists nowhere"},
 			{Marker: "[2]", EvidenceID: "", Quote: "namespaced per workflow"},

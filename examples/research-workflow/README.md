@@ -74,15 +74,21 @@ tests/e2e/               end-to-end scenario suite (build tag `integration`)
    retry-scoped feedback, and ships an honest verdict after 2 failed
    revisions.
 
-### Provenance chain: Report → Citation → Evidence → Source
+### Provenance chain: Statement → Marker → Citation → Evidence → Source
 
 Citation validation is as strict as extraction: a citation counts as
 supported ONLY when its evidenceId names an existing claim AND its quote is
-a non-empty whitespace-normalized substring of THAT claim's evidence.
-Empty quotes, unknown claim ids, and passages borrowed from different
-evidence are rejected outright — no corpus-wide fallback. Combined with
-reader-side grounding, every accepted citation traces to verified source
-text end to end.
+a non-empty whitespace-normalized substring of THAT claim's evidence AND
+its marker actually appears in the report body, with each body marker
+binding at most one citation. Empty quotes, unknown claim ids, passages
+borrowed from different evidence, citations never referenced in the body,
+and dangling body markers with no citation object are all rejected — the
+citations array alone cannot manufacture coverage. The canonicalizer closes
+the chain deterministically (it rewrites quotes to verified evidence text
+and appends any missing markers as a `References:` line), and the validator
+audits the completed chain; revisions carry per-marker feedback. Combined
+with reader-side grounding, every accepted citation traces to verified
+source text end to end.
 
 ### Documented deviation: the collector role
 

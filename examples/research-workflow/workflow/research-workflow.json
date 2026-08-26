@@ -91,7 +91,7 @@
       "name": "citation-validator",
       "agentVersionRef": "research-citation-validator@1.0.0",
       "goal": "__ENVELOPE_VALIDATOR__",
-      "dependsOn": ["writer"],
+      "dependsOn": ["writer", "analyst-r3"],
       "retry": { "maxAttempts": 4 }
     }
   ]
