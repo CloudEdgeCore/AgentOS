@@ -775,9 +775,9 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 		"list contradictions between sources and open unknowns. Keep at most 12 findings. " +
 		"Every finding must have a non-empty statement and at least one evidenceId copied exactly from the supplied bundles; " +
 		"never invent an evidenceId. Omit empty optional contradictions, and return unknowns as strings. " + jsonOnlyInstruction
-	user := "Evidence bundles:\n" + renderBundles(bundles) +
+	user := "Evidence bundles:\n" + renderBundlesBounded(bundles, 24000) +
 		fmt.Sprintf("\n\nReturn schema:\n%s", `{"findings":[{"findingId":"finding-001","statement":"...","evidenceIds":["src-001-claim-001"],"confidence":0.87}],"contradictions":[{"topic":"...","evidenceIds":["a","b"]}],"unknowns":["..."]}`)
-	content, err := chat(ctx, deps, executionID, system, truncate(user, 24000))
+	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
 		return nil, err
 	}
@@ -966,12 +966,14 @@ func collectEvidence(ctx context.Context, deps Deps, executionID string, envelop
 	for _, raw := range ExtractUpstreamOutputs(envelope.Goal) {
 		appendBundle(raw)
 	}
-	if len(bundles) < 3 {
-		records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "claims evidence", 100)
-		if err == nil {
-			for _, record := range records {
-				appendBundle(record.Content)
-			}
+	// Every round must judge the cumulative evidence base. Upstream rendering
+	// contains only the current spawn group, so treating three new bundles as
+	// "enough" silently discarded all prior rounds at exactly the point where
+	// the final critic needed a global view.
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "claims evidence", 100)
+	if err == nil {
+		for _, record := range records {
+			appendBundle(record.Content)
 		}
 	}
 	ordered := make([]EvidenceBundle, 0, len(bundles))
@@ -1113,7 +1115,9 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	system := "You are a research critic. Judge whether the analysis answers the original goal rigorously. " +
 		"If specific, answerable sub-questions remain unaddressed, return NEEDS_MORE_RESEARCH with at most 4 gaps, each with 1-3 suggested search queries. " +
-		"A score below 0.75 means more research is needed. When Round >= 3 do not force PASS: if the evidence base is still too thin, return INSUFFICIENT_EVIDENCE. " + jsonOnlyInstruction
+		"A score below 0.75 means more research is needed. Gaps must be material to the original goal, not optional detail or unavoidable future uncertainty. " +
+		"For a goal about trends, implementation routes, and representative projects, PASS when all three are substantively addressed by explicit evidence IDs. " +
+		"When Round >= 3 do not force PASS: if the evidence base is still too thin, return INSUFFICIENT_EVIDENCE. " + jsonOnlyInstruction
 	user := fmt.Sprintf("Original goal summary:\n%s\n\nRound: %d of 3\n\nAnalysis under review:\n%s\n\nReturn schema:\n%s",
 		truncate(strings.TrimPrefix(envelope.Goal, envelopePrefix), 2000), envelope.Round, truncate(analysisRaw, 16000),
 		`{"status":"PASS|NEEDS_MORE_RESEARCH|INSUFFICIENT_EVIDENCE","score":0.87,"gaps":[{"gapId":"gap-001","question":"...","severity":"high|medium|low","suggestedQueries":["..."]}]}`)
@@ -1188,7 +1192,9 @@ type reportDoc struct {
 	Citations []citation `json:"citations"`
 	// InsufficientEvidence records an honest INSUFFICIENT_EVIDENCE verdict
 	// from the final critic: the report ships, but declares the shortfall.
-	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
+	InsufficientEvidence   bool `json:"insufficientEvidence,omitempty"`
+	DroppedCitations       int  `json:"droppedCitations,omitempty"`
+	CanonicalizedCitations int  `json:"canonicalizedCitations,omitempty"`
 }
 
 type reportWireSection struct {
@@ -1288,6 +1294,92 @@ func decodeReportOutput(content string) (reportDoc, error) {
 	return report, nil
 }
 
+func groundReportCitations(report *reportDoc, bundles []EvidenceBundle, analysisRaw string) error {
+	type groundedCitation struct {
+		sourceID string
+		quote    string
+	}
+	known := make(map[string]groundedCitation)
+	for _, bundle := range bundles {
+		for _, claim := range bundle.Claims {
+			if claim.ClaimID != "" && strings.TrimSpace(claim.Evidence) != "" {
+				known[claim.ClaimID] = groundedCitation{sourceID: bundle.SourceID, quote: strings.TrimSpace(claim.Evidence)}
+			}
+		}
+	}
+	var analysis analysisDoc
+	if json.Unmarshal([]byte(firstJSONObject(analysisRaw)), &analysis) != nil {
+		return fmt.Errorf("analysis is unavailable for citation binding")
+	}
+	allowed := make(map[string]struct{})
+	for _, finding := range analysis.Findings {
+		for _, evidenceID := range finding.EvidenceIDs {
+			if _, exists := known[evidenceID]; exists {
+				allowed[evidenceID] = struct{}{}
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("analysis contains no known evidenceIds")
+	}
+
+	grounded := make([]citation, 0, len(report.Citations)+len(allowed))
+	seenEvidence := make(map[string]struct{})
+	usedMarkers := make(map[string]struct{})
+	nextMarker := 1
+	marker := func(candidate string) string {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			if _, used := usedMarkers[candidate]; !used {
+				usedMarkers[candidate] = struct{}{}
+				return candidate
+			}
+		}
+		for {
+			candidate = fmt.Sprintf("[%d]", nextMarker)
+			nextMarker++
+			if _, used := usedMarkers[candidate]; !used {
+				usedMarkers[candidate] = struct{}{}
+				return candidate
+			}
+		}
+	}
+	for _, candidate := range report.Citations {
+		binding, exists := known[candidate.EvidenceID]
+		_, permitted := allowed[candidate.EvidenceID]
+		_, duplicate := seenEvidence[candidate.EvidenceID]
+		if !exists || !permitted || duplicate {
+			report.DroppedCitations++
+			continue
+		}
+		candidate.Marker = marker(candidate.Marker)
+		candidate.SourceID = binding.sourceID
+		candidate.Quote = binding.quote
+		grounded = append(grounded, candidate)
+		seenEvidence[candidate.EvidenceID] = struct{}{}
+	}
+	missing := make([]string, 0, len(allowed))
+	for evidenceID := range allowed {
+		if _, exists := seenEvidence[evidenceID]; !exists {
+			missing = append(missing, evidenceID)
+		}
+	}
+	sort.Strings(missing)
+	for _, evidenceID := range missing {
+		binding := known[evidenceID]
+		grounded = append(grounded, citation{
+			Marker: marker(""), EvidenceID: evidenceID,
+			SourceID: binding.sourceID, Quote: binding.quote,
+		})
+	}
+	if len(grounded) == 0 {
+		return fmt.Errorf("no grounded citations remain")
+	}
+	report.Citations = grounded
+	report.CanonicalizedCitations = len(grounded)
+	return nil
+}
+
 func runWriter(ctx context.Context, deps Deps, executionID string, envelope Envelope, feedback string) (json.RawMessage, string, error) {
 	bundles := collectEvidence(ctx, deps, executionID, envelope)
 	if len(bundles) == 0 {
@@ -1304,7 +1396,7 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " +
 		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
 	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s\n\nReturn schema:\n%s",
-		truncate(analysisRaw, 12000), truncate(renderBundles(bundles), 20000),
+		truncate(analysisRaw, 12000), renderBundlesBounded(bundles, 20000),
 		`{"title":"...","summary":"...","sections":[{"heading":"...","body":"... [1]"}],"citations":[{"marker":"[1]","evidenceId":"src-001-claim-001","sourceId":"src-001","quote":"exact verbatim passage"}]}`)
 	if feedback != "" {
 		user += "\n\nRevision feedback from the citation validator:\n" + feedback
@@ -1316,6 +1408,9 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	report, err := decodeReportOutput(content)
 	if err != nil {
 		return nil, "", fmt.Errorf("writer output: %w", err)
+	}
+	if err := groundReportCitations(&report, bundles, analysisRaw); err != nil {
+		return nil, "", fmt.Errorf("writer citations: %w", err)
 	}
 	report.InsufficientEvidence = upstreamVerdict(envelope.Goal) == "INSUFFICIENT_EVIDENCE"
 	encoded, _ := json.Marshal(report)
@@ -1468,10 +1563,29 @@ func decodeLoose(content string, target any) error {
 	if document == "" {
 		return fmt.Errorf("no JSON object found in %.120q", content)
 	}
+	document = repairInvalidApostropheEscapes(document)
 	if err := json.Unmarshal([]byte(document), target); err != nil {
 		return err
 	}
 	return nil
+}
+
+func repairInvalidApostropheEscapes(document string) string {
+	var repaired strings.Builder
+	repaired.Grow(len(document))
+	for index := 0; index < len(document); index++ {
+		if document[index] == '\\' && index+1 < len(document) && document[index+1] == '\'' {
+			preceding := 0
+			for cursor := index - 1; cursor >= 0 && document[cursor] == '\\'; cursor-- {
+				preceding++
+			}
+			if preceding%2 == 0 {
+				continue
+			}
+		}
+		repaired.WriteByte(document[index])
+	}
+	return repaired.String()
 }
 
 // firstJSONObject extracts the first balanced top-level JSON object.
@@ -1522,14 +1636,33 @@ func truncate(text string, limit int) string {
 	return text[:limit]
 }
 
-func renderBundles(bundles []EvidenceBundle) string {
+func renderBundlesBounded(bundles []EvidenceBundle, limit int) string {
 	parts := make([]string, 0, len(bundles))
+	used := 2 // surrounding brackets
 	for _, bundle := range bundles {
-		encoded, err := json.Marshal(bundle)
+		compact := bundle
+		compact.Title = truncate(compact.Title, 300)
+		if len(compact.Claims) > 6 {
+			compact.Claims = compact.Claims[:6]
+		}
+		for index := range compact.Claims {
+			compact.Claims[index].Claim = truncate(compact.Claims[index].Claim, 400)
+			compact.Claims[index].Evidence = truncate(compact.Claims[index].Evidence, 600)
+			compact.Claims[index].SourceHash = ""
+		}
+		encoded, err := json.Marshal(compact)
 		if err != nil {
 			continue
 		}
+		required := len(encoded)
+		if len(parts) > 0 {
+			required++
+		}
+		if used+required > limit {
+			continue
+		}
 		parts = append(parts, string(encoded))
+		used += required
 	}
 	return "[" + strings.Join(parts, ",") + "]"
 }

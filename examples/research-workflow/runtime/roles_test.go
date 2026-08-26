@@ -355,6 +355,58 @@ func TestDecodeReportOutputRejectsIncompleteDocument(t *testing.T) {
 	}
 }
 
+func TestDecodeLooseRepairsInvalidApostropheEscape(t *testing.T) {
+	var document struct {
+		Text string `json:"text"`
+	}
+	if err := decodeLoose(`{"text":"agent\'s runtime"}`, &document); err != nil {
+		t.Fatalf("decode repaired JSON: %v", err)
+	}
+	if document.Text != "agent's runtime" {
+		t.Fatalf("text = %q", document.Text)
+	}
+}
+
+func TestGroundReportCitationsBindsOnlyAnalysisEvidence(t *testing.T) {
+	bundles := []EvidenceBundle{{
+		SourceID: "src-1",
+		Claims: []Claim{
+			{ClaimID: "claim-1", Evidence: "Exact grounded passage one."},
+			{ClaimID: "claim-2", Evidence: "Exact grounded passage two."},
+		},
+	}}
+	analysisRaw := `{"findings":[{"statement":"Finding","evidenceIds":["claim-1","claim-2"]}]}`
+	report := reportDoc{Citations: []citation{
+		{Marker: "[1]", EvidenceID: "claim-1", SourceID: "wrong", Quote: "fabricated"},
+		{Marker: "[2]", EvidenceID: "unknown", Quote: "unsupported"},
+	}}
+	if err := groundReportCitations(&report, bundles, analysisRaw); err != nil {
+		t.Fatalf("ground report citations: %v", err)
+	}
+	if report.DroppedCitations != 1 || report.CanonicalizedCitations != 2 || len(report.Citations) != 2 {
+		t.Fatalf("canonical report = %+v", report)
+	}
+	raw, _ := json.Marshal(report)
+	if verdict := gradeCitations(raw, bundles); !verdict.Valid || verdict.UnsupportedClaims != 0 || verdict.CitationCoverage != 1 {
+		t.Fatalf("canonical citations failed strict grade: %+v", verdict)
+	}
+}
+
+func TestRenderBundlesBoundedProducesCompleteJSON(t *testing.T) {
+	bundles := []EvidenceBundle{
+		{SourceID: "one", Claims: []Claim{{ClaimID: "claim-1", Evidence: strings.Repeat("a", 2000)}}},
+		{SourceID: "two", Claims: []Claim{{ClaimID: "claim-2", Evidence: strings.Repeat("b", 2000)}}},
+	}
+	rendered := renderBundlesBounded(bundles, 1200)
+	if len(rendered) > 1200 {
+		t.Fatalf("bounded rendering has %d bytes", len(rendered))
+	}
+	var decoded []EvidenceBundle
+	if err := json.Unmarshal([]byte(rendered), &decoded); err != nil || len(decoded) == 0 {
+		t.Fatalf("bounded rendering is not complete JSON: count=%d err=%v", len(decoded), err)
+	}
+}
+
 func TestDecodeReaderClaimsAcceptsStringAndObjectEvidence(t *testing.T) {
 	claims, err := decodeReaderClaims(`{"claims":[` +
 		`{"statement":"First","evidence":"verbatim one","confidence":0.8},` +
