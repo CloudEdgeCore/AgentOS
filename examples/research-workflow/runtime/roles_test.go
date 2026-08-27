@@ -96,6 +96,20 @@ func TestInvokeModelRequestsBoundedResearchCompletion(t *testing.T) {
 	}
 }
 
+func TestInvokeModelSupportsSmallerRoleSpecificLimit(t *testing.T) {
+	stub := &modelMCPStub{response: json.RawMessage(`{"content":"{}","finishReason":"stop"}`)}
+	if _, err := invokeModelWithLimit(context.Background(), stub, "exec-writer", "provider/model",
+		[]ChatMessage{{Role: "user", Content: "write"}}, writerMaxOutputTokens); err != nil {
+		t.Fatalf("invoke bounded writer model: %v", err)
+	}
+	if got := stub.args["maxOutputTokens"]; got != writerMaxOutputTokens {
+		t.Fatalf("writer maxOutputTokens = %v, want %d", got, writerMaxOutputTokens)
+	}
+	if _, err := invokeModelWithLimit(context.Background(), stub, "exec-writer", "provider/model", nil, researchMaxOutputTokens+1); err == nil {
+		t.Fatal("oversized role-specific limit was accepted")
+	}
+}
+
 func TestInvokeModelRejectsTruncatedCompletion(t *testing.T) {
 	stub := &modelMCPStub{response: json.RawMessage(`{"content":"{","finishReason":"length"}`)}
 	if _, err := InvokeModel(context.Background(), stub, "exec-1", "provider/model", []ChatMessage{{Role: "user", Content: "hi"}}); err == nil ||
@@ -483,6 +497,20 @@ func TestRenderBundlesBoundedProducesCompleteJSON(t *testing.T) {
 	var decoded []EvidenceBundle
 	if err := json.Unmarshal([]byte(rendered), &decoded); err != nil || len(decoded) == 0 {
 		t.Fatalf("bounded rendering is not complete JSON: count=%d err=%v", len(decoded), err)
+	}
+}
+
+func TestSelectWriterEvidenceKeepsOnlyAnalysisClaims(t *testing.T) {
+	bundles := []EvidenceBundle{
+		{SourceID: "one", Claims: []Claim{{ClaimID: "claim-1", Evidence: "used"}, {ClaimID: "claim-2", Evidence: "unused"}}},
+		{SourceID: "two", Claims: []Claim{{ClaimID: "claim-3", Evidence: "used"}}},
+		{SourceID: "three", Claims: []Claim{{ClaimID: "claim-4", Evidence: "unused"}}},
+	}
+	selected := selectWriterEvidence(bundles,
+		`{"findings":[{"statement":"Finding","evidenceIds":["claim-1","claim-3"]}]}`)
+	if len(selected) != 2 || len(selected[0].Claims) != 1 || selected[0].Claims[0].ClaimID != "claim-1" ||
+		len(selected[1].Claims) != 1 || selected[1].Claims[0].ClaimID != "claim-3" {
+		t.Fatalf("selected writer evidence = %+v", selected)
 	}
 }
 

@@ -1498,22 +1498,27 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if err != nil {
 		return nil, "", err
 	}
+	writerBundles := selectWriterEvidence(bundles, analysisRaw)
 	system := "You write the final research report strictly from the supplied findings and evidence. " +
 		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " +
 		"Each citation marker MUST appear verbatim in the summary or a section body next to the statement it supports — a citation that is never referenced in the body is rejected, " +
 		"a marker may back at most one citation, and every marker you write must have exactly one citation object. " +
+		"Keep the report concise: an executive summary of at most 120 words and 3-4 sections of at most 160 words each. " +
 		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
 	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s\n\nReturn schema:\n%s",
-		truncate(analysisRaw, 12000), renderBundlesBounded(bundles, 20000),
+		truncate(analysisRaw, 12000), renderBundlesBounded(writerBundles, 16000),
 		`{"title":"...","summary":"...","sections":[{"heading":"...","body":"... [1]"}],"citations":[{"marker":"[1]","evidenceId":"src-001-claim-001","sourceId":"src-001","quote":"exact verbatim passage"}]}`)
 	if feedback != "" {
 		user += "\n\nRevision feedback from the citation validator:\n" + feedback
 	}
-	content, err := chat(ctx, deps, executionID, system, user)
+	turn, err := invokeModelWithLimit(ctx, deps.MCP, executionID, deps.Models.Reasoning, []ChatMessage{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, writerMaxOutputTokens)
 	if err != nil {
 		return nil, "", err
 	}
-	report, err := decodeReportOutput(content)
+	report, err := decodeReportOutput(turn.Content)
 	if err != nil {
 		return nil, "", fmt.Errorf("writer output: %w", err)
 	}
@@ -1526,6 +1531,41 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 		return nil, "", err
 	}
 	return encoded, "report-draft", nil
+}
+
+func selectWriterEvidence(bundles []EvidenceBundle, analysisRaw string) []EvidenceBundle {
+	var analysis analysisDoc
+	if json.Unmarshal([]byte(firstJSONObject(analysisRaw)), &analysis) != nil {
+		return bundles
+	}
+	wanted := make(map[string]struct{})
+	for _, finding := range analysis.Findings {
+		for _, evidenceID := range finding.EvidenceIDs {
+			if evidenceID = strings.TrimSpace(evidenceID); evidenceID != "" {
+				wanted[evidenceID] = struct{}{}
+			}
+		}
+	}
+	if len(wanted) == 0 {
+		return bundles
+	}
+	selected := make([]EvidenceBundle, 0, len(bundles))
+	for _, bundle := range bundles {
+		filtered := bundle
+		filtered.Claims = make([]Claim, 0, len(bundle.Claims))
+		for _, claim := range bundle.Claims {
+			if _, ok := wanted[claim.ClaimID]; ok {
+				filtered.Claims = append(filtered.Claims, claim)
+			}
+		}
+		if len(filtered.Claims) > 0 {
+			selected = append(selected, filtered)
+		}
+	}
+	if len(selected) == 0 {
+		return bundles
+	}
+	return selected
 }
 
 func loadWriterAnalysis(ctx context.Context, deps Deps, executionID string, envelope Envelope) (string, error) {
