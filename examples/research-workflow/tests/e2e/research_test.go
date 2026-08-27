@@ -883,7 +883,22 @@ func (h *harness) forceReaderLeaseRecovery(id uuid.UUID, timeout time.Duration) 
 	deadline := time.Now().Add(timeout)
 	instance := ""
 	for instance == "" {
-		err := h.pool.QueryRow(ctx, `SELECT a.runtime_instance_id
+		workflow, err := h.store.GetWorkflow(ctx, researchTenant, id)
+		if err != nil {
+			h.t.Fatalf("read live recovery workflow: %v", err)
+		}
+		switch workflow.Status {
+		case kernelstore.WorkflowFailed, kernelstore.WorkflowCancelled:
+			steps, listErr := h.store.ListWorkflowSteps(ctx, researchTenant, id)
+			if listErr == nil {
+				for _, step := range steps {
+					h.t.Logf("step %-22s status=%-10s attempt=%d code=%q",
+						step.Name, step.Status, step.AttemptCount, step.FailureCode)
+				}
+			}
+			h.t.Fatalf("workflow reached %s before an active Reader lease appeared", workflow.Status)
+		}
+		err = h.pool.QueryRow(ctx, `SELECT a.runtime_instance_id
 			FROM runtime_leases l
 			JOIN attempts a ON a.id = l.attempt_id
 			JOIN runs r ON r.id = a.run_id
