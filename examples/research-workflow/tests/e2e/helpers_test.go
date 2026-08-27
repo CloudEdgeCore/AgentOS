@@ -206,11 +206,13 @@ func (h *harness) createResearch(goal string) (uuid.UUID, error) {
 // deadline expires, returning the final record.
 func (h *harness) awaitWorkflow(id uuid.UUID, timeout time.Duration) (kernelstore.Workflow, []kernelstore.WorkflowStep, error) {
 	deadline := time.Now().Add(timeout)
+	var last kernelstore.Workflow
 	for time.Now().Before(deadline) {
 		workflow, err := h.store.GetWorkflow(context.Background(), researchTenant, id)
 		if err != nil {
 			return kernelstore.Workflow{}, nil, err
 		}
+		last = workflow
 		switch workflow.Status {
 		case kernelstore.WorkflowSucceeded, kernelstore.WorkflowFailed, kernelstore.WorkflowCancelled:
 			steps, err := h.store.ListWorkflowSteps(context.Background(), researchTenant, id)
@@ -218,7 +220,11 @@ func (h *harness) awaitWorkflow(id uuid.UUID, timeout time.Duration) (kernelstor
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return kernelstore.Workflow{}, nil, fmt.Errorf("workflow %s did not settle within %s", id, timeout)
+	steps, listErr := h.store.ListWorkflowSteps(context.Background(), researchTenant, id)
+	if listErr != nil {
+		return last, nil, fmt.Errorf("workflow %s did not settle within %s (list steps: %w)", id, timeout, listErr)
+	}
+	return last, steps, fmt.Errorf("workflow %s did not settle within %s", id, timeout)
 }
 
 // requireCompleted fails the test unless the workflow succeeded, dumping the
@@ -227,6 +233,9 @@ func (h *harness) requireCompleted(id uuid.UUID, timeout time.Duration) kernelst
 	h.t.Helper()
 	workflow, steps, err := h.awaitWorkflow(id, timeout)
 	if err != nil {
+		for _, step := range steps {
+			h.t.Logf("step %-22s status=%-10s attempt=%d code=%q", step.Name, step.Status, step.AttemptCount, step.FailureCode)
+		}
 		h.t.Fatalf("await workflow: %v", err)
 	}
 	if h.t.Failed() {

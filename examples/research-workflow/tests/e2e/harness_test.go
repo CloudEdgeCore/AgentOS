@@ -466,15 +466,7 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.cancelCtx = cancel
 	h.loopCtx = loopCtx
-	instances := []string{"research-worker-a", "research-worker-b"}
-	if os.Getenv("AGENTOS_RESEARCH_SCALE") == "1" {
-		// The scale scenario needs real dispatch parallelism: one poller per
-		// runtime instance, so widen the fleet under the scale gate.
-		instances = instances[:0]
-		for index := 0; index < 8; index++ {
-			instances = append(instances, fmt.Sprintf("research-worker-%02d", index))
-		}
-	}
+	instances := researchWorkerInstances(liveModel, os.Getenv("AGENTOS_RESEARCH_SCALE") == "1")
 	pools := make(staticPools, 0, len(instances))
 	for index, instance := range instances {
 		pools = append(pools, scheduler.RuntimePool{
@@ -539,6 +531,24 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 
 func liveWebForScenario(name string, enabled bool) bool {
 	return enabled && name != "live-model"
+}
+
+const liveResearchWorkerCount = 8 // mirrors runtime maxReadersPerDrain
+
+func researchWorkerInstances(liveModel, scale bool) []string {
+	count := 2
+	if liveModel || scale {
+		// Research fans out up to eight Readers per collector round. A real
+		// provider run needs the same dispatch width; leaving the deterministic
+		// two-worker fleet in place serializes network/model tail latency and
+		// turns the acceptance timeout into the dominant failure mode.
+		count = liveResearchWorkerCount
+	}
+	instances := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		instances = append(instances, fmt.Sprintf("research-worker-%02d", index))
+	}
+	return instances
 }
 
 func (h *harness) startWorker(loopCtx context.Context, instance string) {

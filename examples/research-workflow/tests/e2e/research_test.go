@@ -25,9 +25,13 @@ import (
 )
 
 const (
-	settleTimeout    = 4 * time.Minute
-	liveModelTimeout = 12 * time.Minute
-	liveFullTimeout  = 15 * time.Minute
+	settleTimeout = 4 * time.Minute
+	// Real providers have materially higher and more variable tail latency
+	// than the deterministic test double. Keep explicit per-scenario walls,
+	// but leave enough room for one bounded 180-second provider call near the
+	// end of the workflow instead of cancelling an otherwise healthy Writer.
+	liveModelTimeout = 20 * time.Minute
+	liveFullTimeout  = 20 * time.Minute
 )
 
 // Phase 1 acceptance: one goal -> >=3 questions -> >=10 sources -> >=30
@@ -846,6 +850,18 @@ func TestLiveModelScenarioKeepsDeterministicWebBoundary(t *testing.T) {
 	}
 	if liveWebForScenario("live-full", false) {
 		t.Fatal("disabled live-web gate must remain disabled")
+	}
+}
+
+func TestResearchWorkerFleetMatchesFanout(t *testing.T) {
+	if got := len(researchWorkerInstances(false, false)); got != 2 {
+		t.Fatalf("deterministic worker count = %d, want 2", got)
+	}
+	if got := len(researchWorkerInstances(true, false)); got != liveResearchWorkerCount {
+		t.Fatalf("live worker count = %d, want reader fan-out %d", got, liveResearchWorkerCount)
+	}
+	if got := len(researchWorkerInstances(false, true)); got != liveResearchWorkerCount {
+		t.Fatalf("scale worker count = %d, want reader fan-out %d", got, liveResearchWorkerCount)
 	}
 }
 
