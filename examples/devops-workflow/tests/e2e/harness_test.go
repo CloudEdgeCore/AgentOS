@@ -419,7 +419,8 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 
 	// Control API HTTP for the approval surface.
 	controlAPIHandler := api.NewHandler(store, store, store,
-		kernelmemory.NewGateway(kernelmemory.DevEmbedder{}, store), api.WithWorkflowStore(store))
+		kernelmemory.NewGateway(kernelmemory.DevEmbedder{}, store), api.WithWorkflowStore(store),
+		api.WithMetricsStore(store))
 	controlAPIHandler = auth.StaticMiddleware(auth.Principal{Subject: "devops-e2e", TenantID: devopsTenant}, controlAPIHandler)
 	controlAPIListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
