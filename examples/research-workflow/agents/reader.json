@@ -3,9 +3,9 @@
   "kind": "AgentVersion",
   "metadata": { "name": "research-reader", "version": "1.0.0", "namespace": "default" },
   "spec": {
-    "runtimeClassPolicy": { "allowed": ["adapter"], "preferred": "adapter" },
+    "runtimeClassPolicy": { "allowed": ["research-sandbox"], "preferred": "research-sandbox" },
     "lifecycle": { "maxAttempts": 3 },
-    "runtimes": [{ "class": "adapter", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
+    "runtimes": [{ "class": "research-sandbox", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
     "capabilities": {
       "tools": ["web.fetch@1.0.0"],
       "models": ["__MODEL_READER__"],

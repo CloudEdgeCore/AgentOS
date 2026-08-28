@@ -30,6 +30,7 @@ func main() {
 	controllerID := flag.String("controller-id", "", "stable unique controller instance ID")
 	poolsFile := flag.String("runtime-pools", "", "JSON runtime pool configuration")
 	tenantPoliciesFile := flag.String("tenant-policies", "", "JSON tenant policy data (absent tenants are denied by default)")
+	admissionRuntimeClasses := flag.String("admission-runtime-classes", "wasm,oci", "comma-separated runtime classes the admission gate admits (default wasm,oci)")
 	interval := flag.Duration("interval", 250*time.Millisecond, "reconciliation interval")
 	accountingInterval := flag.Duration("accounting-interval", 5*time.Minute, "budget/quota/model accounting audit interval")
 	// poolHealthFreshness is the lease heartbeat freshness window for pool
@@ -106,7 +107,7 @@ func main() {
 		}
 	}
 	engine := admission.New(admission.Limits{
-		RuntimeClasses: []string{"wasm", "oci"}, MaxTokens: 1_000_000, MaxCostMicroUSD: money.MustFromUSD(1_000),
+		RuntimeClasses: strings.Split(*admissionRuntimeClasses, ","), MaxTokens: 1_000_000, MaxCostMicroUSD: money.MustFromUSD(1_000),
 		MaxToolCalls: 100_000, MaxWallSeconds: 86_400, MaxCPU: 64_000,
 		MaxMemory: 262_144, MaxLLMConcurrency: 128,
 		// Container classes must declare explicit sandbox limits; zero values

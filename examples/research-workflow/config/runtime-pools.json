@@ -1,8 +1,8 @@
 [
   {
-    "id": "pool-research-a",
+    "id": "reasoning-pool",
     "tenantIds": ["research-tenant"],
-    "runtimeClass": "adapter",
+    "runtimeClass": "research-reasoning",
     "runtimeInstanceId": "research-worker-00",
     "region": "cn-east",
     "dataResidency": "cn",
@@ -13,13 +13,39 @@
     "artifactRegions": ["cn-east"]
   },
   {
-    "id": "pool-research-b",
+    "id": "network-pool",
     "tenantIds": ["research-tenant"],
-    "runtimeClass": "adapter",
+    "runtimeClass": "research-network",
     "runtimeInstanceId": "research-worker-01",
     "region": "cn-east",
     "dataResidency": "cn",
     "ready": true,
+    "availableCpuMillis": 8000,
+    "availableMemoryMiB": 16384,
+    "availableLlmSlots": 32,
+    "artifactRegions": ["cn-east"]
+  },
+  {
+    "id": "sandbox-pool",
+    "tenantIds": ["research-tenant"],
+    "runtimeClass": "research-sandbox",
+    "runtimeInstanceId": "research-worker-02",
+    "region": "cn-east",
+    "dataResidency": "cn",
+    "ready": true,
+    "availableCpuMillis": 8000,
+    "availableMemoryMiB": 16384,
+    "availableLlmSlots": 32,
+    "artifactRegions": ["cn-east"]
+  },
+  {
+    "id": "remote-pool",
+    "tenantIds": ["research-tenant"],
+    "runtimeClass": "research-remote",
+    "runtimeInstanceId": "research-worker-03",
+    "region": "cn-east",
+    "dataResidency": "cn",
+    "ready": false,
     "availableCpuMillis": 8000,
     "availableMemoryMiB": 16384,
     "availableLlmSlots": 32,

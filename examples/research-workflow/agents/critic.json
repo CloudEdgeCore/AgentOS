@@ -3,9 +3,9 @@
   "kind": "AgentVersion",
   "metadata": { "name": "research-critic", "version": "1.0.0", "namespace": "default" },
   "spec": {
-    "runtimeClassPolicy": { "allowed": ["adapter"], "preferred": "adapter" },
+    "runtimeClassPolicy": { "allowed": ["research-reasoning"], "preferred": "research-reasoning" },
     "lifecycle": { "maxAttempts": 4 },
-    "runtimes": [{ "class": "adapter", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
+    "runtimes": [{ "class": "research-reasoning", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://research"] }],
     "capabilities": {
       "tools": [],
       "models": ["__MODEL_REASONING__"],
