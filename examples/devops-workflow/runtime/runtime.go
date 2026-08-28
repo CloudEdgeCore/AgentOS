@@ -261,9 +261,3 @@ func putMemory(ctx context.Context, deps Deps, key, contentType string, value an
 	})
 	return err
 }
-
-func decodeJSON(raw json.RawMessage) map[string]any {
-	var result map[string]any
-	_ = json.Unmarshal(raw, &result)
-	return result
-}

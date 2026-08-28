@@ -55,17 +55,11 @@ func (c *Client) LoadRunView(ctx context.Context, workflowID, namespaceKey strin
 	if err != nil {
 		return RunView{}, err
 	}
-	state := domain.DeriveRunState(domain.WorkflowView{
-		Status:      workflow.Status,
-		FailureCode: workflow.FailureCode,
-	})
 	steps := make([]domain.StepView, 0, len(workflow.Steps))
 	for _, step := range workflow.Steps {
 		steps = append(steps, domain.StepView{Name: step.Name, Status: step.Status, ParentStepName: step.ParentStepName})
 	}
-	// Re-derive from the step views so the state machine sees the same input
-	// the API would render.
-	state = domain.DeriveRunState(domain.WorkflowView{
+	state := domain.DeriveRunState(domain.WorkflowView{
 		Status: workflow.Status, FailureCode: workflow.FailureCode, Steps: steps,
 	})
 	run := domain.ResearchRun{

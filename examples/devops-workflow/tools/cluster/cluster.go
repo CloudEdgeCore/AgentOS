@@ -83,8 +83,7 @@ func (c *Cluster) Logs(service string, lines int) ([]string, error) {
 	if lines <= 0 || lines > len(c.logs) {
 		lines = len(c.logs)
 	}
-	out := make([]string, len(c.logs))
-	copy(out, c.logs)
+	out := append([]string(nil), c.logs[len(c.logs)-lines:]...)
 	return out, nil
 }
 
