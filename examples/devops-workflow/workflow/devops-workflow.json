@@ -1,0 +1,63 @@
+{
+  "deadline": "__DEADLINE__",
+  "defaultTaskSpec": {
+    "priority": 50,
+    "budget": { "tokens": 20000, "costUsd": 3, "toolCalls": 20, "wallSeconds": 600 },
+    "placement": {
+      "runtimeClasses": ["research-reasoning", "research-network"],
+      "preferredClass": "research-reasoning",
+      "region": "cn-east",
+      "cpuMillis": 250,
+      "memoryMiB": 256,
+      "workspaceBytes": 8388608,
+      "llmConcurrency": 2
+    },
+    "retryPolicy": { "maxAttempts": 3 }
+  },
+  "budget": { "maxTasks": 20, "maxTokens": 400000, "maxCostUsd": 100 },
+  "steps": [
+    {
+      "name": "planner",
+      "agentVersionRef": "devops-planner@1.0.0",
+      "goal": "__ENVELOPE_PLANNER__",
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
+    },
+    {
+      "name": "observe",
+      "agentVersionRef": "devops-observer@1.0.0",
+      "goal": "__ENVELOPE_OBSERVER__",
+      "dependsOn": ["planner"],
+      "spec": { "placement": { "runtimeClasses": ["research-network"], "preferredClass": "research-network" } }
+    },
+    {
+      "name": "diagnose",
+      "agentVersionRef": "devops-diagnoser@1.0.0",
+      "goal": "__ENVELOPE_DIAGNOSER__",
+      "dependsOn": ["observe"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
+    },
+    {
+      "name": "execute",
+      "agentVersionRef": "devops-executor@1.0.0",
+      "goal": "__ENVELOPE_EXECUTOR__",
+      "dependsOn": ["diagnose"],
+      "requiresApproval": true,
+      "spec": { "placement": { "runtimeClasses": ["research-network"], "preferredClass": "research-network" } }
+    },
+    {
+      "name": "verify",
+      "agentVersionRef": "devops-verifier@1.0.0",
+      "goal": "__ENVELOPE_VERIFIER__",
+      "dependsOn": ["execute"],
+      "spec": { "placement": { "runtimeClasses": ["research-network"], "preferredClass": "research-network" } }
+    },
+    {
+      "name": "rollback",
+      "agentVersionRef": "devops-rollback@1.0.0",
+      "goal": "__ENVELOPE_ROLLBACK__",
+      "dependsOn": ["verify"],
+      "condition": { "step": "verify", "outputContains": "ROLLBACK_REQUIRED" },
+      "spec": { "placement": { "runtimeClasses": ["research-network"], "preferredClass": "research-network" } }
+    }
+  ]
+}
