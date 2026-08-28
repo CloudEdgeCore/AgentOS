@@ -172,7 +172,7 @@ func (s *Store) GetExecutionCorrelation(ctx context.Context, tenantID string, wo
 
 // AggregateMetrics computes the §Phase-7 core metrics over a tenant's
 // workflow window (since, inclusive).
-func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since time.Time) (observability.Metrics, error) {
+func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since time.Time) (*observability.Metrics, error) {
 	var m observability.Metrics
 
 	// Workflow phases.
@@ -181,7 +181,7 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 		(SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND created_at >= $2 AND status = 'SUCCEEDED'),
 		(SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND created_at >= $2 AND status IN ('FAILED','CANCELLED'))`,
 		tenantID, since).Scan(&m.WorkflowCount, &m.WorkflowSucceeded, &m.WorkflowFailed); err != nil {
-		return m, fmt.Errorf("workflow counts: %w", err)
+		return nil, fmt.Errorf("workflow counts: %w", err)
 	}
 
 	// Task phases.
@@ -190,7 +190,7 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 		(SELECT COUNT(*) FROM tasks WHERE tenant_id = $1 AND created_at >= $2 AND phase = 'SUCCEEDED'),
 		(SELECT COUNT(*) FROM tasks WHERE tenant_id = $1 AND created_at >= $2 AND phase IN ('FAILED','CANCELLED','TIMED_OUT'))`,
 		tenantID, since).Scan(&m.TaskCount, &m.TaskSucceeded, &m.TaskFailed); err != nil {
-		return m, fmt.Errorf("task counts: %w", err)
+		return nil, fmt.Errorf("task counts: %w", err)
 	}
 
 	// Calls and records.
@@ -205,7 +205,7 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 			JOIN tasks t ON t.id = rn.task_id AND t.tenant_id = rn.tenant_id
 			WHERE t.tenant_id = $1 AND t.created_at >= $2)`,
 		tenantID, since).Scan(&m.ModelCalls, &m.ToolCalls, &m.MemoryRecords, &m.AuditEvents, &m.Receipts); err != nil {
-		return m, fmt.Errorf("call counts: %w", err)
+		return nil, fmt.Errorf("call counts: %w", err)
 	}
 
 	if m.WorkflowCount > 0 {
@@ -221,14 +221,14 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 		WHERE t.tenant_id = $1 AND t.created_at >= $2 AND r.ordinal = 1
 		AND r.created_at >= t.created_at`, tenantID, since)
 	if err != nil {
-		return m, fmt.Errorf("latency: %w", err)
+		return nil, fmt.Errorf("latency: %w", err)
 	}
 	defer latencyRows.Close()
 	var latencies []float64
 	for latencyRows.Next() {
 		var value float64
 		if err := latencyRows.Scan(&value); err != nil {
-			return m, fmt.Errorf("scan latency: %w", err)
+			return nil, fmt.Errorf("scan latency: %w", err)
 		}
 		latencies = append(latencies, value)
 	}
@@ -254,7 +254,7 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 			WHERE t.tenant_id = $1 AND t.created_at >= $2
 			  AND a.failure_code IN ('LEASE_EXPIRED','LEASE_EXPIRED_UNCLAIMED'))`,
 		tenantID, since).Scan(&totalAttempts, &retried, &recovered); err != nil {
-		return m, fmt.Errorf("attempt metrics: %w", err)
+		return nil, fmt.Errorf("attempt metrics: %w", err)
 	}
 	if totalAttempts > 0 {
 		m.RetryRate = float64(retried) / float64(totalAttempts)
@@ -266,14 +266,14 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM workflow_usage_ledgers
 		WHERE tenant_id = $1 AND updated_at >= $2 AND reserved_tokens <> settled_tokens`,
 		tenantID, since).Scan(&driftCount); err != nil {
-		return m, fmt.Errorf("budget drift: %w", err)
+		return nil, fmt.Errorf("budget drift: %w", err)
 	}
 	m.BudgetDrift = driftCount > 0
 
 	// Capacity drift: ACTIVE reservations still outstanding.
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM runtime_capacity_reservations
 		WHERE tenant_id = $1 AND status = 'ACTIVE'`, tenantID).Scan(&m.CapacityDrift); err != nil {
-		return m, fmt.Errorf("capacity drift: %w", err)
+		return nil, fmt.Errorf("capacity drift: %w", err)
 	}
 
 	// Duplicate side effects: tool calls EXECUTED more than once for the same
@@ -285,7 +285,7 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 		GROUP BY task_id, tool_name, action, args_hash
 		HAVING COUNT(*) FILTER (WHERE status = 'EXECUTED') > 1) x`,
 		tenantID, since).Scan(&m.DuplicateSideEffects); err != nil {
-		return m, fmt.Errorf("duplicate side effects: %w", err)
+		return nil, fmt.Errorf("duplicate side effects: %w", err)
 	}
 
 	// Cross-tenant violations: any call or record in another tenant referencing
@@ -297,9 +297,9 @@ func (s *Store) AggregateMetrics(ctx context.Context, tenantID string, since tim
 		+ (SELECT COUNT(*) FROM model_calls mc WHERE mc.tenant_id <> $1 AND mc.task_id IN
 			(SELECT id FROM tasks WHERE tenant_id = $1))`,
 		tenantID).Scan(&violations); err != nil {
-		return m, fmt.Errorf("cross-tenant: %w", err)
+		return nil, fmt.Errorf("cross-tenant: %w", err)
 	}
 	m.CrossTenantViolations = violations
 
-	return m, nil
+	return &m, nil
 }
