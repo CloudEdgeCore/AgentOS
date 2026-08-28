@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
@@ -920,6 +921,59 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 		return result, nil
 	}
 
+	// Multi-runtime re-placement: an expired attempt whose pool no longer
+	// accepts work (operator cordon/drain, readiness lost, or the pool
+	// record removed) must NOT be requeued onto the same pool — the requeue
+	// would strand the task there forever. Reopen the task for scheduling so
+	// the scheduler selects a live pool of the same runtime class.
+	poolIneligible, poolErr := runtimePoolIneligible(ctx, tx, attempt.RuntimePoolID)
+	if poolErr != nil {
+		return result, fmt.Errorf("resolve pool eligibility: %w", poolErr)
+	}
+	if poolIneligible {
+		// Fail the current run (the task keeps its admission) and release
+		// the old pool's runtime capacity so the scheduler can reserve the
+		// replacement pool. The tenant budget reservation is preserved: the
+		// task never became terminal.
+		updatedRun, err := scanRun(tx.QueryRow(ctx, `UPDATE runs SET phase = 'FAILED', active_attempt_id = NULL,
+			resource_version = resource_version + 1, updated_at = $1, completed_at = $1
+			WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+runColumns,
+			now, in.TenantID, run.ID.String(), run.ResourceVersion))
+		if err != nil {
+			return result, classifyCAS(err, "run", run.ID, run.ResourceVersion)
+		}
+		updatedTask, err := scanTask(tx.QueryRow(ctx, `UPDATE tasks SET phase = 'ADMITTED', active_run_id = NULL,
+			resource_version = resource_version + 1, updated_at = $1
+			WHERE tenant_id = $2 AND id = $3 AND resource_version = $4 RETURNING `+taskColumns,
+			now, in.TenantID, task.ID.String(), task.ResourceVersion))
+		if err != nil {
+			return result, classifyCAS(err, "task", task.ID, task.ResourceVersion)
+		}
+		if err := s.releaseRuntimeCapacity(ctx, tx, in.TenantID, task.ID, now); err != nil {
+			return result, err
+		}
+		if err := insertEvent(ctx, tx, in.TenantID, "Run", run.ID, updatedRun.ResourceVersion, "RunFailed", map[string]any{
+			"runId": run.ID, "failureCode": "POOL_UNAVAILABLE",
+		}, now, s.newID()); err != nil {
+			return result, err
+		}
+		if err := insertEvent(ctx, tx, in.TenantID, "Task", task.ID, updatedTask.ResourceVersion, "TaskReopened", map[string]any{
+			"taskId": task.ID, "reason": "POOL_UNAVAILABLE", "poolId": attempt.RuntimePoolID,
+		}, now, s.newID()); err != nil {
+			return result, err
+		}
+		if err := auditHook(ctx, tx, in.TenantID, "task.reopened_for_scheduling", "Task", task.ID, map[string]any{
+			"runId": run.ID, "reason": "POOL_UNAVAILABLE", "poolId": attempt.RuntimePoolID,
+		}, now); err != nil {
+			return result, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return result, classify(err)
+		}
+		result.Retried = true
+		return result, nil
+	}
+
 	newToken := run.CurrentFencingToken + 1
 	newAttempt, err := scanAttempt(tx.QueryRow(ctx, `INSERT INTO attempts (
 		id, tenant_id, run_id, ordinal, phase, runtime_class, runtime_pool_id,
@@ -967,6 +1021,31 @@ func (s *Store) RecoverExpiredAttempt(ctx context.Context, in kernelstore.Recove
 	result.Retried = true
 	result.Lease = kernelstore.AttemptLease{Attempt: newAttempt, Lease: newLease, Run: updatedRun}
 	return result, nil
+}
+
+// runtimePoolIneligible reports whether a pool should not receive requeued
+// work after a lease expiry: cordoned, draining, not ready, or no longer
+// registered (operator removed the pool). An empty pool id (never placed)
+// keeps the existing requeue behavior.
+func runtimePoolIneligible(ctx context.Context, tx pgx.Tx, poolID string) (bool, error) {
+	if strings.TrimSpace(poolID) == "" {
+		return false, nil
+	}
+	var status string
+	var ready bool
+	err := tx.QueryRow(ctx, `SELECT COALESCE(status, 'ACTIVE'), COALESCE(ready, false)
+		FROM runtime_pools WHERE id = $1`, poolID).Scan(&status, &ready)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil // pool removed: re-place onto a live pool
+	}
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "CORDONED", "DRAINING":
+		return true, nil
+	}
+	return !ready, nil
 }
 
 func lockRuntimeOwner(ctx context.Context, tx pgx.Tx, tenantID string, attemptID uuid.UUID, fencingToken int64) (kernelstore.Attempt, kernelstore.Run, kernelstore.Task, kernelstore.Lease, error) {

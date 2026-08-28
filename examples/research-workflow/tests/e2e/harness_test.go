@@ -27,6 +27,8 @@ import (
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/control/api"
+	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
 	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/admission"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
@@ -111,27 +113,29 @@ func (f *fetchCounter) total() int {
 }
 
 type harness struct {
-	t         *testing.T
-	pool      *pgxpool.Pool
-	store     *postgresstore.Store
-	provider  *scriptedProvider
-	webtools  *webtools.Server
-	fetches   *fetchCounter
-	cancelCtx context.CancelFunc
-	loopWG    sync.WaitGroup
-	mcpURL    string
-	agentURL  string
-	bindings  *runtimeadapter.RuntimeBindings
-	registry  *mcp.ExecutionRegistry
-	artifacts *artifact.Filesystem
-	listener  net.Listener // control-plane listener, kept for extra workers
-	loopCtx   context.Context
-	workerMu  sync.Mutex
-	workers   map[string]context.CancelFunc
-	models    research.Models // logical model refs active for this run
-	liveModel bool
-	liveWeb   bool
-	schema    string
+	t          *testing.T
+	pool       *pgxpool.Pool
+	store      *postgresstore.Store
+	provider   *scriptedProvider
+	webtools   *webtools.Server
+	fetches    *fetchCounter
+	cancelCtx  context.CancelFunc
+	loopWG     sync.WaitGroup
+	mcpURL     string
+	agentURL   string
+	controlURL string // mounted Control API v1 HTTP endpoint (dev identity)
+	bindings   *runtimeadapter.RuntimeBindings
+	registry   *mcp.ExecutionRegistry
+	artifacts  *artifact.Filesystem
+	listener   net.Listener // control-plane listener, kept for extra workers
+	loopCtx    context.Context
+	workerMu   sync.Mutex
+	workers    map[string]context.CancelFunc
+	pools      staticPools     // runtime pools the scheduler places across (mutable for cordon tests)
+	models     research.Models // logical model refs active for this run
+	liveModel  bool
+	liveWeb    bool
+	schema     string
 }
 
 // envOr returns the environment value or the fallback when unset/empty.
@@ -151,8 +155,16 @@ func mustUSD(t *testing.T, value string) float64 {
 	return parsed
 }
 
-func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
+// HarnessConfig groups optional parameters for newHarnessWith.
+type HarnessConfig struct {
+	Workers int // number of adapter workers; 0 means 4
+}
+
+func newHarnessWith(t *testing.T, name string, tune func(*scenario), cfg HarnessConfig) *harness {
 	t.Helper()
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
 	databaseURL := os.Getenv("AGENTOS_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("AGENTOS_TEST_DATABASE_URL is not set")
@@ -208,6 +220,23 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 		tune(scenarioState)
 	}
 	h := &harness{t: t, pool: pool, store: store, provider: &scriptedProvider{scenario: scenarioState}, schema: schema}
+
+	// Mount the real Control API v1 HTTP handler with a static development
+	// identity so the application API and CLI can run against the same
+	// public contract the production control plane serves.
+	controlAPIHandler := api.NewHandler(store, store, store,
+		kernelmemory.NewGateway(kernelmemory.DevEmbedder{}, store),
+		api.WithWorkflowStore(store))
+	controlAPIHandler = auth.StaticMiddleware(
+		auth.Principal{Subject: "research-e2e", TenantID: researchTenant}, controlAPIHandler)
+	controlAPIListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("control api listen: %v", err)
+	}
+	controlAPIHTTPServer := &http.Server{Handler: controlAPIHandler}
+	go func() { _ = controlAPIHTTPServer.Serve(controlAPIListener) }()
+	t.Cleanup(func() { _ = controlAPIHTTPServer.Close() })
+	h.controlURL = "http://" + controlAPIListener.Addr().String()
 
 	// Live-mode detection (roadmap P0/P1): AGENTOS_RESEARCH_LIVE=1 routes
 	// model calls to a real OpenAI-compatible provider; AGENTOS_RESEARCH_LIVE_WEB=1
@@ -273,7 +302,7 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 
 	policyEngine, err := policy.New(policy.TenantPolicies{researchTenant: {
 		MaxPriority:  100,
-		AllowedTools: []string{"web.search", "web.fetch"},
+		AllowedTools: []string{"web.search", "web.fetch", "citation.check"},
 		AllowedModels: []string{
 			h.models.Fast, h.models.Reader, h.models.Reasoning,
 		},
@@ -282,8 +311,9 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 		t.Fatalf("policy engine: %v", err)
 	}
 	webhookExecutor, err := gateway.NewWebhookExecutor(map[string]string{
-		"web.search@1.0.0": toolEndpoint,
-		"web.fetch@1.0.0":  toolEndpoint,
+		"web.search@1.0.0":     toolEndpoint,
+		"web.fetch@1.0.0":      toolEndpoint,
+		"citation.check@1.0.0": toolEndpoint,
 	}, toolClient)
 	if err != nil {
 		t.Fatalf("webhook executor: %v", err)
@@ -394,6 +424,7 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	}{
 		{"web.search", "web:search:*", `{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`},
 		{"web.fetch", "web:fetch:*", `{"type":"object","properties":{"url":{"type":"string","format":"uri"}},"required":["url"]}`},
+		{"citation.check", "citation:check:*", `{"type":"object","properties":{"citations":{"type":"array"},"claims":{"type":"array"}},"required":["citations","claims"]}`},
 	} {
 		if _, err := store.RegisterToolDescriptor(ctx, kernelstore.RegisterToolDescriptorInput{
 			TenantID: researchTenant, Name: descriptor.name, Version: "1.0.0", SideEffectRisk: kernelstore.ToolRiskLow,
@@ -466,18 +497,19 @@ func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	h.cancelCtx = cancel
 	h.loopCtx = loopCtx
-	instances := researchWorkerInstances(liveModel, os.Getenv("AGENTOS_RESEARCH_SCALE") == "1")
+	instances := researchWorkerInstancesWithCount(liveModel, os.Getenv("AGENTOS_RESEARCH_SCALE") == "1" || os.Getenv("AGENTOS_RESEARCH_SCALE_1000") == "1", cfg.Workers)
 	pools := make(staticPools, 0, len(instances))
 	for index, instance := range instances {
 		pools = append(pools, scheduler.RuntimePool{
-			ID:        fmt.Sprintf("pool-research-%c", 'a'+rune(index%26)) + fmt.Sprintf("%02d", index),
-			TenantIDs: []string{researchTenant}, RuntimeClass: "adapter",
+			ID:        poolNameFor(index),
+			TenantIDs: []string{researchTenant}, RuntimeClass: poolClassFor(index),
 			RuntimeInstanceID: instance, Region: "cn-east", DataResidency: "cn", Ready: true,
 			AvailableCPU: 8000, AvailableMemory: 16384, AvailableLLMSlots: 32,
 		})
 	}
+	h.pools = pools
 	admissionController := admission.NewController(store, admission.New(admission.Limits{
-		RuntimeClasses: []string{"adapter"}, MaxTokens: 2000000, MaxCostMicroUSD: money.MustFromUSD(5000),
+		RuntimeClasses: []string{"research-reasoning", "research-network", "research-sandbox"}, MaxTokens: 2000000, MaxCostMicroUSD: money.MustFromUSD(5000),
 		MaxToolCalls: 100000, MaxWallSeconds: 36000, MaxCPU: 16000, MaxMemory: 32768, MaxLLMConcurrency: 64,
 	}), policyEngine, "research-admission", 50, time.Minute)
 	schedulerController := scheduler.NewController(store, pools, "research-scheduler", 50, time.Minute, 2*time.Minute)
@@ -533,14 +565,84 @@ func liveWebForScenario(name string, enabled bool) bool {
 	return enabled && name != "live-model"
 }
 
+// newHarness builds a harness with the default worker fleet (4 workers
+// covering the reasoning/network/sandbox class mapping).
+func newHarness(t *testing.T, name string, tune func(*scenario)) *harness {
+	return newHarnessWith(t, name, tune, HarnessConfig{})
+}
+
+// cordonPool marks one runtime pool CORDONED so the scheduler stops placing
+// there (status is checked before capacity). The static pool list is shared
+// by value with the scheduler source, so the next reconcile observes it; the
+// durable registry is updated too so the kernel recovery path (which checks
+// pool eligibility from the registry when re-placing expired attempts) sees
+// the cordon.
+func (h *harness) cordonPool(id string) {
+	h.t.Helper()
+	for index := range h.pools {
+		if h.pools[index].ID == id {
+			h.pools[index].Status = "CORDONED"
+			break
+		}
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE runtime_pools SET status = 'CORDONED', updated_at = now() WHERE id = $1`, id); err != nil {
+		h.t.Fatalf("registry cordon %s: %v", id, err)
+	}
+}
+
+// uncordonPool re-admits a previously cordoned pool.
+func (h *harness) uncordonPool(id string) {
+	h.t.Helper()
+	for index := range h.pools {
+		if h.pools[index].ID == id {
+			h.pools[index].Status = "ACTIVE"
+			break
+		}
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE runtime_pools SET status = 'ACTIVE', updated_at = now() WHERE id = $1`, id); err != nil {
+		h.t.Fatalf("registry uncordon %s: %v", id, err)
+	}
+}
+
 const liveResearchWorkerCount = 8 // mirrors runtime maxReadersPerDrain
 
+// poolClassByIndex maps a worker index to the runtime class its pool serves.
+// The class is a placement label: every worker is an adapter runtime
+// instance, but pools advertise distinct classes so role→class affinity is
+// observable (design plan §2.1: planner/analyst/critic/writer → reasoning,
+// search/collector → network, reader → sandbox).
+var poolClassByIndex = []string{
+	"research-reasoning", "research-network", "research-sandbox",
+	"research-reasoning", "research-network", "research-sandbox",
+	"research-reasoning", "research-sandbox",
+}
+
+var poolNameByIndex = []string{
+	"reasoning-pool", "network-pool", "sandbox-pool",
+	"reasoning-pool-2", "network-pool-2", "sandbox-pool-2",
+	"reasoning-pool-3", "sandbox-pool-3",
+}
+
+func poolClassFor(index int) string {
+	return poolClassByIndex[index%len(poolClassByIndex)]
+}
+
+func poolNameFor(index int) string {
+	return poolNameByIndex[index%len(poolNameByIndex)]
+}
+
 func researchWorkerInstances(liveModel, scale bool) []string {
-	count := 2
+	return researchWorkerInstancesWithCount(liveModel, scale, 4)
+}
+
+func researchWorkerInstancesWithCount(liveModel, scale bool, fixed int) []string {
+	count := fixed
 	if liveModel || scale {
 		// Research fans out up to eight Readers per collector round. A real
 		// provider run needs the same dispatch width; leaving the deterministic
-		// two-worker fleet in place serializes network/model tail latency and
+		// small fleet in place serializes network/model tail latency and
 		// turns the acceptance timeout into the dominant failure mode.
 		count = liveResearchWorkerCount
 	}

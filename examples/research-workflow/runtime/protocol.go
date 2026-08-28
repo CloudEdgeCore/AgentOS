@@ -153,11 +153,43 @@ func SearchMemory(ctx context.Context, mcp MCPClient, executionID, namespace, qu
 	return page.Records, nil
 }
 
-// SpawnChild extends the running workflow with one dynamic step.
+// childRoleClass maps each spawnable child role to the runtime class it must
+// run on (design plan §2.1 role mapping). The reference deployment expresses
+// role affinity at spawn time: the child task's placement overlay narrows the
+// workflow's declared classes to the child's class, and the scheduler places
+// it on the matching pool.
+var childRoleClass = map[string]string{
+	"search": "research-network",
+	"reader": "research-sandbox",
+}
+
+// childPlacementSpec renders the spawn spec overlay (a placement narrowing)
+// for one child agent version. Unknown roles get no overlay and inherit the
+// workflow default placement.
+func childPlacementSpec(childRef string) map[string]any {
+	class, ok := childRoleClass[RoleFromRef(childRef)]
+	if !ok {
+		return nil
+	}
+	return map[string]any{
+		"placement": map[string]any{
+			"runtimeClasses": []string{class},
+			"preferredClass": class,
+		},
+	}
+}
+
+// SpawnChild extends the running workflow with one dynamic step. The child's
+// placement overlay is derived from its role so the child always lands on
+// its runtime class regardless of the spawning parent.
 func SpawnChild(ctx context.Context, mcp MCPClient, executionID, name, childRef, goal string, maxAttempts int) error {
-	raw, err := mcp.CallTool(ctx, executionID, "agentos.task.spawn", map[string]any{
+	args := map[string]any{
 		"name": name, "goal": goal, "agentVersionRef": childRef, "maxAttempts": maxAttempts,
-	})
+	}
+	if spec := childPlacementSpec(childRef); spec != nil {
+		args["spec"] = spec
+	}
+	raw, err := mcp.CallTool(ctx, executionID, "agentos.task.spawn", args)
 	var outcome struct {
 		Outcome string `json:"outcome"`
 		Message string `json:"message"`

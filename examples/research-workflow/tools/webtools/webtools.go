@@ -1,9 +1,10 @@
-// Package webtools implements the two research tools of the reference
-// workflow as a webhook-backed tool endpoint behind the AgentOS Tool
+// Package webtools implements the research tools of the reference
+// workflow as webhook-backed tool endpoints behind the AgentOS Tool
 // Gateway:
 //
-//	web.search@1.0.0  query a fixed research corpus (offline deterministic)
-//	web.fetch@1.0.0   fetch one corpus document body (SSRF-guarded)
+//	web.search@1.0.0     query a fixed research corpus (offline deterministic)
+//	web.fetch@1.0.0      fetch one corpus document body (SSRF-guarded)
+//	citation.check@1.0.0 grade report citations against evidence (design doc §7)
 //
 // The v1 backend is an embedded corpus so the whole workflow runs without
 // internet access and stays reproducible in CI; deployments swap in a real
@@ -117,7 +118,8 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		s.requestCount(payload.Action)
 	}
 	// The Tool Gateway posts {"action":"invoke","resource":"web:<verb>:*",...};
-	// direct "search"/"fetch" actions are accepted for standalone use.
+	// direct "search"/"fetch"/"citation-check" actions are accepted for
+	// standalone use.
 	verb := payload.Action
 	if verb == "invoke" {
 		switch {
@@ -125,6 +127,8 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			verb = "search"
 		case strings.HasPrefix(payload.Resource, "web:fetch"):
 			verb = "fetch"
+		case strings.HasPrefix(payload.Resource, "citation:check"):
+			verb = "citation-check"
 		default:
 			writeError(writer, http.StatusBadRequest, "unknown resource: "+payload.Resource)
 			return
@@ -135,6 +139,8 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		s.handleSearch(writer, request, payload.Args)
 	case "fetch":
 		s.handleFetch(writer, request, payload.Args)
+	case "citation-check":
+		s.handleCitationCheck(writer, request, payload.Args)
 	default:
 		writeError(writer, http.StatusBadRequest, "unknown action: "+payload.Action)
 	}
@@ -178,6 +184,102 @@ func (s *Server) handleFetch(writer http.ResponseWriter, request *http.Request, 
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+// citationCheckArgs is the input of citation.check@1.0.0.
+type citationCheckArgs struct {
+	Citations []citationCheckInput `json:"citations"`
+	Claims    []citationCheckClaim `json:"claims"`
+}
+
+type citationCheckInput struct {
+	Marker     string `json:"marker"`
+	EvidenceID string `json:"evidenceId"`
+	Quote      string `json:"quote"`
+}
+
+type citationCheckClaim struct {
+	ClaimID  string `json:"claimId"`
+	Evidence string `json:"evidence"`
+}
+
+// citationCheckResult is the detailed output of citation.check@1.0.0.
+type citationCheckResult struct {
+	Valid             bool                `json:"valid"`
+	CitationCoverage  float64             `json:"citationCoverage"`
+	UnsupportedClaims []unsupportedDetail `json:"unsupportedClaims,omitempty"`
+	TotalChecked      int                 `json:"totalChecked"`
+}
+
+type unsupportedDetail struct {
+	Marker     string `json:"marker"`
+	EvidenceID string `json:"evidenceId"`
+	Reason     string `json:"reason"`
+}
+
+func (s *Server) handleCitationCheck(writer http.ResponseWriter, _ *http.Request, raw json.RawMessage) {
+	var args citationCheckArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid citation.check args: "+err.Error())
+		return
+	}
+	// Index claims by claimId.
+	claimsByID := make(map[string]citationCheckClaim, len(args.Claims))
+	for _, claim := range args.Claims {
+		if strings.TrimSpace(claim.ClaimID) != "" {
+			claimsByID[claim.ClaimID] = claim
+		}
+	}
+	total := len(args.Citations)
+	if total == 0 {
+		writeJSON(writer, http.StatusOK, citationCheckResult{
+			CitationCoverage: 0, Valid: false, TotalChecked: 0,
+			UnsupportedClaims: []unsupportedDetail{{Marker: "", EvidenceID: "", Reason: "no citations to check"}},
+		})
+		return
+	}
+	unsupported := make([]unsupportedDetail, 0, total)
+	supportedCount := 0
+	for _, citation := range args.Citations {
+		marker := strings.TrimSpace(citation.Marker)
+		evidenceID := strings.TrimSpace(citation.EvidenceID)
+		quote := normalizeCitationText(citation.Quote)
+		if marker == "" {
+			unsupported = append(unsupported, unsupportedDetail{EvidenceID: evidenceID, Reason: "marker is empty"})
+			continue
+		}
+		if evidenceID == "" {
+			unsupported = append(unsupported, unsupportedDetail{Marker: marker, Reason: "evidenceId is empty"})
+			continue
+		}
+		claim, found := claimsByID[evidenceID]
+		if !found {
+			unsupported = append(unsupported, unsupportedDetail{Marker: marker, EvidenceID: evidenceID, Reason: "evidenceId not found in claims"})
+			continue
+		}
+		claimEvidence := normalizeCitationText(claim.Evidence)
+		if quote == "" {
+			unsupported = append(unsupported, unsupportedDetail{Marker: marker, EvidenceID: evidenceID, Reason: "quote is empty"})
+			continue
+		}
+		if !strings.Contains(claimEvidence, quote) {
+			unsupported = append(unsupported, unsupportedDetail{Marker: marker, EvidenceID: evidenceID, Reason: "quote does not appear in the claim's evidence text"})
+			continue
+		}
+		supportedCount++
+	}
+	coverage := float64(supportedCount) / float64(total)
+	writeJSON(writer, http.StatusOK, citationCheckResult{
+		Valid:             len(unsupported) == 0,
+		CitationCoverage:  coverage,
+		UnsupportedClaims: unsupported,
+		TotalChecked:      total,
+	})
+}
+
+// normalizeCitationText collapses whitespace for substring matching.
+func normalizeCitationText(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 // corpusBackend is the deterministic offline provider: ranked search over

@@ -4,8 +4,8 @@
     "priority": 50,
     "budget": { "tokens": 40000, "costUsd": 5, "toolCalls": 40, "wallSeconds": 900 },
     "placement": {
-      "runtimeClasses": ["adapter"],
-      "preferredClass": "adapter",
+      "runtimeClasses": ["research-reasoning", "research-network", "research-sandbox", "research-remote"],
+      "preferredClass": "research-reasoning",
       "region": "cn-east",
       "cpuMillis": 250,
       "memoryMiB": 256,
@@ -31,68 +31,79 @@
     {
       "name": "planner",
       "agentVersionRef": "research-planner@1.0.0",
-      "goal": "__ENVELOPE_PLANNER__"
+      "goal": "__ENVELOPE_PLANNER__",
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "analyst-r1",
       "agentVersionRef": "research-analyst@1.0.0",
       "goal": "__ENVELOPE_ANALYST_R1__",
-      "dependsOn": ["spawn:planner"]
+      "dependsOn": ["spawn:planner"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "critic-r1",
       "agentVersionRef": "research-critic@1.0.0",
       "goal": "__ENVELOPE_CRITIC_R1__",
-      "dependsOn": ["analyst-r1"]
+      "dependsOn": ["analyst-r1"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "collector-r2",
       "agentVersionRef": "research-collector@1.0.0",
       "goal": "__ENVELOPE_COLLECTOR_R2__",
-      "dependsOn": ["spawn:critic-r1"]
+      "dependsOn": ["spawn:critic-r1"],
+      "spec": { "placement": { "runtimeClasses": ["research-network"], "preferredClass": "research-network" } }
     },
     {
       "name": "analyst-r2",
       "agentVersionRef": "research-analyst@1.0.0",
       "goal": "__ENVELOPE_ANALYST_R2__",
-      "dependsOn": ["critic-r1", "spawn:collector-r2"]
+      "dependsOn": ["critic-r1", "spawn:collector-r2"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "critic-r2",
       "agentVersionRef": "research-critic@1.0.0",
       "goal": "__ENVELOPE_CRITIC_R2__",
-      "dependsOn": ["analyst-r2", "critic-r1"]
+      "dependsOn": ["analyst-r2", "critic-r1"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "collector-r3",
       "agentVersionRef": "research-collector@1.0.0",
       "goal": "__ENVELOPE_COLLECTOR_R3__",
-      "dependsOn": ["spawn:critic-r2"]
+      "dependsOn": ["spawn:critic-r2"],
+      "spec": { "placement": { "runtimeClasses": ["research-network"], "preferredClass": "research-network" } }
     },
     {
       "name": "analyst-r3",
       "agentVersionRef": "research-analyst@1.0.0",
       "goal": "__ENVELOPE_ANALYST_R3__",
-      "dependsOn": ["critic-r2", "spawn:collector-r3"]
+      "dependsOn": ["critic-r2", "spawn:collector-r3"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "critic-final",
       "agentVersionRef": "research-critic@1.0.0",
       "goal": "__ENVELOPE_CRITIC_R3__",
-      "dependsOn": ["analyst-r3", "critic-r2"]
+      "dependsOn": ["analyst-r3", "critic-r2"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "writer",
       "agentVersionRef": "research-writer@1.0.0",
       "goal": "__ENVELOPE_WRITER__",
-      "dependsOn": ["critic-final", "analyst-r3"]
+      "dependsOn": ["critic-final", "analyst-r3"],
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     },
     {
       "name": "citation-validator",
       "agentVersionRef": "research-citation-validator@1.0.0",
       "goal": "__ENVELOPE_VALIDATOR__",
       "dependsOn": ["writer"],
-      "retry": { "maxAttempts": 4 }
+      "retry": { "maxAttempts": 4 },
+      "spec": { "placement": { "runtimeClasses": ["research-reasoning"], "preferredClass": "research-reasoning" } }
     }
   ]
 }

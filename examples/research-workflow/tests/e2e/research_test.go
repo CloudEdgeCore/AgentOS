@@ -371,9 +371,10 @@ func TestResearchWorkflowRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create research: %v", err)
 	}
-	// Wait until the fan-out is DEEP in flight and both runtime instances
-	// actually own leases. RUNNING task counts alone are insufficient here:
-	// workflow tasks can remain RUNNING briefly between agent attempts.
+	// Wait until the fan-out is DEEP in flight and the sandbox worker
+	// actually owns leases. The multi-runtime fleet runs the reader burst on
+	// the single sandbox instance, so one leased instance with running work
+	// is the crash window (the old two-worker fleet leased both instances).
 	deadline := time.Now().Add(90 * time.Second)
 	for {
 		var running, attempts, leasedInstances int
@@ -386,7 +387,7 @@ func TestResearchWorkflowRecovery(t *testing.T) {
 				 WHERE l.released_at IS NULL)`).Scan(&running, &attempts, &leasedInstances); err != nil {
 			t.Fatalf("count in-flight work: %v", err)
 		}
-		if running >= 3 && attempts >= 6 && leasedInstances >= 2 {
+		if running >= 1 && attempts >= 6 && leasedInstances >= 1 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -395,8 +396,7 @@ func TestResearchWorkflowRecovery(t *testing.T) {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	h.KillWorker("research-worker-a")
-	h.KillWorker("research-worker-b")
+	h.KillWorker("research-worker-02")
 	// Advance at least one stranded lease to expiry rather than sleeping for
 	// the 15-second heartbeat TTL. Repeating the update closes the narrow race
 	// where an already-returning worker releases the first selected lease.
@@ -438,10 +438,10 @@ func TestResearchWorkflowRecovery(t *testing.T) {
 		forcedExpirations += tag.RowsAffected()
 		time.Sleep(100 * time.Millisecond)
 	}
-	// Restart BOTH runtime instances because stranded runs may be bound to
-	// either pool.
-	h.startWorker(h.loopCtx, "research-worker-a")
-	h.startWorker(h.loopCtx, "research-worker-b")
+	// Restart the crashed sandbox instance: the requeued reader attempts
+	// (same pool/instance per the kernel recovery contract) are picked up by
+	// the restarted process.
+	h.startWorker(h.loopCtx, "research-worker-02")
 
 	h.requireCompleted(id, settleTimeout+3*time.Minute)
 
@@ -854,8 +854,8 @@ func TestLiveModelScenarioKeepsDeterministicWebBoundary(t *testing.T) {
 }
 
 func TestResearchWorkerFleetMatchesFanout(t *testing.T) {
-	if got := len(researchWorkerInstances(false, false)); got != 2 {
-		t.Fatalf("deterministic worker count = %d, want 2", got)
+	if got := len(researchWorkerInstances(false, false)); got != 4 {
+		t.Fatalf("deterministic worker count = %d, want 4 (reasoning x2, network, sandbox)", got)
 	}
 	if got := len(researchWorkerInstances(true, false)); got != liveResearchWorkerCount {
 		t.Fatalf("live worker count = %d, want reader fan-out %d", got, liveResearchWorkerCount)

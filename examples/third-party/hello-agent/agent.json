@@ -1,0 +1,13 @@
+{
+  "apiVersion": "agentos.dev/v1",
+  "kind": "AgentVersion",
+  "metadata": { "name": "hello-agent", "version": "1.0.0", "namespace": "default" },
+  "spec": {
+    "runtimeClassPolicy": { "allowed": ["research-network"], "preferred": "research-network" },
+    "lifecycle": { "maxAttempts": 3 },
+    "runtimes": [{ "class": "research-network", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": ["agentos-binding://hello"] }],
+    "capabilities": { "tools": ["hello.echo@1.0.0"], "models": [], "memory": [], "secrets": [] },
+    "budget": { "tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120 },
+    "checkpoint": { "mode": "logical", "schemaVersion": "hello/v1", "intervalSeconds": 30 }
+  }
+}

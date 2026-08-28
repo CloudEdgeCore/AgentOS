@@ -496,8 +496,14 @@ func objectMap(raw json.RawMessage) map[string]json.RawMessage {
 	return object
 }
 
-// mergeSpecs shallow-merges the workflow default task spec with the step
-// overlay (step keys win) and returns canonical JSON.
+// mergeSpecs merges the workflow default task spec with the step/spawn
+// overlay (step keys win) and returns canonical JSON. The placement
+// sub-object is merged FIELD-WISE rather than wholesale so an overlay can
+// narrow only the runtime classes or preferred class of one step or spawned
+// child while inheriting the region, capacity and residency the workflow
+// default placement declares — the mechanism behind per-role runtime
+// affinity for static steps (step.spec.placement) and dynamic children
+// (spawn spec.placement).
 func mergeSpecs(defaults, overlay map[string]json.RawMessage) (json.RawMessage, error) {
 	if len(defaults) == 0 && len(overlay) == 0 {
 		return nil, fmt.Errorf("a task spec is required (defaultTaskSpec or step spec)")
@@ -508,6 +514,24 @@ func mergeSpecs(defaults, overlay map[string]json.RawMessage) (json.RawMessage, 
 	}
 	for key, value := range overlay {
 		merged[key] = value
+	}
+	if overlayPlacement, hasOverlay := overlay["placement"]; hasOverlay {
+		basePlacement := objectMap(defaults["placement"])
+		overlayPlacementObject := objectMap(overlayPlacement)
+		if len(basePlacement) > 0 && len(overlayPlacementObject) > 0 {
+			fieldMerged := make(map[string]json.RawMessage, len(basePlacement)+len(overlayPlacementObject))
+			for key, value := range basePlacement {
+				fieldMerged[key] = value
+			}
+			for key, value := range overlayPlacementObject {
+				fieldMerged[key] = value
+			}
+			encoded, err := json.Marshal(fieldMerged)
+			if err != nil {
+				return nil, fmt.Errorf("encode merged placement: %w", err)
+			}
+			merged["placement"] = encoded
+		}
 	}
 	encoded, err := json.Marshal(merged)
 	if err != nil {

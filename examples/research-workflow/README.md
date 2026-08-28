@@ -14,10 +14,17 @@ fenced runtime adapter workers), no mocks inside the pipeline.
 agents/                  8 AgentVersion manifests (7 roles; collector is the
                          routing hop described below)
 workflow/research-workflow.json   static workflow template + budgets + dynamic limits
+workflow/schemas/        planner / evidence / analysis / critic / report JSON schemas
 runtime/                 the Go runtime implementing all roles behind one
                          agentos.adapter-http/v1 endpoint (protocol.go, roles.go)
-tools/webtools/          web.search / web.fetch webhook tool endpoint
-                         (offline deterministic corpus, SSRF-guarded fetch)
+app/                     application layer (design doc §3): domain objects (§5),
+                         the §9 state machine, the Control API client, the
+                         report renderer + artifact store, and the §13 REST API
+                         (app/api, app/repository, app/report, app/domain,
+                         app/cmd/research-api)
+tools/webtools/          web.search / web.fetch / citation.check webhook tool
+                         endpoint (offline deterministic corpus, SSRF-guarded
+                         fetch, deterministic citation grading)
 config/                  deployment configuration examples
 scripts/                 bootstrap / publish / run / inject-failure / cleanup
 tests/e2e/               end-to-end scenario suite (build tag `integration`)
@@ -115,6 +122,68 @@ the same shape production pipelines use as a "fan-in/fan-out router" step.
   fencing token; stale writers are rejected at the gateway.
 - **Idempotency**: spawn replays return `replayed`; checkpoints, completions
   and model calls are idempotent-keyed.
+
+## Application API (§13)
+
+The application layer exposes the research REST API from design doc §13. It
+composes the workflow document (envelope substitution + user budget override),
+submits it through the Control API v1, and materializes the §5 domain state
+from observable kernel surfaces (workflow + memory namespaces) — it never
+touches kernel internals or the database directly. Start it with
+`app/cmd/research-api` (bootstrap.sh does this for you on `127.0.0.1:9095`):
+
+```bash
+go run ./examples/research-workflow/app/cmd/research-api \
+  -control-endpoint http://127.0.0.1:9092 \
+  -listen 127.0.0.1:9095 \
+  -workflow-template examples/research-workflow/workflow/research-workflow.json \
+  -artifact-root tmp/research-artifacts
+```
+
+| Endpoint | Description |
+|---|---|
+| `POST /research` | `{"goal":"...","budget":{"maxTasks":80,"maxTokens":250000}}` → `202 {researchId, workflowId, status:"CREATED"}` |
+| `GET /research/{id}` | materialized run: §5 domain objects + `criticVerdict` + statistics |
+| `GET /research/{id}/report` | final report: `{report:{id,researchRunId,artifactRef,citationCoverage}, markdown}` (`409 REPORT_NOT_READY` until COMPLETED) |
+| `POST /research/{id}/cancel` | maps to the kernel workflow cancel (CAS `If-Match`) |
+
+The `researchId` is `research-<namespaceKey>`; the server persists the
+namespace-key → kernel-workflow-id mapping under the artifact root so it
+survives restarts. Reports are stored as content-addressed artifacts
+(`artifact://…` URIs) with the Markdown deliverable and the citation verdict.
+
+## CLI: `agentos research` (§17)
+
+The `research` subcommand drives the §17 showcase through the app API with a
+live timeline and a final statistics block:
+
+```bash
+go run ./cmd/agentos research --endpoint http://127.0.0.1:9095 \
+  --goal "分析未来三年 Agent Runtime 基础设施的发展方向" --max-tokens 2000000
+
+[00:00] Research created research-… (workflow …)
+[00:02] Planner running
+[00:06] 6 research questions created
+[00:07] Research in progress
+[00:20] 28 sources discovered
+[00:45] 137 evidence records extracted
+[00:50] Analyst running
+[00:54] Critic: PASS
+[01:21] Writer running
+[01:39] Citation validator running
+[01:42] Research completed
+[01:42] Report ready (artifact artifact://research-tenant/sha256/…)
+
+Statistics:
+Workflow Tasks     37
+AgentVersions       8
+Sources            31
+Evidence          152
+...
+Citation Coverage  95%
+```
+
+Exits non-zero when the run ends in a non-COMPLETED state.
 
 ## Running locally
 
@@ -226,6 +295,15 @@ go test -tags integration -count=1 -timeout 12m \
 | `BudgetStop` | undersized budget settles instead of running unbounded |
 | `LiveModel` / `LiveFull` / `LiveRecovery` (env-gated) | real-model, full live-internet, and live worker-recovery acceptance with durable §5 evidence (see Live mode above) |
 | `100Concurrent` (gate `AGENTOS_RESEARCH_SCALE=1`) | 100 simultaneous workflows all reach SUCCEEDED |
+| `AppAPIAndReport` | the §13 application API over real HTTP: create → COMPLETED → report artifact with coverage ≥ 0.90 |
+| `AppAPICancel` | §13 cancel path: a running research run settles CANCELLED |
+| `TaskSSEDisconnect` | §14-P4 SSE disconnect: a client that drops mid-stream reconnects and still receives `task.terminal` |
+| `1000Runs` (gate `AGENTOS_RESEARCH_SCALE_1000=1`, count via `AGENTOS_E2E_RESEARCH_RUNS`) | 1000 total ResearchRuns all settle SUCCEEDED (the §16 scale gate) |
+| `Soak` (gate `AGENTOS_RESEARCH_SOAK=1`, duration via `AGENTOS_E2E_SOAK_MINUTES`, default 10; 1440 = 24h) | continuous runs with 100% completion and zero residual capacity reservations (§18 soak) |
+| `MultiRuntimeRolePlacement` | every role runs on its mapped runtime class (reasoning / network / sandbox) with the workflow declaring only the class set |
+| `MultiRuntimeMigration` | the same workflow document runs readers on the surviving sandbox pool when the original pool is cordoned |
+| `MultiRuntimeCapacityExhaustion` | capacity-exhausted sandbox pool → placement walks candidates to the other sandbox pool |
+| `MultiRuntimeWorkerRecoveryReplacement` | sandbox worker crash + lease expiry → requeued attempts complete on the restarted worker; workflow SUCCEEDs |
 
 Kernel-level regression tests for the retry semantics live in
 `internal/kernel/store/postgres/runtime_requeue_integration_test.go`
@@ -234,7 +312,53 @@ existing checkpoint/recovery tests.
 
 ## Configuration reference
 
-See `config/`: tenant policies (`max_priority`, allowed tools/models), model
-providers (API keys referenced by env var name only), tool endpoints
-(immutable version → HTTPS URL), runtime pools (capacity ledger seeds), and
-runtime bindings (published ref → runtime endpoint).
+See `config/`: tenant policies (`research-policy.json` — the §3 name; bare
+tool names, since the Rego policy matches `input.tool.name`), model providers
+(API keys referenced by env var name only), tool endpoints (immutable version
+→ HTTPS URL; `citation.check@1.0.0` included), runtime pools (four pools per
+the multi-runtime plan: `reasoning-pool` / `network-pool` / `sandbox-pool` /
+`remote-pool`), and runtime bindings (published ref → runtime endpoint).
+
+## Multi-runtime placement (next-phase plan §2)
+
+The research workflow runs as a heterogeneous multi-runtime workload: each
+role declares its runtime class in the AgentVersion manifest
+(`runtimes[].class` + `runtimeClassPolicy.allowed`), the workflow document
+declares the class set it permits, and the kernel admission → scheduler chain
+places every task onto the matching pool:
+
+| Role | Class | Pool |
+|---|---|---|
+| planner / analyst / critic / writer / citation-validator | `research-reasoning` | `reasoning-pool` |
+| search / collector | `research-network` | `network-pool` |
+| reader | `research-sandbox` | `sandbox-pool` |
+| external specialist (planned) | `research-remote` | `remote-pool` |
+
+Static steps narrow their placement via the per-step `spec.placement` overlay
+(merged field-wise over the workflow default placement); dynamic children
+(search / reader) carry their own placement overlay in the spawn `spec`, so a
+reader spawned by the network-class collector still lands on the sandbox
+class. Cordon/drain a pool and the same workflow document keeps running on
+the surviving pool of the same class (see the migration acceptance below).
+
+Lease-expiry recovery is pool-aware: when the expired attempt's pool is
+cordoned, draining, or no longer ready, the kernel reopens the task for
+scheduling instead of requeueing onto the dead pool, so the scheduler
+re-places it onto a live pool of the same runtime class (the multi-runtime
+re-placement fix in `RecoverExpiredAttempt`).
+
+## Failure injection (§15)
+
+`scripts/inject-failure.sh` supports every §15 scenario against the bootstrap
+stack: `kill-worker` / `kill-reader` (SIGKILL a runtime adapter; lease-expiry
+recovery requeues its attempts), `runtime-disconnect` (SIGSTOP — connections
+drop without releasing leases), `model-429` (SIGSTOP the local model provider
+for N seconds so bounded retries absorb the stall), `tool-500` (SIGSTOP or
+kill the webtools webhook), `sse-reset` (SIGSTOP/SIGCONT the Control API so
+event streams stall and clients reconnect + reconcile), plus the operator
+`cordon` / `uncordon` pool controls. Each injection prints the §15
+observation chain (`failure injected → attempt failed → recovery → new
+attempt → workflow continued`) to verify against `agentos research` or the
+e2e recovery scenarios. The same scenarios are exercised deterministically
+in-process by the failure-injection e2e tests (`ToolFailureRecovery`,
+`ModelFailure`, `Recovery`, `ReaderModelRetry`).
