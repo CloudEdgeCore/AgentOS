@@ -12,6 +12,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/platform/grpcx"
 	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -142,6 +143,43 @@ func TestMTLSIdentityBoundary(t *testing.T) {
 	if err == nil {
 		t.Fatal("certificate-less client was accepted")
 	}
+
+	// An EXPIRED SVID (issued in the past with a validity window that has
+	// already closed) never completes the TLS handshake.
+	expiredSVID, err := ca.IssueSVID("tenant-a", "worker-1", now.Add(-2*time.Hour), time.Hour)
+	if err != nil {
+		t.Fatalf("issue expired SVID: %v", err)
+	}
+	err = poll(expiredSVID, pool, "tenant-a", "worker-1")
+	if err == nil {
+		t.Fatal("expired SVID was accepted")
+	}
+}
+
+// TestRemoteRuntimeFencingTokenDenied proves the plan's "旧 Fencing Token →
+// DENY" case at the runtime-control boundary: a runtime presenting a stale
+// fencing token for its attempt is rejected before execution.
+func TestRemoteRuntimeFencingTokenDenied(t *testing.T) {
+	service := NewService(&fencedRuntimeStore{}, "tenant-a", time.Minute)
+	ctx := context.Background()
+	_, err := service.GetAssignment(ctx, &runtimev1.GetAssignmentRequest{
+		Identity: &runtimev1.AttemptIdentity{
+			TenantId: "tenant-a", AttemptId: uuid.New().String(), FencingToken: 42,
+		},
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("stale fencing token = %v, want PermissionDenied", err)
+	}
+}
+
+// fencedRuntimeStore returns ErrFenced for every assignment lookup, as the
+// durable store does when the presented fencing token is no longer current.
+type fencedRuntimeStore struct {
+	store.RuntimeStore
+}
+
+func (s *fencedRuntimeStore) GetRuntimeAssignment(context.Context, string, uuid.UUID, int64) (store.RuntimeAssignment, error) {
+	return store.RuntimeAssignment{}, store.ErrFenced
 }
 
 // TestClaimBindingIsInertWithoutConfiguredTrustDomain proves the dev

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"testing"
 	"time"
@@ -10,11 +12,14 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/spiffe"
 	runtimeadapter "github.com/CloudEdgeCore/AgentOS/internal/runtime/adapter"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -187,5 +192,69 @@ func TestSpawnVerticalSliceBrokerGrpcAndAuthoritativeService(t *testing.T) {
 	if workflows.spawns != 1 || workflows.input.TenantID != identity.TenantID ||
 		workflows.input.ParentStepName != identity.ParentStepName || workflows.input.AgentVersionRef != "worker@1" {
 		t.Fatalf("vertical spawn did not preserve authoritative identity: result=%+v input=%+v", result, workflows.input)
+	}
+}
+
+// TestSpawnServiceMTLSPeerTenantBinding proves the Phase 2 remote-runtime
+// binding at the spawn boundary: with a SPIFFE trust domain configured, the
+// verified peer SVID's tenant must match the request's tenant claim. A
+// correct tenant passes, a cross-tenant SVID is denied, and a non-TLS peer
+// is unauthenticated.
+func TestSpawnServiceMTLSPeerTenantBinding(t *testing.T) {
+	now := time.Now()
+	ca, err := spiffe.NewCA("agentos.dev", now, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	service, _, request := validSpawnServiceFixture()
+	service.spiffeTrustDomain = "agentos.dev"
+
+	peerContextFor := func(svid tls.Certificate) context.Context {
+		leaf, err := x509.ParseCertificate(svid.Certificate[0])
+		if err != nil {
+			t.Fatalf("parse SVID leaf: %v", err)
+		}
+		return peer.NewContext(context.Background(), &peer.Peer{
+			AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{
+				PeerCertificates: []*x509.Certificate{leaf},
+			}},
+		})
+	}
+
+	// A tenant-a worker SVID (matching the request claim) passes the identity
+	// boundary; the rest of the spawn flow runs (fixture is valid).
+	tenantASVID, err := ca.IssueSVID("tenant-a", "remote-1", now, time.Hour)
+	if err != nil {
+		t.Fatalf("issue tenant-a SVID: %v", err)
+	}
+	if _, err := service.SpawnStep(peerContextFor(tenantASVID), request); err != nil {
+		t.Fatalf("authorized remote runtime spawn: %v", err)
+	}
+
+	// A tenant-b SVID impersonating tenant-a is denied.
+	tenantBSVID, err := ca.IssueSVID("tenant-b", "remote-1", now, time.Hour)
+	if err != nil {
+		t.Fatalf("issue tenant-b SVID: %v", err)
+	}
+	if _, err := service.SpawnStep(peerContextFor(tenantBSVID), request); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("cross-tenant remote runtime = %v, want PermissionDenied", err)
+	}
+
+	// An SVID from an untrusted CA is rejected at the identity check.
+	rogueCA, err := spiffe.NewCA("evil.example", now, time.Hour)
+	if err != nil {
+		t.Fatalf("create rogue CA: %v", err)
+	}
+	rogueSVID, err := rogueCA.IssueSVID("tenant-a", "remote-1", now, time.Hour)
+	if err != nil {
+		t.Fatalf("issue rogue SVID: %v", err)
+	}
+	if _, err := service.SpawnStep(peerContextFor(rogueSVID), request); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("rogue-CA remote runtime = %v, want PermissionDenied", err)
+	}
+
+	// A non-TLS peer (no verified identity) is unauthenticated.
+	if _, err := service.SpawnStep(context.Background(), request); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("non-TLS peer = %v, want Unauthenticated", err)
 	}
 }
