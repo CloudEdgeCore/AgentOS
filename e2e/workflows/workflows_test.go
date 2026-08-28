@@ -497,7 +497,8 @@ func TestV12WorkflowScale(t *testing.T) {
 		t.Fatalf("tasks = %d, want exactly %d (no double dispatch)", tasks, expectedTasks)
 	}
 
-	// Orchestrator P95 reconcile latency (Phase 3 gate: < 500ms).
+	// Orchestrator P95 reconcile latency (Phase 3 gate; the instrumented
+	// race build doubles the threshold — see scale_gate_*_test.go).
 	p95 := float64(0)
 	if samples := reconcileMs.snapshot(); len(samples) > 0 {
 		sort.Float64s(samples)
@@ -509,8 +510,8 @@ func TestV12WorkflowScale(t *testing.T) {
 	if concurrentRate < 0.99 {
 		t.Fatalf("concurrent workflow success rate %.4f below 99%%", concurrentRate)
 	}
-	if p95 >= 500 {
-		t.Fatalf("orchestrator P95 reconcile = %.1fms, want < 500ms", p95)
+	if p95 >= reconcileP95GateMs {
+		t.Fatalf("orchestrator P95 reconcile = %.1fms, want < %dms", p95, reconcileP95GateMs)
 	}
 	if wideSteps := queryInt(ctx, t, env, `SELECT count(*) FROM workflow_steps s WHERE s.workflow_id = $1`, wideID); wideSteps != int64(steps) {
 		t.Fatalf("wide workflow steps = %d, want %d", wideSteps, steps)

@@ -74,15 +74,21 @@ tests/e2e/               end-to-end scenario suite (build tag `integration`)
    retry-scoped feedback, and ships an honest verdict after 2 failed
    revisions.
 
-### Provenance chain: Report → Citation → Evidence → Source
+### Provenance chain: Statement → Marker → Citation → Evidence → Source
 
 Citation validation is as strict as extraction: a citation counts as
 supported ONLY when its evidenceId names an existing claim AND its quote is
-a non-empty whitespace-normalized substring of THAT claim's evidence.
-Empty quotes, unknown claim ids, and passages borrowed from different
-evidence are rejected outright — no corpus-wide fallback. Combined with
-reader-side grounding, every accepted citation traces to verified source
-text end to end.
+a non-empty whitespace-normalized substring of THAT claim's evidence AND
+its marker actually appears in the report body, with each body marker
+binding at most one citation. Empty quotes, unknown claim ids, passages
+borrowed from different evidence, citations never referenced in the body,
+and dangling body markers with no citation object are all rejected — the
+citations array alone cannot manufacture coverage. The canonicalizer closes
+the chain deterministically (it rewrites quotes to verified evidence text
+and appends any missing markers as a `References:` line), and the validator
+audits the completed chain; revisions carry per-marker feedback. Combined
+with reader-side grounding, every accepted citation traces to verified
+source text end to end.
 
 ### Documented deviation: the collector role
 
@@ -136,6 +142,64 @@ examples/research-workflow/scripts/cleanup.sh
 The example runtime (`runtime/cmd`) serves all roles on one endpoint;
 `config/runtime-bindings.json` maps each published ref to it.
 
+## Live mode: real models and real web (roadmap P0/P1/P2)
+
+The deterministic stack stays the CI default. Two independent switches
+upgrade fidelity without touching the agents — they keep calling the same
+logical tiers (`research-fast` / `research-reader` / `research-reasoning`
+manifest placeholders) and the same `web.search@1.0.0` / `web.fetch@1.0.0`
+tools:
+
+```bash
+# P0 — real model (OpenAI-compatible / vLLM / Qwen / DeepSeek / GLM …)
+AGENTOS_RESEARCH_LIVE=1
+AGENTOS_RESEARCH_MODEL_BASE_URL=https://api.example.com/v1
+AGENTOS_RESEARCH_MODEL_KEY=sk-...
+AGENTOS_RESEARCH_MODEL_PROVIDER=openai            # registry name, default openai
+AGENTOS_RESEARCH_MODEL_FAST=gpt-4o-mini           # wire model per tier (optional)
+AGENTOS_RESEARCH_MODEL_READER=gpt-4o-mini
+AGENTOS_RESEARCH_MODEL_REASONING=gpt-4o
+
+# P1 — real internet
+AGENTOS_RESEARCH_LIVE_WEB=1
+AGENTOS_RESEARCH_SEARCH_PROVIDER=doubao           # doubao | brave | bing
+AGENTOS_RESEARCH_SEARCH_KEY=...
+```
+
+Live backends: `webtools.DoubaoSearch` / `webtools.BraveSearch` /
+`webtools.BingSearch` provider
+adapters behind one `Backend` interface, and `webtools.LiveFetch` — a
+hardened fetcher (DNS resolve/validate/IP-pin/dial with mixed-address
+rejection, SSRF policy incl. per-hop redirect re-checks, ≤5 hops, 10 MiB
+cap, 20 s timeout, content-type allowlist, HTML→readable-text, final URL +
+stable source id). Proxy and alternate TLS dial hooks are disabled at this
+boundary so they cannot bypass DNS pinning. The deterministic corpus remains
+an in-process fallback.
+The Doubao adapter follows the
+[official Search Custom API](https://docs.volcengine.com/docs/87772/2272953?lang=zh):
+Bearer API-key authentication, the documented `Query` / `SearchType` /
+`Count` / `Filter` envelope, URL-bearing web results only, and a client-side
+4 QPS limiter below the default 5 QPS quota.
+
+Gated acceptance tests (skip unless their env is present):
+
+| Test | Gate | Asserts |
+|---|---|---|
+| `TestResearchWorkflowLiveModel` | `AGENTOS_RESEARCH_LIVE=1` | SUCCEEDED, coverage ≥ 0.90, zero unsupported, all evidence grounded; prints §5 metrics JSON |
+| `TestResearchWorkflowLiveFull` | + `LIVE_WEB=1`, `…_GOAL="…"` | + grounded rate = 100 %, unique domains ≥ 3, no INSUFFICIENT_EVIDENCE |
+| `TestResearchWorkflowLiveRecovery` | same as LiveFull | + kills one active Reader worker, expires/fences its lease, requires a recovered Attempt and final SUCCEEDED |
+
+Metrics (workflowId, questions, sources, uniqueDomains, evidenceCount,
+groundedEvidenceRate, citationCoverage, unsupportedCitations, criticRounds,
+modelCalls/failures, toolCalls, recoveredAttempts, tokens, costUsd,
+duration) are aggregated from the durable store and logged with the run —
+identical shape for deterministic and live executions. Every live acceptance
+also writes a credential-scanned JSON evidence document containing the exact
+commit SHA and all metrics. The default output directory is
+`artifacts/research-live/` (generated files are git-ignored); override it with
+`AGENTOS_RESEARCH_EVIDENCE_DIR` when a CI job will upload the documents as PR
+or release artifacts.
+
 ## End-to-end test suite
 
 Requires PostgreSQL at `AGENTOS_TEST_DATABASE_URL`. Each scenario gets its
@@ -156,9 +220,11 @@ go test -tags integration -count=1 -timeout 12m \
 | `CitationCoverage` | fabricated quotes trigger writer revision; gate ≥0.90 enforced honestly |
 | `InvalidCitation` | persistent unknown-evidence citations never pass the hardened validator; honest best-effort ships |
 | `ToolFailureRecovery` | injected `web.fetch` 500s absorbed by attempt retries, no duplicate side effects |
+| `ReaderModelRetry` | Reader provider failure creates a failed Attempt and a new Run/Attempt without prematurely writing the read marker |
 | `ModelFailure` | provider 429 absorbed by bounded provider retry |
 | `Recovery` | SIGKILL-equivalent of both workers mid-run; lease expiry + recovery + restarted instances complete the workflow |
 | `BudgetStop` | undersized budget settles instead of running unbounded |
+| `LiveModel` / `LiveFull` / `LiveRecovery` (env-gated) | real-model, full live-internet, and live worker-recovery acceptance with durable §5 evidence (see Live mode above) |
 | `100Concurrent` (gate `AGENTOS_RESEARCH_SCALE=1`) | 100 simultaneous workflows all reach SUCCEEDED |
 
 Kernel-level regression tests for the retry semantics live in

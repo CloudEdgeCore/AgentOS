@@ -93,7 +93,12 @@ func (e *WebhookExecutor) Execute(ctx context.Context, input tool.ExecutionReque
 		return tool.ExecutionResult{}, fmt.Errorf("tool response exceeds %d bytes", maxWebhookResponseBytes)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return tool.ExecutionResult{FailureCode: "TOOL_ENDPOINT_REJECTED"}, fmt.Errorf("tool endpoint returned HTTP %d", response.StatusCode)
+		// Preserve the bounded HTTP classification across the Tool Gateway so
+		// agents can distinguish retryable upstream failures (429/5xx) from
+		// deterministic terminal outcomes (404/410/415). Response bodies stay
+		// private to the gateway and never become part of the public error.
+		failureCode := fmt.Sprintf("TOOL_ENDPOINT_HTTP_%d", response.StatusCode)
+		return tool.ExecutionResult{FailureCode: failureCode}, fmt.Errorf("tool endpoint returned HTTP %d", response.StatusCode)
 	}
 	if !json.Valid(encoded) {
 		return tool.ExecutionResult{}, fmt.Errorf("tool endpoint returned invalid JSON")

@@ -49,13 +49,29 @@ type ChatTurn struct {
 	ToolCalls []ChatCall
 }
 
+// Research roles return structured analyses and reports that routinely exceed
+// the gateway's conservative 512-token default. Reserve an explicit bounded
+// completion envelope so valid JSON is not cut off mid-document.
+const (
+	researchMaxOutputTokens = 4096
+	writerMaxOutputTokens   = 2048
+)
+
 // InvokeModel runs one governed model invocation through the broker,
 // resolving the logical tier to this deployment's reference first.
 func InvokeModel(ctx context.Context, mcp MCPClient, executionID, modelRef string, messages []ChatMessage) (ChatTurn, error) {
+	return invokeModelWithLimit(ctx, mcp, executionID, modelRef, messages, researchMaxOutputTokens)
+}
+
+func invokeModelWithLimit(ctx context.Context, mcp MCPClient, executionID, modelRef string, messages []ChatMessage, maxOutputTokens int) (ChatTurn, error) {
+	if maxOutputTokens <= 0 || maxOutputTokens > researchMaxOutputTokens {
+		return ChatTurn{}, fmt.Errorf("model maxOutputTokens %d is outside (0,%d]", maxOutputTokens, researchMaxOutputTokens)
+	}
 	response, err := mcp.CallTool(ctx, executionID, "agentos.model.invoke", map[string]any{
-		"modelRef": modelRef,
-		"messages": messages,
-		"stream":   false,
+		"modelRef":        modelRef,
+		"messages":        messages,
+		"maxOutputTokens": maxOutputTokens,
+		"stream":          false,
 	})
 	if err != nil {
 		return ChatTurn{}, fmt.Errorf("model invoke: %w", err)
@@ -73,6 +89,9 @@ func InvokeModel(ctx context.Context, mcp MCPClient, executionID, modelRef strin
 	}
 	if document.Error != "" {
 		return ChatTurn{}, fmt.Errorf("model outcome %s: %s", document.Status, document.Error)
+	}
+	if document.FinishReason == "length" || document.FinishReason == "max_tokens" {
+		return ChatTurn{}, fmt.Errorf("model output truncated at %d tokens", maxOutputTokens)
 	}
 	return ChatTurn{Content: document.Content, ToolCalls: document.ToolCalls}, nil
 }
@@ -139,18 +158,33 @@ func SpawnChild(ctx context.Context, mcp MCPClient, executionID, name, childRef,
 	raw, err := mcp.CallTool(ctx, executionID, "agentos.task.spawn", map[string]any{
 		"name": name, "goal": goal, "agentVersionRef": childRef, "maxAttempts": maxAttempts,
 	})
-	if err != nil {
-		return fmt.Errorf("spawn %s: %w", name, err)
-	}
 	var outcome struct {
 		Outcome string `json:"outcome"`
 		Message string `json:"message"`
 	}
-	if json.Unmarshal(raw, &outcome) == nil && outcome.Outcome != "" &&
-		outcome.Outcome != "created" && outcome.Outcome != "replayed" {
-		return fmt.Errorf("spawn %s denied: %s (%s)", name, outcome.Outcome, outcome.Message)
+	decoded := json.Unmarshal(raw, &outcome) == nil && outcome.Outcome != ""
+	if decoded && outcome.Outcome != "created" && outcome.Outcome != "replayed" {
+		return &SpawnOutcomeError{Name: name, Outcome: outcome.Outcome, Message: outcome.Message}
+	}
+	if err != nil {
+		// MCP tool denials deliberately return both a structured payload and an
+		// error outcome. Decode the payload before wrapping the transport error
+		// so stable spawn codes survive the HTTP/JSON-RPC boundary.
+		return fmt.Errorf("spawn %s: %w", name, err)
 	}
 	return nil
+}
+
+// SpawnOutcomeError preserves the stable denial code so callers can treat
+// idempotent name conflicts differently from policy or budget denials.
+type SpawnOutcomeError struct {
+	Name    string
+	Outcome string
+	Message string
+}
+
+func (e *SpawnOutcomeError) Error() string {
+	return fmt.Sprintf("spawn %s denied: %s (%s)", e.Name, e.Outcome, e.Message)
 }
 
 // Envelope is the structured task payload every role finds inside its goal.

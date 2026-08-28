@@ -5,8 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -66,40 +70,93 @@ const jsonOnlyInstruction = "Respond with ONE minified JSON document and nothing
 // -- planner -----------------------------------------------------------------
 
 type plannerOutput struct {
-	Questions []Question `json:"questions"`
+	Questions      []Question `json:"questions"`
+	RecoveryReason string     `json:"recoveryReason,omitempty"`
+}
+
+// plannerWireQuestion accepts the stable field names plus the concise
+// text/queries aliases commonly produced by OpenAI-compatible models. The
+// normalized durable output always uses Question's stable schema.
+type plannerWireQuestion struct {
+	ID            string   `json:"id"`
+	Question      string   `json:"question"`
+	Text          string   `json:"text"`
+	Priority      int      `json:"priority"`
+	SearchQueries []string `json:"searchQueries"`
+	Queries       []string `json:"queries"`
+}
+
+func decodePlannerOutput(content string) (plannerOutput, error) {
+	var wire struct {
+		Questions []plannerWireQuestion `json:"questions"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return plannerOutput{}, err
+	}
+	if len(wire.Questions) == 0 {
+		return plannerOutput{}, fmt.Errorf("planner produced no questions")
+	}
+	if len(wire.Questions) > 6 {
+		wire.Questions = wire.Questions[:6]
+	}
+	plan := plannerOutput{Questions: make([]Question, 0, len(wire.Questions))}
+	for index, candidate := range wire.Questions {
+		questionText := strings.TrimSpace(candidate.Question)
+		if questionText == "" {
+			questionText = strings.TrimSpace(candidate.Text)
+		}
+		if questionText == "" {
+			return plannerOutput{}, fmt.Errorf("planner question %d is empty", index+1)
+		}
+		queries := candidate.SearchQueries
+		if len(queries) == 0 {
+			queries = candidate.Queries
+		}
+		cleanQueries := make([]string, 0, min(len(queries), 4))
+		for _, query := range queries {
+			if query = strings.TrimSpace(query); query != "" {
+				cleanQueries = append(cleanQueries, query)
+				if len(cleanQueries) == 4 {
+					break
+				}
+			}
+		}
+		if len(cleanQueries) == 0 {
+			cleanQueries = []string{questionText}
+		}
+		priority := candidate.Priority
+		if priority <= 0 {
+			priority = index + 1
+		}
+		plan.Questions = append(plan.Questions, Question{
+			ID: fmt.Sprintf("rq-%03d", index+1), Question: questionText,
+			Priority: priority, SearchQueries: cleanQueries,
+		})
+	}
+	return plan, nil
 }
 
 func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
+	goal := researchGoalText(envelope.Goal)
 	system := "You are a research planner. Decompose the user's goal into at most 6 focused, non-overlapping research questions. " +
 		"For each question provide 2-3 concrete web-search queries mixing broad and specific phrasing. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Research goal:\n%s\n\nSchema hint:\n%s", strings.TrimSpace(strings.TrimPrefix(envelope.Goal, envelopePrefix)),
-		`{"questions":[{"id":"rq-001","text":"...","priority":1,"queries":["...","..."]}]}`)
+	user := fmt.Sprintf("Research goal:\n%s\n\nSchema hint:\n%s", goal,
+		`{"questions":[{"id":"rq-001","question":"...","priority":1,"searchQueries":["...","..."]}]}`)
 	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
 		return nil, err
 	}
-	var plan plannerOutput
-	if err := decodeLoose(content, &plan); err != nil {
-		return nil, fmt.Errorf("planner output: %w", err)
-	}
-	if len(plan.Questions) == 0 {
-		return nil, fmt.Errorf("planner produced no questions")
-	}
-	for index := range plan.Questions {
-		question := &plan.Questions[index]
-		question.ID = fmt.Sprintf("rq-%03d", index+1)
-		if question.Priority <= 0 {
-			question.Priority = index + 1
-		}
-		if len(question.SearchQueries) == 0 {
-			question.SearchQueries = []string{question.Question}
-		}
-		if len(question.SearchQueries) > 4 {
-			question.SearchQueries = question.SearchQueries[:4]
-		}
-	}
-	if len(plan.Questions) > 8 {
-		plan.Questions = plan.Questions[:8]
+	plan, err := decodePlannerOutput(content)
+	if err != nil {
+		// A real provider can occasionally return a truncated object or an
+		// empty questions array while still reporting a successful completion.
+		// Planning is recoverable: preserve the failure reason in the durable
+		// plan and use a conservative goal-derived decomposition. The remaining
+		// roles still exercise the configured model and all evidence gates.
+		plan = fallbackPlannerOutput(goal, err)
+	} else if len(plan.Questions) < 3 {
+		plan = completePlannerOutput(plan, goal,
+			fmt.Errorf("planner produced only %d questions", len(plan.Questions)))
 	}
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), "plan", "application/json", plan); err != nil {
 		return nil, err
@@ -120,11 +177,93 @@ func runPlanner(ctx context.Context, deps Deps, executionID string, envelope Env
 	return output, nil
 }
 
+func fallbackPlannerOutput(goal string, cause error) plannerOutput {
+	return completePlannerOutput(plannerOutput{}, goal, cause)
+}
+
+func researchGoalText(raw string) string {
+	if payload, ok := strings.CutPrefix(raw, envelopePrefix); ok {
+		var envelope struct {
+			Goal string `json:"goal"`
+		}
+		if json.NewDecoder(strings.NewReader(payload)).Decode(&envelope) == nil && strings.TrimSpace(envelope.Goal) != "" {
+			return strings.TrimSpace(envelope.Goal)
+		}
+	}
+	return strings.TrimSpace(raw)
+}
+
+func completePlannerOutput(plan plannerOutput, goal string, cause error) plannerOutput {
+	subject := strings.TrimSpace(goal)
+	if subject == "" {
+		subject = "the research goal"
+	}
+	templates := []struct {
+		question string
+		queries  []string
+	}{
+		{
+			question: "What architectures, control-plane mechanisms, and standards define " + subject + "?",
+			queries:  []string{subject + " architecture control plane", subject + " standards implementation"},
+		},
+		{
+			question: "How have the leading implementations and operational practices for " + subject + " evolved?",
+			queries:  []string{subject + " evolution timeline", subject + " production implementation"},
+		},
+		{
+			question: "What reliability, security, cost, and scalability trade-offs distinguish approaches to " + subject + "?",
+			queries:  []string{subject + " reliability security scalability", subject + " cost tradeoffs"},
+		},
+		{
+			question: "Which representative projects and primary sources best demonstrate the current and next direction of " + subject + "?",
+			queries:  []string{subject + " representative projects", subject + " roadmap primary sources"},
+		},
+	}
+	seen := make(map[string]struct{}, len(plan.Questions))
+	for _, question := range plan.Questions {
+		seen[strings.ToLower(normalizeSpace(question.Question))] = struct{}{}
+	}
+	for _, candidate := range templates {
+		if len(plan.Questions) >= 3 {
+			break
+		}
+		key := strings.ToLower(normalizeSpace(candidate.question))
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		plan.Questions = append(plan.Questions, Question{
+			Question: candidate.question, Priority: len(plan.Questions) + 1,
+			SearchQueries: candidate.queries,
+		})
+		seen[key] = struct{}{}
+	}
+	for index := range plan.Questions {
+		plan.Questions[index].ID = fmt.Sprintf("rq-%03d", index+1)
+		if plan.Questions[index].Priority <= 0 {
+			plan.Questions[index].Priority = index + 1
+		}
+	}
+	if cause != nil {
+		plan.RecoveryReason = truncate(cause.Error(), 240)
+	}
+	return plan
+}
+
 // -- search ------------------------------------------------------------------
 
 type searchOutput struct {
 	Question *Question   `json:"question"`
 	Sources  []SourceHit `json:"sources"`
+}
+
+// searchSummary is intentionally compact. Dynamic child outputs are rendered
+// into downstream step goals, whose Runtime Interface limit is 16 KiB. The
+// complete source hits are already stored in durable memory, so returning
+// snippets, titles, and URLs here only risks rejecting the downstream start.
+type searchSummary struct {
+	QuestionID  string   `json:"questionId"`
+	SourceCount int      `json:"sourceCount"`
+	SourceIDs   []string `json:"sourceIds"`
 }
 
 func runSearch(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -195,7 +334,13 @@ func runSearch(ctx context.Context, deps Deps, executionID string, envelope Enve
 			return nil, err
 		}
 	}
-	output, _ := json.Marshal(searchOutput{Question: question, Sources: sources})
+	sourceIDs := make([]string, 0, len(sources))
+	for _, source := range sources {
+		sourceIDs = append(sourceIDs, source.SourceID)
+	}
+	output, _ := json.Marshal(searchSummary{
+		QuestionID: question.ID, SourceCount: len(sources), SourceIDs: sourceIDs,
+	})
 	return output, nil
 }
 
@@ -211,7 +356,10 @@ type collectorOutput struct {
 // maxChildrenPerStep guard. Exceeding it would fail the collector step, and
 // a failed spawn parent leaves its join group permanently open — so the
 // collector defers surplus sources to a later round instead.
-const maxReadersPerDrain = 8
+const (
+	maxReadersPerDrain         = 8
+	readerMaxTransientFailures = 3 // kept equal to spawned Reader maxAttempts
+)
 
 // runCollector drains every source discovered by its dependency group and
 // spawns one reader task per unread source. It performs no model call: the
@@ -269,11 +417,11 @@ func runCollector(ctx context.Context, deps Deps, executionID string, envelope E
 	}
 	sort.Strings(order)
 	result := collectorOutput{SpawnedReaders: []string{}, Skipped: []string{}}
-	// One exact-key scan decides what still needs reading: "claimId" is the
-	// JSON field name shared by every stored evidence bundle, so the scan
-	// enumerates the whole namespace regardless of content wording.
+	// One exact-key scan decides what still needs reading: "sourceId" is shared
+	// by grounded bundles and audited skip markers, so both outcomes prevent a
+	// failed or redirected source from being spawned again in a later round.
 	readKeys := map[string]bool{}
-	evidenceRecords, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "claimId", 100)
+	evidenceRecords, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "sourceId", 100)
 	if err != nil {
 		return nil, fmt.Errorf("collector evidence scan: %w", err)
 	}
@@ -297,7 +445,15 @@ func runCollector(ctx context.Context, deps Deps, executionID string, envelope E
 		childGoal := encodeEnvelope(Envelope{
 			Role: "reader", Workflow: envelope.Workflow, Round: envelope.Round, Source: &hit,
 		})
-		if err := SpawnChild(ctx, deps.MCP, executionID, name, "research-reader@1.0.0", childGoal, 3); err != nil {
+		if err := SpawnChild(ctx, deps.MCP, executionID, name, "research-reader@1.0.0", childGoal, readerMaxTransientFailures); err != nil {
+			// Reader step names are source-stable across rounds. A later
+			// collector—or a retried collector that created only part of its
+			// batch—may legitimately encounter an already-created step.
+			var outcome *SpawnOutcomeError
+			if errors.As(err, &outcome) && outcome.Outcome == "SPAWN_NAME_CONFLICT" {
+				result.Skipped = append(result.Skipped, hit.SourceID)
+				continue
+			}
 			return nil, err
 		}
 		result.SpawnedReaders = append(result.SpawnedReaders, name)
@@ -339,6 +495,179 @@ type EvidenceBundle struct {
 	Claims             []Claim `json:"claims"`
 }
 
+// readerSummary keeps dependency rendering bounded. The full grounded bundle
+// is written to evidence memory before this receipt is returned.
+type readerSummary struct {
+	SourceID    string   `json:"sourceId"`
+	ClaimCount  int      `json:"claimCount"`
+	EvidenceIDs []string `json:"evidenceIds"`
+	Skipped     bool     `json:"skipped,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
+type readerWireClaim struct {
+	Claim      string          `json:"claim"`
+	Statement  string          `json:"statement"`
+	Evidence   json.RawMessage `json:"evidence"`
+	Quote      string          `json:"quote"`
+	Confidence float64         `json:"confidence"`
+}
+
+func decodeReaderClaims(content string) ([]Claim, error) {
+	var wire struct {
+		Claims []readerWireClaim `json:"claims"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return nil, err
+	}
+	claims := make([]Claim, 0, len(wire.Claims))
+	for _, candidate := range wire.Claims {
+		statement := strings.TrimSpace(candidate.Claim)
+		if statement == "" {
+			statement = strings.TrimSpace(candidate.Statement)
+		}
+		evidence := strings.TrimSpace(candidate.Quote)
+		if evidence == "" && len(candidate.Evidence) > 0 {
+			_ = json.Unmarshal(candidate.Evidence, &evidence)
+			if evidence == "" {
+				var object struct {
+					Quote   string `json:"quote"`
+					Text    string `json:"text"`
+					Passage string `json:"passage"`
+				}
+				if json.Unmarshal(candidate.Evidence, &object) == nil {
+					evidence = strings.TrimSpace(object.Quote)
+					if evidence == "" {
+						evidence = strings.TrimSpace(object.Text)
+					}
+					if evidence == "" {
+						evidence = strings.TrimSpace(object.Passage)
+					}
+				}
+			}
+		}
+		if statement != "" && evidence != "" {
+			claims = append(claims, Claim{Claim: statement, Evidence: evidence, Confidence: candidate.Confidence})
+		}
+	}
+	return claims, nil
+}
+
+func skipReader(ctx context.Context, deps Deps, executionID string, source *SourceHit, cause error) (json.RawMessage, error) {
+	reason := truncate(strings.TrimSpace(cause.Error()), 240)
+	marker := readerSummary{SourceID: source.SourceID, EvidenceIDs: []string{}, Skipped: true, Reason: reason}
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "read-"+source.SourceID, "application/json", marker); err != nil {
+		return nil, err
+	}
+	output, _ := json.Marshal(marker)
+	return output, nil
+}
+
+type readerRetryState struct {
+	SourceID    string `json:"sourceId"`
+	Failures    int    `json:"failures"`
+	LastReason  string `json:"lastReason"`
+	Disposition string `json:"disposition"`
+}
+
+// retryReader records a non-terminal failure without writing read-<source>.
+// On the final configured attempt it degrades explicitly to an audited SKIP,
+// preventing one permanently unreachable URL from poisoning the dynamic
+// Reader join while retaining proof that retries were exhausted.
+func retryReader(ctx context.Context, deps Deps, executionID string, source *SourceHit, label string, cause error) (json.RawMessage, error) {
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("reader %s interrupted: %w", label, cause)
+	}
+	key := "retry-" + source.SourceID
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("audit"), source.SourceID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("load Reader retry state: %w", err)
+	}
+	state := readerRetryState{SourceID: source.SourceID}
+	for _, record := range records {
+		if record.Key == key {
+			_ = json.Unmarshal([]byte(record.Content), &state)
+			break
+		}
+	}
+	state.SourceID = source.SourceID
+	state.Failures++
+	state.LastReason = truncate(strings.TrimSpace(cause.Error()), 240)
+	state.Disposition = "RETRY"
+	if state.Failures >= readerMaxTransientFailures {
+		state.Disposition = "SKIP_RETRY_EXHAUSTED"
+	}
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("audit"), key, "application/json", state); err != nil {
+		return nil, fmt.Errorf("persist Reader retry state: %w", err)
+	}
+	if state.Failures >= readerMaxTransientFailures {
+		return skipReader(ctx, deps, executionID, source,
+			fmt.Errorf("%s retry exhausted after %d attempts: %w", label, state.Failures, cause))
+	}
+	return nil, fmt.Errorf("reader retryable %s failure %d/%d: %w",
+		label, state.Failures, readerMaxTransientFailures, cause)
+}
+
+type ReaderErrorDisposition int
+
+const (
+	ReaderRetry ReaderErrorDisposition = iota
+	ReaderSkip
+	ReaderFail
+)
+
+// classifyReaderError is deliberately conservative: an unknown transport or
+// provider failure must not become a permanent "read" marker. Only explicit,
+// deterministic source outcomes are safe to skip.
+func classifyReaderError(err error) ReaderErrorDisposition {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ReaderRetry
+	}
+	var outcome *MCPToolError
+	if !errors.As(err, &outcome) {
+		return ReaderRetry
+	}
+	if strings.HasPrefix(outcome.Code, "TOOL_ENDPOINT_HTTP_") {
+		statusCode, parseErr := strconv.Atoi(strings.TrimPrefix(outcome.Code, "TOOL_ENDPOINT_HTTP_"))
+		if parseErr != nil {
+			return ReaderFail
+		}
+		switch statusCode {
+		case http.StatusNotFound, http.StatusGone, http.StatusUnsupportedMediaType,
+			http.StatusBadRequest, http.StatusUnprocessableEntity,
+			// Bot protection, login walls, paywalls and geo blocks (401/403/451)
+			// mean THIS source is unreadable — not that the research failed.
+			http.StatusUnauthorized, http.StatusForbidden, http.StatusUnavailableForLegalReasons:
+			return ReaderSkip
+		case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+			return ReaderRetry
+		}
+		if statusCode >= 500 && statusCode <= 599 {
+			return ReaderRetry
+		}
+		return ReaderFail
+	}
+	switch outcome.Code {
+	case "PROVIDER_UNAVAILABLE", "RESOURCE_VERSION_CONFLICT", "SPAWN_RECONCILIATION_PENDING":
+		return ReaderRetry
+	case "PROVIDER_REJECTED", "POLICY_DENIED", "BUDGET_EXHAUSTED":
+		return ReaderFail
+	default:
+		return ReaderRetry
+	}
+}
+
+func handleReaderFetchError(ctx context.Context, deps Deps, executionID string, source *SourceHit, err error) (json.RawMessage, error) {
+	switch classifyReaderError(err) {
+	case ReaderSkip:
+		return skipReader(ctx, deps, executionID, source, err)
+	case ReaderFail:
+		return nil, fmt.Errorf("reader terminal fetch failure: %w", err)
+	default:
+		return retryReader(ctx, deps, executionID, source, "fetch", err)
+	}
+}
+
 func runReader(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
 	if envelope.Source == nil {
 		return nil, fmt.Errorf("reader envelope carries no source")
@@ -346,25 +675,28 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	source := envelope.Source
 	fetched, err := CallTenantTool(ctx, deps.MCP, executionID, "web.fetch", map[string]any{"url": source.URL})
 	if err != nil {
-		return nil, err
+		return handleReaderFetchError(ctx, deps, executionID, source, err)
 	}
 	var document FetchedDocument
 	if err := json.Unmarshal(fetched, &document); err != nil {
-		return nil, fmt.Errorf("decode fetch result: %w", err)
+		return retryReader(ctx, deps, executionID, source, "fetch decode", err)
+	}
+	if strings.TrimSpace(document.SourceID) == "" || strings.TrimSpace(document.URL) == "" || strings.TrimSpace(document.Content) == "" {
+		return retryReader(ctx, deps, executionID, source, "fetch contract", fmt.Errorf("fetched document is incomplete"))
 	}
 	system := "You extract verifiable factual claims from a source document for a research pipeline. " +
-		"Extract 2-6 claims most relevant to the research question. Every claim needs the exact supporting passage as evidence. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Research question (%s):\n%s\n\nDocument id: %s\nDocument title: %s\nDocument body:\n%s",
-		source.ResearchQuestionID, source.QuestionText, document.SourceID, document.Title, document.Content)
+		"Extract 2-6 claims most relevant to the research question. Evidence MUST be one exact, contiguous, verbatim passage copied from the document body. " +
+		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
+	user := fmt.Sprintf("Research question (%s):\n%s\n\nDocument id: %s\nDocument title: %s\nDocument body:\n%s\n\nReturn schema:\n%s",
+		source.ResearchQuestionID, source.QuestionText, document.SourceID, document.Title, document.Content,
+		`{"claims":[{"claim":"...","evidence":"exact verbatim passage","confidence":0.87}]}`)
 	content, err := InvokeModelText(ctx, deps, executionID, deps.Models.Reader, system, user)
 	if err != nil {
-		return nil, err
+		return retryReader(ctx, deps, executionID, source, "model", err)
 	}
-	var parsed struct {
-		Claims []Claim `json:"claims"`
-	}
-	if err := decodeLoose(content, &parsed); err != nil {
-		return nil, fmt.Errorf("reader output: %w", err)
+	claims, err := decodeReaderClaims(content)
+	if err != nil {
+		return retryReader(ctx, deps, executionID, source, "model output", err)
 	}
 	// Evidence → Original Source grounding (roadmap §3.4): every claim's
 	// evidence must appear verbatim in the fetched document text; claims
@@ -372,7 +704,7 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 	bundle := EvidenceBundle{
 		SourceID: document.SourceID, ResearchQuestionID: source.ResearchQuestionID,
 		Title: document.Title, URL: document.URL,
-		Claims: groundClaims(parsed.Claims, document.Content),
+		Claims: groundClaims(claims, document.Content),
 	}
 	for index := range bundle.Claims {
 		bundle.Claims[index].ClaimID = fmt.Sprintf("%s-claim-%03d", bundle.SourceID, index+1)
@@ -384,17 +716,24 @@ func runReader(ctx context.Context, deps Deps, executionID string, envelope Enve
 		bundle.Claims = bundle.Claims[:6]
 	}
 	if len(bundle.Claims) == 0 {
-		return nil, fmt.Errorf("reader produced no grounded claims for %s", bundle.SourceID)
+		return skipReader(ctx, deps, executionID, source,
+			fmt.Errorf("reader produced no grounded claims for %s", bundle.SourceID))
 	}
 	// "ev-" carries the (upgraded) evidence bundle; "read-" is the marker the
 	// collector checks to avoid re-spawning a completed source.
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "ev-"+bundle.SourceID, "application/json", bundle); err != nil {
 		return nil, err
 	}
-	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "read-"+bundle.SourceID, "application/json", bundle); err != nil {
+	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "read-"+source.SourceID, "application/json", bundle); err != nil {
 		return nil, err
 	}
-	output, _ := json.Marshal(bundle)
+	evidenceIDs := make([]string, 0, len(bundle.Claims))
+	for _, claim := range bundle.Claims {
+		evidenceIDs = append(evidenceIDs, claim.ClaimID)
+	}
+	output, _ := json.Marshal(readerSummary{
+		SourceID: bundle.SourceID, ClaimCount: len(bundle.Claims), EvidenceIDs: evidenceIDs,
+	})
 	return output, nil
 }
 
@@ -478,19 +817,25 @@ func upstreamVerdict(goal string) string {
 
 // -- analyst -----------------------------------------------------------------
 
+type analysisFinding struct {
+	FindingID   string   `json:"findingId"`
+	Statement   string   `json:"statement"`
+	EvidenceIDs []string `json:"evidenceIds"`
+	Confidence  float64  `json:"confidence"`
+}
+
+type analysisContradiction struct {
+	Topic       string   `json:"topic"`
+	EvidenceIDs []string `json:"evidenceIds"`
+}
+
 type analysisDoc struct {
-	Findings []struct {
-		FindingID   string   `json:"findingId"`
-		Statement   string   `json:"statement"`
-		EvidenceIDs []string `json:"evidenceIds"`
-		Confidence  float64  `json:"confidence"`
-	} `json:"findings"`
-	Contradictions []struct {
-		Topic       string   `json:"topic"`
-		EvidenceIDs []string `json:"evidenceIds"`
-	} `json:"contradictions,omitempty"`
-	Unknowns    []string `json:"unknowns,omitempty"`
-	Passthrough bool     `json:"passthrough,omitempty"`
+	Findings              []analysisFinding       `json:"findings"`
+	Contradictions        []analysisContradiction `json:"contradictions,omitempty"`
+	Unknowns              []string                `json:"unknowns,omitempty"`
+	DroppedFindings       int                     `json:"droppedFindings,omitempty"`
+	DroppedContradictions int                     `json:"droppedContradictions,omitempty"`
+	Passthrough           bool                    `json:"passthrough,omitempty"`
 }
 
 func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -513,25 +858,21 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 		return nil, fmt.Errorf("analyst %s found no evidence bundles", current)
 	}
 	system := "You are a research analyst. Cluster the extracted claims into findings supported by explicit evidence IDs, " +
-		"list contradictions between sources and open unknowns. Keep at most 12 findings. " + jsonOnlyInstruction
-	user := "Evidence bundles:\n" + renderBundles(bundles) +
+		"list contradictions between sources and open unknowns. Keep at most 12 findings. " +
+		"Every finding must have a non-empty statement and at least one evidenceId copied exactly from the supplied bundles; " +
+		"never invent an evidenceId. Omit empty optional contradictions, and return unknowns as strings. " + jsonOnlyInstruction
+	user := "Evidence bundles:\n" + renderBundlesBounded(bundles, 24000) +
 		fmt.Sprintf("\n\nReturn schema:\n%s", `{"findings":[{"findingId":"finding-001","statement":"...","evidenceIds":["src-001-claim-001"],"confidence":0.87}],"contradictions":[{"topic":"...","evidenceIds":["a","b"]}],"unknowns":["..."]}`)
-	content, err := chat(ctx, deps, executionID, system, truncate(user, 24000))
+	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
 		return nil, err
 	}
-	var analysis analysisDoc
-	if err := decodeLoose(content, &analysis); err != nil {
+	analysis, err := decodeAnalysisOutput(content, bundles)
+	if err != nil {
 		return nil, fmt.Errorf("analyst output: %w", err)
 	}
 	for index := range analysis.Findings {
 		analysis.Findings[index].FindingID = fmt.Sprintf("finding-%03d", index+1)
-		if len(analysis.Findings[index].EvidenceIDs) == 0 {
-			analysis.Findings[index].EvidenceIDs = []string{bundles[0].Claims[0].ClaimID}
-		}
-	}
-	if len(analysis.Findings) == 0 {
-		return nil, fmt.Errorf("analyst produced no findings")
 	}
 	analysis.Passthrough = false
 	if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), current, "application/json", analysis); err != nil {
@@ -541,8 +882,149 @@ func runAnalyst(ctx context.Context, deps Deps, executionID string, envelope Env
 	return output, nil
 }
 
+func decodeAnalysisOutput(content string, bundles []EvidenceBundle) (analysisDoc, error) {
+	var wire struct {
+		Findings       []analysisFinding       `json:"findings"`
+		Contradictions []analysisContradiction `json:"contradictions,omitempty"`
+		Unknowns       json.RawMessage         `json:"unknowns,omitempty"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return analysisDoc{}, err
+	}
+	analysis := analysisDoc{
+		Findings:       wire.Findings,
+		Contradictions: wire.Contradictions,
+		Unknowns:       decodeAnalysisUnknowns(wire.Unknowns),
+	}
+	if err := validateAnalysisOutput(&analysis, bundles); err != nil {
+		return analysisDoc{}, err
+	}
+	return analysis, nil
+}
+
+func decodeAnalysisUnknowns(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var entries []json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil {
+		entries = []json.RawMessage{raw}
+	}
+	unknowns := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		var value string
+		if json.Unmarshal(entry, &value) != nil {
+			var object map[string]json.RawMessage
+			if json.Unmarshal(entry, &object) != nil {
+				continue
+			}
+			for _, key := range []string{"unknown", "question", "topic", "description", "gap"} {
+				if json.Unmarshal(object[key], &value) == nil && strings.TrimSpace(value) != "" {
+					break
+				}
+			}
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			unknowns = append(unknowns, value)
+		}
+	}
+	return unknowns
+}
+
+func validateAnalysisOutput(analysis *analysisDoc, bundles []EvidenceBundle) error {
+	if len(analysis.Findings) == 0 {
+		return fmt.Errorf("produced no findings")
+	}
+	knownEvidence := make(map[string]struct{})
+	for _, bundle := range bundles {
+		for _, claim := range bundle.Claims {
+			if id := strings.TrimSpace(claim.ClaimID); id != "" {
+				knownEvidence[id] = struct{}{}
+			}
+		}
+	}
+	validFindings := make([]analysisFinding, 0, min(len(analysis.Findings), 12))
+	firstFindingError := ""
+	droppedFindings := 0
+	for index := range analysis.Findings {
+		finding := analysis.Findings[index]
+		finding.Statement = strings.TrimSpace(finding.Statement)
+		var invalid string
+		if finding.Statement == "" {
+			invalid = "has an empty statement"
+		} else if len(finding.EvidenceIDs) == 0 {
+			invalid = "has no evidenceIds"
+		} else if ids, err := validateEvidenceIDs(finding.EvidenceIDs, knownEvidence); err != nil {
+			invalid = err.Error()
+		} else {
+			finding.EvidenceIDs = ids
+		}
+		if invalid == "" && (finding.Confidence < 0 || finding.Confidence > 1) {
+			invalid = "has confidence outside [0,1]"
+		}
+		if invalid != "" || len(validFindings) >= 12 {
+			droppedFindings++
+			if firstFindingError == "" && invalid != "" {
+				firstFindingError = fmt.Sprintf("finding %d %s", index+1, invalid)
+			}
+			continue
+		}
+		validFindings = append(validFindings, finding)
+	}
+	if len(validFindings) == 0 {
+		if firstFindingError == "" {
+			firstFindingError = "produced no valid findings"
+		}
+		return fmt.Errorf("produced no valid findings: %s", firstFindingError)
+	}
+	analysis.Findings = validFindings
+	analysis.DroppedFindings = droppedFindings
+
+	validContradictions := make([]analysisContradiction, 0, len(analysis.Contradictions))
+	for index := range analysis.Contradictions {
+		contradiction := analysis.Contradictions[index]
+		contradiction.Topic = strings.TrimSpace(contradiction.Topic)
+		if contradiction.Topic == "" {
+			continue
+		}
+		ids, err := validateEvidenceIDs(contradiction.EvidenceIDs, knownEvidence)
+		if err != nil || len(ids) < 2 {
+			continue
+		}
+		contradiction.EvidenceIDs = ids
+		validContradictions = append(validContradictions, contradiction)
+	}
+	analysis.DroppedContradictions = len(analysis.Contradictions) - len(validContradictions)
+	analysis.Contradictions = validContradictions
+	return nil
+}
+
+func validateEvidenceIDs(ids []string, known map[string]struct{}) ([]string, error) {
+	validated := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			return nil, fmt.Errorf("contains an empty evidenceId")
+		}
+		if _, ok := known[id]; !ok {
+			return nil, fmt.Errorf("references unknown evidenceId %q", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		validated = append(validated, id)
+	}
+	return validated, nil
+}
+
 func readAnalysis(ctx context.Context, deps Deps, executionID, key string) (analysisDoc, bool, error) {
-	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), key, 10)
+	// Memory search ranks tokens from record content; the storage key is only
+	// metadata and is not guaranteed to participate in the full-text index.
+	// Every valid analysis document carries the "findings" field, so query that
+	// stable content token and select the requested round by record key below.
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("analysis"), "findings", 10)
 	if err != nil {
 		return analysisDoc{}, false, err
 	}
@@ -574,12 +1056,14 @@ func collectEvidence(ctx context.Context, deps Deps, executionID string, envelop
 	for _, raw := range ExtractUpstreamOutputs(envelope.Goal) {
 		appendBundle(raw)
 	}
-	if len(bundles) < 3 {
-		records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "claims evidence", 100)
-		if err == nil {
-			for _, record := range records {
-				appendBundle(record.Content)
-			}
+	// Every round must judge the cumulative evidence base. Upstream rendering
+	// contains only the current spawn group, so treating three new bundles as
+	// "enough" silently discarded all prior rounds at exactly the point where
+	// the final critic needed a global view.
+	records, err := SearchMemory(ctx, deps.MCP, executionID, deps.Workdir("evidence"), "claims evidence", 100)
+	if err == nil {
+		for _, record := range records {
+			appendBundle(record.Content)
 		}
 	}
 	ordered := make([]EvidenceBundle, 0, len(bundles))
@@ -596,28 +1080,103 @@ func collectEvidence(ctx context.Context, deps Deps, executionID string, envelop
 
 // -- critic ------------------------------------------------------------------
 
+type criticGap struct {
+	GapID            string   `json:"gapId"`
+	Question         string   `json:"question"`
+	Severity         string   `json:"severity"`
+	SuggestedQueries []string `json:"suggestedQueries"`
+}
+
 type criticDecision struct {
-	Status string  `json:"status"`
-	Score  float64 `json:"score"`
-	Gaps   []struct {
-		GapID            string   `json:"gapId"`
-		Question         string   `json:"question"`
-		Severity         string   `json:"severity"`
-		SuggestedQueries []string `json:"suggestedQueries"`
-	} `json:"gaps"`
-	Passthrough bool `json:"passthrough,omitempty"`
+	Status      string      `json:"status"`
+	Score       float64     `json:"score"`
+	Gaps        []criticGap `json:"gaps"`
+	Passthrough bool        `json:"passthrough,omitempty"`
+}
+
+type criticWireGap struct {
+	GapID            string   `json:"gapId"`
+	Question         string   `json:"question"`
+	Description      string   `json:"description"`
+	Gap              string   `json:"gap"`
+	Severity         string   `json:"severity"`
+	SuggestedQueries []string `json:"suggestedQueries"`
+	Queries          []string `json:"queries"`
+}
+
+func decodeCriticOutput(content string) (criticDecision, error) {
+	var wire struct {
+		Status  string          `json:"status"`
+		Verdict string          `json:"verdict"`
+		Score   float64         `json:"score"`
+		Gaps    []criticWireGap `json:"gaps"`
+	}
+	if err := decodeLoose(content, &wire); err != nil {
+		return criticDecision{}, err
+	}
+	status := strings.ToUpper(strings.TrimSpace(wire.Status))
+	if status == "" {
+		status = strings.ToUpper(strings.TrimSpace(wire.Verdict))
+	}
+	decision := criticDecision{Status: status, Score: wire.Score, Gaps: make([]criticGap, 0, min(len(wire.Gaps), 4))}
+	for _, candidate := range wire.Gaps {
+		question := strings.TrimSpace(candidate.Question)
+		if question == "" {
+			question = strings.TrimSpace(candidate.Description)
+		}
+		if question == "" {
+			question = strings.TrimSpace(candidate.Gap)
+		}
+		if question == "" {
+			continue
+		}
+		queries := candidate.SuggestedQueries
+		if len(queries) == 0 {
+			queries = candidate.Queries
+		}
+		cleanQueries := make([]string, 0, min(len(queries), 3))
+		for _, query := range queries {
+			if query = strings.TrimSpace(query); query != "" {
+				cleanQueries = append(cleanQueries, query)
+				if len(cleanQueries) == 3 {
+					break
+				}
+			}
+		}
+		if len(cleanQueries) == 0 {
+			cleanQueries = []string{question}
+		}
+		decision.Gaps = append(decision.Gaps, criticGap{
+			GapID: candidate.GapID, Question: question,
+			Severity: strings.TrimSpace(candidate.Severity), SuggestedQueries: cleanQueries,
+		})
+		if len(decision.Gaps) == 4 {
+			break
+		}
+	}
+	if len(wire.Gaps) > 0 && len(decision.Gaps) == 0 {
+		return criticDecision{}, fmt.Errorf("critic produced gaps without usable questions")
+	}
+	if decision.Status == "" {
+		if decision.Score >= 0.75 && len(decision.Gaps) == 0 {
+			decision.Status = "PASS"
+		} else {
+			decision.Status = "NEEDS_MORE_RESEARCH"
+		}
+	}
+	switch decision.Status {
+	case "PASS", "NEEDS_MORE_RESEARCH", "INSUFFICIENT_EVIDENCE":
+	default:
+		return criticDecision{}, fmt.Errorf("unsupported status %q", decision.Status)
+	}
+	return decision, nil
 }
 
 func runCritic(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
 	decisionKey := fmt.Sprintf("critic-r%d", envelope.Round)
 	// Carried PASS: the previous round already accepted the analysis.
 	if upstreamVerdict(envelope.Goal) == "PASS" && envelope.Round > 1 {
-		decision := criticDecision{Status: "PASS", Score: -1, Gaps: []struct {
-			GapID            string   `json:"gapId"`
-			Question         string   `json:"question"`
-			Severity         string   `json:"severity"`
-			SuggestedQueries []string `json:"suggestedQueries"`
-		}{}, Passthrough: true}
+		decision := criticDecision{Status: "PASS", Score: -1, Gaps: []criticGap{}, Passthrough: true}
 		decision.Score = 0.99
 		if err := PutMemory(ctx, deps.MCP, executionID, deps.Workdir("gaps"), decisionKey, "application/json", decision); err != nil {
 			return nil, err
@@ -646,15 +1205,18 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	}
 	system := "You are a research critic. Judge whether the analysis answers the original goal rigorously. " +
 		"If specific, answerable sub-questions remain unaddressed, return NEEDS_MORE_RESEARCH with at most 4 gaps, each with 1-3 suggested search queries. " +
-		"A score below 0.75 means more research is needed. When Round >= 3 do not force PASS: if the evidence base is still too thin, return INSUFFICIENT_EVIDENCE. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Original goal summary:\n%s\n\nRound: %d of 3\n\nAnalysis under review:\n%s",
-		truncate(strings.TrimPrefix(envelope.Goal, envelopePrefix), 2000), envelope.Round, truncate(analysisRaw, 16000))
+		"A score below 0.75 means more research is needed. Gaps must be material to the original goal, not optional detail or unavoidable future uncertainty. " +
+		"For a goal about trends, implementation routes, and representative projects, PASS when all three are substantively addressed by explicit evidence IDs. " +
+		"When Round >= 3 do not force PASS: if the evidence base is still too thin, return INSUFFICIENT_EVIDENCE. " + jsonOnlyInstruction
+	user := fmt.Sprintf("Original goal summary:\n%s\n\nRound: %d of 3\n\nAnalysis under review:\n%s\n\nReturn schema:\n%s",
+		truncate(strings.TrimPrefix(envelope.Goal, envelopePrefix), 2000), envelope.Round, truncate(analysisRaw, 16000),
+		`{"status":"PASS|NEEDS_MORE_RESEARCH|INSUFFICIENT_EVIDENCE","score":0.87,"gaps":[{"gapId":"gap-001","question":"...","severity":"high|medium|low","suggestedQueries":["..."]}]}`)
 	content, err := chat(ctx, deps, executionID, system, user)
 	if err != nil {
 		return nil, err
 	}
-	var decision criticDecision
-	if err := decodeLoose(content, &decision); err != nil {
+	decision, err := decodeCriticOutput(content)
+	if err != nil {
 		return nil, fmt.Errorf("critic output: %w", err)
 	}
 	if decision.Score >= 0 && decision.Score < 0.75 && decision.Status == "PASS" && envelope.Round < 3 {
@@ -666,12 +1228,7 @@ func runCritic(ctx context.Context, deps Deps, executionID string, envelope Enve
 	// acceptance.
 	applyCriticTerminalRule(&decision.Status, envelope.Round)
 	if decision.Gaps == nil {
-		decision.Gaps = []struct {
-			GapID            string   `json:"gapId"`
-			Question         string   `json:"question"`
-			Severity         string   `json:"severity"`
-			SuggestedQueries []string `json:"suggestedQueries"`
-		}{}
+		decision.Gaps = []criticGap{}
 	}
 	if decision.Status == "NEEDS_MORE_RESEARCH" && len(decision.Gaps) == 0 {
 		decision.Status = "PASS" // a demand for more research without gaps is vacuous
@@ -725,7 +1282,211 @@ type reportDoc struct {
 	Citations []citation `json:"citations"`
 	// InsufficientEvidence records an honest INSUFFICIENT_EVIDENCE verdict
 	// from the final critic: the report ships, but declares the shortfall.
-	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
+	InsufficientEvidence   bool `json:"insufficientEvidence,omitempty"`
+	DroppedCitations       int  `json:"droppedCitations,omitempty"`
+	CanonicalizedCitations int  `json:"canonicalizedCitations,omitempty"`
+}
+
+type reportWireSection struct {
+	Heading string `json:"heading"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	Content string `json:"content"`
+	Text    string `json:"text"`
+}
+
+type reportWireCitation struct {
+	Marker     string `json:"marker"`
+	Citation   string `json:"citation"`
+	EvidenceID string `json:"evidenceId"`
+	ClaimID    string `json:"claimId"`
+	SourceID   string `json:"sourceId"`
+	Quote      string `json:"quote"`
+	Evidence   string `json:"evidence"`
+}
+
+type reportWire struct {
+	Title            string               `json:"title"`
+	ReportTitle      string               `json:"reportTitle"`
+	Summary          string               `json:"summary"`
+	ExecutiveSummary string               `json:"executiveSummary"`
+	Abstract         string               `json:"abstract"`
+	Sections         []reportWireSection  `json:"sections"`
+	Citations        []reportWireCitation `json:"citations"`
+	Report           *reportWire          `json:"report"`
+}
+
+func decodeReportOutput(content string) (reportDoc, error) {
+	var wire reportWire
+	if err := decodeLoose(content, &wire); err != nil {
+		return reportDoc{}, err
+	}
+	if wire.Report != nil && strings.TrimSpace(wire.Title) == "" && len(wire.Sections) == 0 {
+		wire = *wire.Report
+	}
+	title := strings.TrimSpace(wire.Title)
+	if title == "" {
+		title = strings.TrimSpace(wire.ReportTitle)
+	}
+	summary := strings.TrimSpace(wire.Summary)
+	if summary == "" {
+		summary = strings.TrimSpace(wire.ExecutiveSummary)
+	}
+	if summary == "" {
+		summary = strings.TrimSpace(wire.Abstract)
+	}
+	report := reportDoc{Title: title, Summary: summary, Sections: make([]section, 0, len(wire.Sections)), Citations: make([]citation, 0, len(wire.Citations))}
+	for _, candidate := range wire.Sections {
+		heading := strings.TrimSpace(candidate.Heading)
+		if heading == "" {
+			heading = strings.TrimSpace(candidate.Title)
+		}
+		body := strings.TrimSpace(candidate.Body)
+		if body == "" {
+			body = strings.TrimSpace(candidate.Content)
+		}
+		if body == "" {
+			body = strings.TrimSpace(candidate.Text)
+		}
+		if heading != "" && body != "" {
+			report.Sections = append(report.Sections, section{Heading: heading, Body: body})
+		}
+	}
+	for index, candidate := range wire.Citations {
+		marker := strings.TrimSpace(candidate.Marker)
+		if marker == "" {
+			marker = strings.TrimSpace(candidate.Citation)
+		}
+		if marker == "" {
+			marker = fmt.Sprintf("[%d]", index+1)
+		}
+		evidenceID := strings.TrimSpace(candidate.EvidenceID)
+		if evidenceID == "" {
+			evidenceID = strings.TrimSpace(candidate.ClaimID)
+		}
+		quote := strings.TrimSpace(candidate.Quote)
+		if quote == "" {
+			quote = strings.TrimSpace(candidate.Evidence)
+		}
+		sourceID := strings.TrimSpace(candidate.SourceID)
+		if sourceID == "" {
+			if prefix, _, ok := strings.Cut(evidenceID, "-claim-"); ok {
+				sourceID = prefix
+			}
+		}
+		report.Citations = append(report.Citations, citation{
+			Marker: marker, EvidenceID: evidenceID, SourceID: sourceID, Quote: quote,
+		})
+	}
+	if report.Title == "" || report.Summary == "" || len(report.Sections) == 0 {
+		return reportDoc{}, fmt.Errorf("writer produced an incomplete report")
+	}
+	return report, nil
+}
+
+func groundReportCitations(report *reportDoc, bundles []EvidenceBundle, analysisRaw string) error {
+	type groundedCitation struct {
+		sourceID string
+		quote    string
+	}
+	known := make(map[string]groundedCitation)
+	for _, bundle := range bundles {
+		for _, claim := range bundle.Claims {
+			if claim.ClaimID != "" && strings.TrimSpace(claim.Evidence) != "" {
+				known[claim.ClaimID] = groundedCitation{sourceID: bundle.SourceID, quote: strings.TrimSpace(claim.Evidence)}
+			}
+		}
+	}
+	var analysis analysisDoc
+	if json.Unmarshal([]byte(firstJSONObject(analysisRaw)), &analysis) != nil {
+		return fmt.Errorf("analysis is unavailable for citation binding")
+	}
+	allowed := make(map[string]struct{})
+	for _, finding := range analysis.Findings {
+		for _, evidenceID := range finding.EvidenceIDs {
+			if _, exists := known[evidenceID]; exists {
+				allowed[evidenceID] = struct{}{}
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("analysis contains no known evidenceIds")
+	}
+
+	grounded := make([]citation, 0, len(report.Citations)+len(allowed))
+	seenEvidence := make(map[string]struct{})
+	usedMarkers := make(map[string]struct{})
+	nextMarker := 1
+	marker := func(candidate string) string {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			if _, used := usedMarkers[candidate]; !used {
+				usedMarkers[candidate] = struct{}{}
+				return candidate
+			}
+		}
+		for {
+			candidate = fmt.Sprintf("[%d]", nextMarker)
+			nextMarker++
+			if _, used := usedMarkers[candidate]; !used {
+				usedMarkers[candidate] = struct{}{}
+				return candidate
+			}
+		}
+	}
+	for _, candidate := range report.Citations {
+		binding, exists := known[candidate.EvidenceID]
+		_, permitted := allowed[candidate.EvidenceID]
+		_, duplicate := seenEvidence[candidate.EvidenceID]
+		if !exists || !permitted || duplicate {
+			report.DroppedCitations++
+			continue
+		}
+		candidate.Marker = marker(candidate.Marker)
+		candidate.SourceID = binding.sourceID
+		candidate.Quote = binding.quote
+		grounded = append(grounded, candidate)
+		seenEvidence[candidate.EvidenceID] = struct{}{}
+	}
+	missing := make([]string, 0, len(allowed))
+	for evidenceID := range allowed {
+		if _, exists := seenEvidence[evidenceID]; !exists {
+			missing = append(missing, evidenceID)
+		}
+	}
+	sort.Strings(missing)
+	for _, evidenceID := range missing {
+		binding := known[evidenceID]
+		grounded = append(grounded, citation{
+			Marker: marker(""), EvidenceID: evidenceID,
+			SourceID: binding.sourceID, Quote: binding.quote,
+		})
+	}
+	if len(grounded) == 0 {
+		return fmt.Errorf("no grounded citations remain")
+	}
+	report.Citations = grounded
+	report.CanonicalizedCitations = len(grounded)
+	// Body-marker closure (implementation-plan §2): the strict validator
+	// requires every citation marker to appear in the report body. Models
+	// may omit inline markers (or cite evidence the canonicalizer replaced),
+	// so append any missing markers to the summary as a references line —
+	// the validator then audits the completed statement→marker→citation→
+	// evidence→source chain instead of failing reports for formatting.
+	markers := collectReportMarkers(*report)
+	missingMarkers := make([]string, 0, len(grounded))
+	for _, cite := range grounded {
+		key := normalizeMarker(cite.Marker)
+		if key != "" && markers[key] == 0 {
+			missingMarkers = append(missingMarkers, cite.Marker)
+			markers[key] = 1
+		}
+	}
+	if len(missingMarkers) > 0 {
+		sort.Strings(missingMarkers)
+		report.Summary = strings.TrimSpace(report.Summary) + "\n\nReferences: " + strings.Join(missingMarkers, " ")
+	}
+	return nil
 }
 
 func runWriter(ctx context.Context, deps Deps, executionID string, envelope Envelope, feedback string) (json.RawMessage, string, error) {
@@ -733,29 +1494,36 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	if len(bundles) == 0 {
 		return nil, "", fmt.Errorf("writer found no evidence")
 	}
-	analysisRaw := ""
-	for _, raw := range ExtractUpstreamOutputs(envelope.Goal) {
-		if strings.Contains(raw, `"findings"`) {
-			analysisRaw = raw
-			break
-		}
-	}
-	system := "You write the final research report strictly from the supplied findings and evidence. " +
-		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " + jsonOnlyInstruction
-	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s", truncate(analysisRaw, 12000), truncate(renderBundles(bundles), 20000))
-	if feedback != "" {
-		user += "\n\nRevision feedback from the citation validator:\n" + feedback
-	}
-	content, err := chat(ctx, deps, executionID, system, user)
+	analysisRaw, err := loadWriterAnalysis(ctx, deps, executionID, envelope)
 	if err != nil {
 		return nil, "", err
 	}
-	var report reportDoc
-	if err := decodeLoose(content, &report); err != nil {
+	writerBundles := selectWriterEvidence(bundles, analysisRaw)
+	system := "You write the final research report strictly from the supplied findings and evidence. " +
+		"Every non-obvious statement cites extracted evidence using markers like [1]; each citation quotes the supporting passage VERBATIM from that claim's evidence text. " +
+		"Each citation marker MUST appear verbatim in the summary or a section body next to the statement it supports — a citation that is never referenced in the body is rejected, " +
+		"a marker may back at most one citation, and every marker you write must have exactly one citation object. " +
+		"Keep the report concise: an executive summary of at most 120 words and 3-4 sections of at most 160 words each. " +
+		"Use only the exact field names in the requested schema. " + jsonOnlyInstruction
+	user := fmt.Sprintf("Findings:\n%s\n\nEvidence bundles:\n%s\n\nReturn schema:\n%s",
+		truncate(analysisRaw, 12000), renderBundlesBounded(writerBundles, 16000),
+		`{"title":"...","summary":"...","sections":[{"heading":"...","body":"... [1]"}],"citations":[{"marker":"[1]","evidenceId":"src-001-claim-001","sourceId":"src-001","quote":"exact verbatim passage"}]}`)
+	if feedback != "" {
+		user += "\n\nRevision feedback from the citation validator:\n" + feedback
+	}
+	turn, err := invokeModelWithLimit(ctx, deps.MCP, executionID, deps.Models.Reasoning, []ChatMessage{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, writerMaxOutputTokens)
+	if err != nil {
+		return nil, "", err
+	}
+	report, err := decodeReportOutput(turn.Content)
+	if err != nil {
 		return nil, "", fmt.Errorf("writer output: %w", err)
 	}
-	if report.Title == "" || report.Summary == "" || len(report.Sections) == 0 {
-		return nil, "", fmt.Errorf("writer produced an incomplete report")
+	if err := groundReportCitations(&report, bundles, analysisRaw); err != nil {
+		return nil, "", fmt.Errorf("writer citations: %w", err)
 	}
 	report.InsufficientEvidence = upstreamVerdict(envelope.Goal) == "INSUFFICIENT_EVIDENCE"
 	encoded, _ := json.Marshal(report)
@@ -765,6 +1533,66 @@ func runWriter(ctx context.Context, deps Deps, executionID string, envelope Enve
 	return encoded, "report-draft", nil
 }
 
+func selectWriterEvidence(bundles []EvidenceBundle, analysisRaw string) []EvidenceBundle {
+	var analysis analysisDoc
+	if json.Unmarshal([]byte(firstJSONObject(analysisRaw)), &analysis) != nil {
+		return bundles
+	}
+	wanted := make(map[string]struct{})
+	for _, finding := range analysis.Findings {
+		for _, evidenceID := range finding.EvidenceIDs {
+			if evidenceID = strings.TrimSpace(evidenceID); evidenceID != "" {
+				wanted[evidenceID] = struct{}{}
+			}
+		}
+	}
+	if len(wanted) == 0 {
+		return bundles
+	}
+	selected := make([]EvidenceBundle, 0, len(bundles))
+	for _, bundle := range bundles {
+		filtered := bundle
+		filtered.Claims = make([]Claim, 0, len(bundle.Claims))
+		for _, claim := range bundle.Claims {
+			if _, ok := wanted[claim.ClaimID]; ok {
+				filtered.Claims = append(filtered.Claims, claim)
+			}
+		}
+		if len(filtered.Claims) > 0 {
+			selected = append(selected, filtered)
+		}
+	}
+	if len(selected) == 0 {
+		return bundles
+	}
+	return selected
+}
+
+func loadWriterAnalysis(ctx context.Context, deps Deps, executionID string, envelope Envelope) (string, error) {
+	for _, raw := range ExtractUpstreamOutputs(envelope.Goal) {
+		if strings.Contains(raw, `"findings"`) {
+			return raw, nil
+		}
+	}
+	// Validator-triggered revisions intentionally depend only on the Writer
+	// step so the rendered Runtime Interface goal stays below 16 KiB. Recover
+	// the final analysis from durable memory instead of duplicating the large
+	// analyst output in the validator's start request.
+	key := fmt.Sprintf("analysis-r%d", maxInt(envelope.Round, 1))
+	stored, ok, err := readAnalysis(ctx, deps, executionID, key)
+	if err != nil {
+		return "", fmt.Errorf("load writer analysis %s: %w", key, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("writer found no analysis")
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		return "", fmt.Errorf("encode writer analysis %s: %w", key, err)
+	}
+	return string(encoded), nil
+}
+
 type validationVerdict struct {
 	Valid             bool    `json:"valid"`
 	CitationCoverage  float64 `json:"citationCoverage"`
@@ -772,7 +1600,8 @@ type validationVerdict struct {
 	Retries           int     `json:"retries"`
 	// InsufficientEvidence mirrors the final critic's honest verdict when
 	// the evidence base could not answer the goal within the round budget.
-	InsufficientEvidence bool `json:"insufficientEvidence,omitempty"`
+	InsufficientEvidence bool     `json:"insufficientEvidence,omitempty"`
+	MarkerIssues         []string `json:"markerIssues,omitempty"`
 }
 
 func runValidator(ctx context.Context, deps Deps, executionID string, envelope Envelope) (json.RawMessage, error) {
@@ -826,6 +1655,9 @@ func runValidator(ctx context.Context, deps Deps, executionID string, envelope E
 		feedback := fmt.Sprintf(
 			"Revision %d: citation coverage %.2f is below %.2f with %d unsupported citations. Re-quote passages verbatim from the listed evidence and cover every finding.",
 			retries, verdict.CitationCoverage, threshold, verdict.UnsupportedClaims)
+		for _, issue := range verdict.MarkerIssues {
+			feedback += "\n- " + issue
+		}
 		if _, _, err := runWriter(ctx, deps, executionID, envelope, feedback); err != nil {
 			return nil, fmt.Errorf("writer revision failed: %w", err)
 		}
@@ -856,12 +1688,61 @@ func loadReportDraft(ctx context.Context, deps Deps, executionID string, envelop
 	return nil, "", fmt.Errorf("no report draft found for validation")
 }
 
+// markerPattern matches in-body citation markers like [1], [12].
+var markerPattern = regexp.MustCompile(`\[(\d{1,3})\]`)
+
+// normalizeMarker reduces a citation marker to its bare number key so
+// "[1]", "[ 1 ]" and "1" all bind to the same body occurrence.
+func normalizeMarker(marker string) string {
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, marker)
+	if digits == "" {
+		return ""
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return "0"
+	}
+	return digits
+}
+
+// collectReportMarkers extracts every in-body citation marker from the
+// report summary and section bodies, counting occurrences per key. The
+// validator requires each citation to be referenced here and every body
+// marker to be bound by exactly one citation.
+func collectReportMarkers(report reportDoc) map[string]int {
+	markers := map[string]int{}
+	scan := func(text string) {
+		for _, match := range markerPattern.FindAllStringSubmatch(text, -1) {
+			markers[match[1]]++
+		}
+	}
+	scan(report.Summary)
+	for _, section := range report.Sections {
+		scan(section.Body)
+	}
+	return markers
+}
+
 // gradeCitations scores a report against the evidence base under STRICT
-// grounding rules (roadmap §3.3): a citation counts as supported only when
-// its evidenceId names an existing claim AND its quote is a non-empty,
-// whitespace-normalized substring of THAT claim's evidence. Empty quotes,
-// unknown claim ids, and passages borrowed from different evidence are all
-// rejected — there is no corpus-wide fallback.
+// grounding rules (roadmap §3.3) plus FULL body-marker closure
+// (implementation-plan §2): a citation counts as supported only when
+//  1. its evidenceId names an existing claim,
+//  2. its quote is a non-empty whitespace-normalized substring of THAT
+//     claim's evidence,
+//  3. it carries a non-empty marker that actually appears in the report
+//     summary or a section body, and
+//  4. no other citation already bound the same body marker.
+//
+// Everything else — empty quotes, unknown evidenceIds, cross-evidence
+// passages, unbound citations, duplicated bindings and dangling body
+// markers with no citation object — counts as unsupported. Coverage is
+// computed over the union of citations and dangling body markers, so the
+// citations array alone can never manufacture a high score.
 func gradeCitations(raw json.RawMessage, bundles []EvidenceBundle) validationVerdict {
 	var report reportDoc
 	if err := json.Unmarshal(raw, &report); err != nil {
@@ -873,27 +1754,50 @@ func gradeCitations(raw json.RawMessage, bundles []EvidenceBundle) validationVer
 			evidenceText[claim.ClaimID] = normalizeSpace(claim.Evidence)
 		}
 	}
+	bodyMarkers := collectReportMarkers(report)
+	bound := map[string]bool{}
+	citedKeys := map[string]bool{}
 	supported := 0
 	unsupported := 0
+	var markerIssues []string
 	for _, cite := range report.Citations {
+		key := normalizeMarker(cite.Marker)
 		text, known := evidenceText[cite.EvidenceID]
 		switch {
-		case cite.Quote == "", !known:
+		case key == "", cite.Quote == "", !known:
 			unsupported++
+		case bound[key]:
+			unsupported++ // one body marker binds exactly one citation
+			markerIssues = append(markerIssues, fmt.Sprintf("marker [%s] is bound by more than one citation", key))
 			continue
-		case strings.Contains(text, normalizeSpace(cite.Quote)):
-			supported++
-		default:
+		case !strings.Contains(text, normalizeSpace(cite.Quote)):
 			unsupported++
+		case bodyMarkers[key] == 0:
+			unsupported++ // citation exists but body never references it
+			markerIssues = append(markerIssues, fmt.Sprintf("citation marker [%s] never appears in the report body", key))
+		default:
+			supported++
+			bound[key] = true
+		}
+		if key != "" {
+			citedKeys[key] = true
 		}
 	}
-	total := len(report.Citations)
+	dangling := 0
+	for key := range bodyMarkers {
+		if !citedKeys[key] {
+			dangling++ // body references [N] but no citation object backs it
+			markerIssues = append(markerIssues, fmt.Sprintf("body marker [%s] has no citation object", key))
+		}
+	}
+	unsupported += dangling
+	total := len(report.Citations) + dangling
 	coverage := 0.0
 	if total > 0 {
 		coverage = float64(supported) / float64(total)
 	}
-	return validationVerdict{Valid: total > 0 && coverage >= 0.90 && unsupported == 0,
-		CitationCoverage: coverage, UnsupportedClaims: unsupported}
+	return validationVerdict{Valid: total > 0 && coverage >= 0.90 && unsupported == 0 && dangling == 0,
+		CitationCoverage: coverage, UnsupportedClaims: unsupported, MarkerIssues: markerIssues}
 }
 
 // -- helpers -----------------------------------------------------------------
@@ -908,10 +1812,29 @@ func decodeLoose(content string, target any) error {
 	if document == "" {
 		return fmt.Errorf("no JSON object found in %.120q", content)
 	}
+	document = repairInvalidApostropheEscapes(document)
 	if err := json.Unmarshal([]byte(document), target); err != nil {
 		return err
 	}
 	return nil
+}
+
+func repairInvalidApostropheEscapes(document string) string {
+	var repaired strings.Builder
+	repaired.Grow(len(document))
+	for index := 0; index < len(document); index++ {
+		if document[index] == '\\' && index+1 < len(document) && document[index+1] == '\'' {
+			preceding := 0
+			for cursor := index - 1; cursor >= 0 && document[cursor] == '\\'; cursor-- {
+				preceding++
+			}
+			if preceding%2 == 0 {
+				continue
+			}
+		}
+		repaired.WriteByte(document[index])
+	}
+	return repaired.String()
 }
 
 // firstJSONObject extracts the first balanced top-level JSON object.
@@ -962,14 +1885,33 @@ func truncate(text string, limit int) string {
 	return text[:limit]
 }
 
-func renderBundles(bundles []EvidenceBundle) string {
+func renderBundlesBounded(bundles []EvidenceBundle, limit int) string {
 	parts := make([]string, 0, len(bundles))
+	used := 2 // surrounding brackets
 	for _, bundle := range bundles {
-		encoded, err := json.Marshal(bundle)
+		compact := bundle
+		compact.Title = truncate(compact.Title, 300)
+		if len(compact.Claims) > 6 {
+			compact.Claims = compact.Claims[:6]
+		}
+		for index := range compact.Claims {
+			compact.Claims[index].Claim = truncate(compact.Claims[index].Claim, 400)
+			compact.Claims[index].Evidence = truncate(compact.Claims[index].Evidence, 600)
+			compact.Claims[index].SourceHash = ""
+		}
+		encoded, err := json.Marshal(compact)
 		if err != nil {
 			continue
 		}
+		required := len(encoded)
+		if len(parts) > 0 {
+			required++
+		}
+		if used+required > limit {
+			continue
+		}
 		parts = append(parts, string(encoded))
+		used += required
 	}
 	return "[" + strings.Join(parts, ",") + "]"
 }

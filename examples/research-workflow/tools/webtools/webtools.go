@@ -13,6 +13,7 @@
 package webtools
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -50,12 +51,22 @@ type FetchResult struct {
 	FetchedAt string `json:"fetchedAt"`
 }
 
+// Backend produces search hits and fetched documents behind the stable
+// wire contract. The deterministic corpus implements it for CI; live
+// deployments swap in real providers (Brave/Bing search, hardened HTTP
+// fetch) without touching the agents or the workflow.
+type Backend interface {
+	Search(ctx context.Context, query string, limit int) ([]SearchHit, error)
+	Fetch(ctx context.Context, target string) (*FetchResult, error)
+}
+
 // Server serves the tool contract over HTTP(S).
 type Server struct {
-	corpus []Document
+	backend Backend
 	// FailFetchesFor makes the next N fetches whose URL contains the token
 	// fail with HTTP 500 (failure-injection seam used by the recovery and
-	// tool-failure tests).
+	// tool-failure tests). Injection sits ABOVE the backend so it works for
+	// deterministic and live providers alike.
 	failTokens   map[string]int
 	failureMu    chan struct{}
 	requestCount func(method string)
@@ -71,13 +82,19 @@ type Document struct {
 	Content     string   `json:"content"`
 }
 
-// New builds a Server over the given documents.
+// New builds a Server over the given documents (deterministic backend).
 func New(documents []Document) *Server {
 	return &Server{
-		corpus:     documents,
+		backend:    newCorpusBackend(documents),
 		failTokens: map[string]int{},
 		failureMu:  make(chan struct{}, 1),
 	}
+}
+
+// WithBackend replaces the backing provider (live web, enterprise search…).
+func (s *Server) WithBackend(backend Backend) *Server {
+	s.backend = backend
+	return s
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -115,15 +132,15 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	switch verb {
 	case "search":
-		s.handleSearch(writer, payload.Args)
+		s.handleSearch(writer, request, payload.Args)
 	case "fetch":
-		s.handleFetch(writer, payload.Args)
+		s.handleFetch(writer, request, payload.Args)
 	default:
 		writeError(writer, http.StatusBadRequest, "unknown action: "+payload.Action)
 	}
 }
 
-func (s *Server) handleSearch(writer http.ResponseWriter, raw json.RawMessage) {
+func (s *Server) handleSearch(writer http.ResponseWriter, request *http.Request, raw json.RawMessage) {
 	var args struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit,omitempty"`
@@ -135,11 +152,15 @@ func (s *Server) handleSearch(writer http.ResponseWriter, raw json.RawMessage) {
 	if args.Limit <= 0 || args.Limit > 10 {
 		args.Limit = 8
 	}
-	hits := rank(s.corpus, tokenize(args.Query), args.Limit)
+	hits, err := s.backend.Search(request.Context(), args.Query, args.Limit)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "search backend: "+err.Error())
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"query": args.Query, "results": hits})
 }
 
-func (s *Server) handleFetch(writer http.ResponseWriter, raw json.RawMessage) {
+func (s *Server) handleFetch(writer http.ResponseWriter, request *http.Request, raw json.RawMessage) {
 	var args struct {
 		URL string `json:"url"`
 	}
@@ -147,32 +168,74 @@ func (s *Server) handleFetch(writer http.ResponseWriter, raw json.RawMessage) {
 		writeError(writer, http.StatusBadRequest, "url is required")
 		return
 	}
-	// The v1 corpus is an explicit fetch allowlist: known documents are
-	// served offline (their hostnames do not resolve on purpose). Anything
-	// else must pass the SSRF policy before we even attempt a lookup.
-	var matched *Document
-	for index := range s.corpus {
-		if sameDocument(s.corpus[index].URL, args.URL) {
-			matched = &s.corpus[index]
-			break
-		}
-	}
-	if matched == nil {
-		if reason := rejectUnsafeURL(args.URL); reason != "" {
-			writeError(writer, http.StatusForbidden, "blocked by fetch policy: "+reason)
-			return
-		}
-		writeError(writer, http.StatusNotFound, "document not in corpus: "+args.URL)
-		return
-	}
 	if s.shouldFailFetch(args.URL) {
 		writeError(writer, http.StatusInternalServerError, "simulated upstream failure")
 		return
 	}
-	writeJSON(writer, http.StatusOK, FetchResult{
-		SourceID: matched.SourceID, Title: matched.Title, URL: matched.URL,
-		Content: matched.Content, FetchedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	result, err := s.backend.Fetch(request.Context(), args.URL)
+	if err != nil {
+		writeError(writer, fetchErrorStatus(err), "fetch backend: "+err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+// corpusBackend is the deterministic offline provider: ranked search over
+// the embedded corpus plus an allowlisted fetch of exactly those documents.
+type corpusBackend struct {
+	documents []Document
+}
+
+func newCorpusBackend(documents []Document) *corpusBackend {
+	return &corpusBackend{documents: documents}
+}
+
+// Search ranks the corpus for the query tokens.
+func (c *corpusBackend) Search(_ context.Context, query string, limit int) ([]SearchHit, error) {
+	return rank(c.documents, tokenize(query), limit), nil
+}
+
+// Fetch serves one known document. The corpus is an explicit fetch
+// allowlist: known documents are served offline (their hostnames do not
+// resolve on purpose); anything else must pass the SSRF policy before we
+// even attempt a lookup.
+func (c *corpusBackend) Fetch(_ context.Context, target string) (*FetchResult, error) {
+	for index := range c.documents {
+		if sameDocument(c.documents[index].URL, target) {
+			matched := &c.documents[index]
+			return &FetchResult{
+				SourceID: matched.SourceID, Title: matched.Title, URL: matched.URL,
+				Content: matched.Content, FetchedAt: time.Now().UTC().Format(time.RFC3339),
+			}, nil
+		}
+	}
+	if reason := rejectUnsafeURL(target); reason != "" {
+		return nil, &fetchPolicyError{reason: reason}
+	}
+	return nil, &fetchStatusError{status: http.StatusNotFound, detail: "document not in corpus: " + target}
+}
+
+func fetchErrorStatus(err error) int {
+	var policy *fetchPolicyError
+	if errors.As(err, &policy) {
+		return http.StatusUnprocessableEntity
+	}
+	var upstream *fetchStatusError
+	if errors.As(err, &upstream) {
+		return upstream.status
+	}
+	var contentType *fetchContentTypeError
+	if errors.As(err, &contentType) {
+		return http.StatusUnsupportedMediaType
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 // InjectFetchFailures fails the next count fetches matching token.
@@ -205,41 +268,88 @@ func (s *Server) shouldFailFetch(target string) bool {
 // restricts every fetch to known document URLs, which turns the guard into an
 // allowlist; deployments pointing at the live web keep the same checks.
 func rejectUnsafeURL(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return "unparsable url"
+	parsed, reason := validateFetchURL(raw)
+	if reason != "" {
+		return reason
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "scheme must be http or https (file:// and others are forbidden)"
-	}
-	if parsed.User != nil {
-		return "credentials are forbidden"
-	}
-	host := parsed.Hostname()
-	if host == "" {
-		return "host is required"
-	}
-	if host == "localhost" || strings.EqualFold(host, "localhost.localdomain") || strings.HasSuffix(host, ".localhost") ||
-		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return "loopback and internal hosts are forbidden"
-	}
-	addresses, err := net.LookupIP(host)
-	if err != nil {
-		// Unknown hosts cannot be resolved by the sandbox egress anyway;
-		// treat them as blocked rather than leaking DNS failures.
-		return "host did not resolve to a public address"
-	}
-	for _, address := range addresses {
-		if isPrivate(address) {
-			return "private network addresses are forbidden"
-		}
+	if _, err := resolvePublicIPs(context.Background(), net.DefaultResolver, parsed.Hostname()); err != nil {
+		return err.Error()
 	}
 	return ""
 }
 
+// validateFetchURL performs the syntax and hostname portion of the fetch
+// policy. Live fetches deliberately keep DNS resolution out of this phase:
+// their transport resolves, validates, pins, and dials one address in a
+// single operation so DNS rebinding cannot create a check/use gap.
+func validateFetchURL(raw string) (*url.URL, string) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, "unparsable url"
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, "scheme must be http or https (file:// and others are forbidden)"
+	}
+	if parsed.User != nil {
+		return nil, "credentials are forbidden"
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return nil, "host is required"
+	}
+	canonicalHost := strings.TrimSuffix(strings.ToLower(host), ".")
+	if canonicalHost == "localhost" || canonicalHost == "localhost.localdomain" ||
+		strings.HasSuffix(canonicalHost, ".localhost") || strings.HasSuffix(canonicalHost, ".local") ||
+		strings.HasSuffix(canonicalHost, ".internal") {
+		return nil, "loopback and internal hosts are forbidden"
+	}
+	if literal := net.ParseIP(host); literal != nil && isPrivate(literal) {
+		return nil, "private network addresses are forbidden"
+	}
+	return parsed, ""
+}
+
+type hostResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type hostResolutionError struct{ cause error }
+
+func (e *hostResolutionError) Error() string { return "host did not resolve to a public address" }
+func (e *hostResolutionError) Unwrap() error { return e.cause }
+
+type unsafeAddressError struct{}
+
+func (*unsafeAddressError) Error() string { return "private network addresses are forbidden" }
+
+// resolvePublicIPs rejects the complete answer when any address is unsafe.
+// Accepting only a public subset would let an attacker steer a later client
+// or retry toward a private member of a mixed DNS response.
+func resolvePublicIPs(ctx context.Context, resolver hostResolver, host string) ([]net.IPAddr, error) {
+	if literal := net.ParseIP(host); literal != nil {
+		if isPrivate(literal) {
+			return nil, &unsafeAddressError{}
+		}
+		return []net.IPAddr{{IP: literal}}, nil
+	}
+	addresses, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, &hostResolutionError{cause: err}
+	}
+	if len(addresses) == 0 {
+		return nil, &hostResolutionError{cause: fmt.Errorf("empty DNS answer")}
+	}
+	for _, address := range addresses {
+		if address.IP == nil || isPrivate(address.IP) {
+			return nil, &unsafeAddressError{}
+		}
+	}
+	return addresses, nil
+}
+
 func isPrivate(address net.IP) bool {
 	return address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() ||
-		address.IsLinkLocalMulticast() || address.IsUnspecified()
+		address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified()
 }
 
 func tokenize(query string) []string {
