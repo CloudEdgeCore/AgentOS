@@ -25,6 +25,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/observability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/version"
 	"github.com/google/uuid"
@@ -85,6 +86,11 @@ type MemoryAPI interface {
 	Tombstone(context.Context, string, uuid.UUID, int64) (store.MemoryRecord, error)
 }
 
+// MetricsStore is the §Phase-7 aggregated observability read surface.
+type MetricsStore interface {
+	AggregateMetrics(context.Context, string, time.Time) (*observability.Metrics, error)
+}
+
 // AuditStore is the v0.4 audit ledger read surface (ADR-014).
 type AuditStore interface {
 	ListAudit(context.Context, store.ListAuditInput) ([]store.AuditEvent, error)
@@ -126,6 +132,9 @@ type Handler struct {
 	// endpoints answer 404.
 	workflows    WorkflowStore
 	runtimePools RuntimePoolOperatorStore
+	// metrics is the §Phase-7 aggregated observability surface; when nil
+	// the metrics endpoint answers 404.
+	metrics MetricsStore
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
@@ -169,6 +178,12 @@ func WithRuntimePoolOperatorStore(runtimePools RuntimePoolOperatorStore) Option 
 // surface (v0.6); without it the quota endpoints are disabled.
 func WithTenantQuotaStore(quotas TenantQuotaStore) Option {
 	return func(h *Handler) { h.quotas = quotas }
+}
+
+// WithMetricsStore installs the §Phase-7 aggregated observability surface;
+// without it the metrics endpoint answers 404.
+func WithMetricsStore(metrics MetricsStore) Option {
+	return func(h *Handler) { h.metrics = metrics }
 }
 
 // WithAuditSigningKey configures the key that signs exported audit archives.
@@ -238,6 +253,7 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("PUT /v1/quota", handler.setTenantQuota)
 	mux.HandleFunc("DELETE /v1/quota", handler.deleteTenantQuota)
 	mux.HandleFunc("POST /v1/workflows", handler.createWorkflow)
+	mux.HandleFunc("GET /v1/metrics", handler.getMetrics)
 	mux.HandleFunc("GET /v1/workflows/{workflowID}", handler.getWorkflow)
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/cancel", handler.cancelWorkflow)
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/steps/{stepName}/approval", handler.decideWorkflowStepApproval)
@@ -1220,6 +1236,37 @@ func (h *Handler) writeMemoryProblem(writer http.ResponseWriter, request *http.R
 	default:
 		h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", "request could not be completed", traceID)
 	}
+}
+
+// getMetrics returns the §Phase-7 aggregated platform metrics for the
+// authenticated tenant (GET /v1/metrics). The optional since query parameter
+// bounds the aggregation window (RFC3339; default 24h).
+func (h *Handler) getMetrics(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	if h.metrics == nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "METRICS_DISABLED", "metrics are not configured", traceID)
+		return
+	}
+	since := time.Now().UTC().Add(-24 * time.Hour)
+	if raw := request.URL.Query().Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			h.writeProblem(writer, request, http.StatusBadRequest, "INVALID_SINCE", "since must be an RFC3339 timestamp", traceID)
+			return
+		}
+		since = parsed
+	}
+	metrics, err := h.metrics.AggregateMetrics(request.Context(), principal.TenantID, since)
+	if err != nil {
+		h.writeStoreProblem(writer, request, err, traceID)
+		return
+	}
+	writeJSON(writer, http.StatusOK, metrics)
 }
 
 func (h *Handler) health(writer http.ResponseWriter, _ *http.Request) {
