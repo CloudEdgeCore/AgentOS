@@ -1,0 +1,34 @@
+# Firecracker KVM evidence: standalone workflow so a missing agentos-kvm
+# runner can never block the rest of the nightly production evidence. This
+# workflow runs independently and reports its own status; when the runner is
+# not provisioned, the job stays queued in THIS workflow only.
+name: firecracker-kvm-evidence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 18 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firecracker-kvm-evidence
+  cancel-in-progress: false
+
+jobs:
+  firecracker-kvm:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'
+    runs-on: [self-hosted, Linux, X64, agentos-kvm]
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Assert real KVM and boot Firecracker
+        run: |
+          test -r /dev/kvm -a -w /dev/kvm
+          bash deploy/ci/firecracker-smoke.sh
+      - name: Report failure reason
+        if: failure()
+        run: |
+          echo "::notice::KVM evidence failed. If the agentos-kvm runner is not provisioned, this job stays queued in this workflow only; it does not block the nightly production evidence."
