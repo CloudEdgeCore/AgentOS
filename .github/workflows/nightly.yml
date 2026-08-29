@@ -63,8 +63,13 @@ jobs:
 
       - name: Run scale and multi-tenant evidence
         run: |
-          go test -race -tags=integration -count=1 -timeout 120m -run 'TestControlPlanePipelineCapacityBaseline|TestV13DynamicSpawnScale10K|TestV12WorkflowScale|TestMultiTenant' ./internal/kernel/store/postgres ./e2e/workflows
+          # 100k capacity baseline: throughput benchmark, measured without the
+          # race detector (which distorts timing by 5-10×). The 10k PR gate
+          # runs with -race inside the kernel CI for functional correctness.
+          go test -tags=integration -count=1 -timeout 120m -run 'TestControlPlanePipelineCapacityBaseline' ./internal/kernel/store/postgres/
+          go test -race -tags=integration -count=1 -timeout 120m -run 'TestV13DynamicSpawnScale10K|TestV12WorkflowScale|TestMultiTenant' ./internal/kernel/store/postgres ./e2e/workflows
           go test -race -count=1 -timeout 45m -run 'TestV13Orchestrates10KDynamicTasks' ./internal/kernel/workflow
+          AGENTOS_RESEARCH_SCALE_100K=1 AGENTOS_E2E_RESEARCH_RUNS=10000 go test -tags=integration -count=1 -timeout 60m -run 'TestScale100kTasks' -v ./examples/devops-workflow/tests/e2e/
 
       - name: Run parser fuzz corpus and discovery
         run: |
