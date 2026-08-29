@@ -128,6 +128,38 @@ func (l *loggedHelloRuntime) Restore(ctx context.Context, request agent.RestoreR
 	return l.inner.Restore(ctx, request)
 }
 
+// cordonPool marks a runtime pool CORDONED in both the static pool list
+// (used by the scheduler) and the durable registry (used by the kernel's
+// pool-aware re-placement).
+func (h *harness) cordonPool(id string) {
+	h.t.Helper()
+	for index := range h.pools {
+		if h.pools[index].ID == id {
+			h.pools[index].Status = "CORDONED"
+			break
+		}
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE runtime_pools SET status = 'CORDONED', updated_at = now() WHERE id = $1`, id); err != nil {
+		h.t.Fatalf("registry cordon %s: %v", id, err)
+	}
+}
+
+// uncordonPool re-admits a previously cordoned pool.
+func (h *harness) uncordonPool(id string) {
+	h.t.Helper()
+	for index := range h.pools {
+		if h.pools[index].ID == id {
+			h.pools[index].Status = "ACTIVE"
+			break
+		}
+	}
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE runtime_pools SET status = 'ACTIVE', updated_at = now() WHERE id = $1`, id); err != nil {
+		h.t.Fatalf("registry uncordon %s: %v", id, err)
+	}
+}
+
 type harness struct {
 	t          *testing.T
 	pool       *pgxpool.Pool
@@ -370,12 +402,14 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	loopCtx, cancelLoop := context.WithCancel(context.Background())
 	h.cancelCtx = cancelLoop
 	h.loopCtx = loopCtx
-	instances := []string{"devops-worker-00", "devops-worker-01", "devops-worker-02"}
+	instances := []string{"devops-worker-00", "devops-worker-01", "devops-worker-02", "devops-worker-03"}
 	pools := make(staticPools, 0, len(instances))
 	for index, instance := range instances {
 		class := "research-reasoning"
-		if index == 1 {
+		if index == 1 || index == 3 {
 			class = "research-network"
+		} else if index == 2 {
+			class = "research-sandbox"
 		}
 		pools = append(pools, scheduler.RuntimePool{
 			ID: fmt.Sprintf("devops-pool-%d", index), TenantIDs: []string{devopsTenant},
@@ -385,7 +419,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	}
 	h.pools = pools
 	admissionController := admission.NewController(store, admission.New(admission.Limits{
-		RuntimeClasses: []string{"research-reasoning", "research-network"}, MaxTokens: 1000000,
+		RuntimeClasses: []string{"research-reasoning", "research-network", "research-sandbox"}, MaxTokens: 1000000,
 		MaxCostMicroUSD: money.MustFromUSD(5000), MaxToolCalls: 100000, MaxWallSeconds: 36000,
 		MaxCPU: 16000, MaxMemory: 32768, MaxLLMConcurrency: 64,
 	}), policyEngine, "devops-admission", 50, time.Minute)
@@ -431,6 +465,17 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	h.controlURL = "http://" + controlAPIListener.Addr().String()
 
 	return h
+}
+
+// KillWorker simulates a runtime crash: the poll loop stops dead without
+// releasing its leases, so recovery must reclaim them after expiry.
+func (h *harness) KillWorker(instance string) {
+	h.workerMu.Lock()
+	cancel, ok := h.workers[instance]
+	h.workerMu.Unlock()
+	if ok {
+		cancel()
+	}
 }
 
 func (h *harness) startWorker(loopCtx context.Context, instance string) {
