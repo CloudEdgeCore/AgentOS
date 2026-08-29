@@ -1036,7 +1036,12 @@ func runtimePoolIneligible(ctx context.Context, tx pgx.Tx, poolID string) (bool,
 	err := tx.QueryRow(ctx, `SELECT COALESCE(status, 'ACTIVE'), COALESCE(ready, false)
 		FROM runtime_pools WHERE id = $1`, poolID).Scan(&status, &ready)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return true, nil // pool removed: re-place onto a live pool
+		// Pool not in the registry: fall through to normal requeue. The
+		// scheduler will defer the task if the pool truly no longer exists;
+		// treating an unknown pool as ineligible would break deployments
+		// that manage pools out-of-band (and test setups that truncate and
+		// re-register pools between scenarios).
+		return false, nil
 	}
 	if err != nil {
 		return false, err
