@@ -161,6 +161,7 @@ func enqueueLoad(t *testing.T, ctx context.Context, store *postgresstore.Store, 
 func drainPhase(t *testing.T, ctx context.Context, pool *pgxpool.Pool, reconcile func(context.Context) (int, error), phase string, count int) {
 	t.Helper()
 	deadline := time.Now().Add(2*time.Minute + time.Duration(count)*20*time.Millisecond)
+	lastDiag := time.Now()
 	for {
 		if _, err := reconcile(ctx); err != nil {
 			t.Fatalf("reconcile: %v", err)
@@ -172,10 +173,46 @@ func drainPhase(t *testing.T, ctx context.Context, pool *pgxpool.Pool, reconcile
 		if reached == count {
 			return
 		}
+		if time.Since(lastDiag) >= 5*time.Second {
+			pipelineDiagnostics(t, ctx, pool, phase)
+			lastDiag = time.Now()
+		}
 		if time.Now().After(deadline) {
+			pipelineDiagnostics(t, ctx, pool, phase)
 			t.Fatalf("pipeline stalled at phase %s: %d of %d", phase, reached, count)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// pipelineDiagnostics reports where the control-plane pipeline stands so a
+// nightly stall is self-diagnosing: reached counts, deferred tasks with their
+// backoff horizon, and the retry-count distribution.
+func pipelineDiagnostics(t *testing.T, ctx context.Context, pool *pgxpool.Pool, phase string) {
+	t.Helper()
+	var total, reached, deferred, deferredSoon int
+	var maxRetry int64
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM tasks),
+		(SELECT count(*) FROM tasks WHERE phase = $1),
+		(SELECT count(*) FROM tasks WHERE phase = 'ADMITTED' AND next_schedule_attempt_at > now()),
+		(SELECT count(*) FROM tasks WHERE phase = 'ADMITTED' AND next_schedule_attempt_at IS NOT NULL
+			AND next_schedule_attempt_at <= now() + interval '30 seconds'),
+		(SELECT COALESCE(max(schedule_retry_count), 0) FROM tasks WHERE phase = 'ADMITTED')`,
+		phase).Scan(&total, &reached, &deferred, &deferredSoon, &maxRetry); err != nil {
+		t.Logf("PIPELINE diagnostics unavailable: %v", err)
+		return
+	}
+	t.Logf("PIPELINE phase=%s reached=%d/%d deferred=%d deferred<=30s=%d maxRetry=%d",
+		phase, reached, total, deferred, deferredSoon, maxRetry)
+	if deferred > 0 {
+		var retryBuckets string
+		if err := pool.QueryRow(ctx, `SELECT string_agg(bucket || ':' || cnt, ' ' ORDER BY bucket) FROM (
+			SELECT (schedule_retry_count / 10 * 10)::text AS bucket, count(*) AS cnt
+			FROM tasks WHERE phase = 'ADMITTED' AND next_schedule_attempt_at > now()
+			GROUP BY 1) t`).Scan(&retryBuckets); err == nil {
+			t.Logf("PIPELINE deferred retry-count buckets: %s", retryBuckets)
+		}
 	}
 }
 
