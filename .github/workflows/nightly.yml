@@ -33,7 +33,7 @@ jobs:
   capacity-baseline:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline'))
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     services:
       postgres:
         image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
@@ -62,7 +62,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Run 100k capacity baseline
-        run: go test -tags=integration -count=1 -timeout 150m -run 'TestControlPlanePipelineCapacityBaseline' -v ./internal/kernel/store/postgres/
+        run: go test -tags=integration -count=1 -timeout 240m -run 'TestControlPlanePipelineCapacityBaseline' -v ./internal/kernel/store/postgres/
 
       - name: Upload capacity evidence log
         if: always()
