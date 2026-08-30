@@ -160,7 +160,10 @@ func enqueueLoad(t *testing.T, ctx context.Context, store *postgresstore.Store, 
 // baselines like 100k are not falsely failed by a fixed wall-clock bound.
 func drainPhase(t *testing.T, ctx context.Context, pool *pgxpool.Pool, reconcile func(context.Context) (int, error), phase string, count int) {
 	t.Helper()
-	deadline := time.Now().Add(2*time.Minute + time.Duration(count)*20*time.Millisecond)
+	// 60ms/task accommodates CI runners (~4× slower than local): at 19
+	// tasks/s the schedule phase for 100k needs ~88 min. The go test
+	// timeout and job timeout must both exceed the sum of all phases.
+	deadline := time.Now().Add(2*time.Minute + time.Duration(count)*60*time.Millisecond)
 	lastDiag := time.Now()
 	for {
 		if _, err := reconcile(ctx); err != nil {
