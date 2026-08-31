@@ -21,6 +21,15 @@ import (
 // this test.
 const ociImageName = "docker.io/library/agentos-runtime:latest"
 
+// ociWorkerCommand returns the binary and arguments to start the OCI worker,
+// wrapping with sudo when the containerd socket requires root access.
+func ociWorkerCommand(bin string, args ...string) (string, []string) {
+	if _, err := exec.LookPath("sudo"); err == nil {
+		return "sudo", append([]string{"-n", bin}, args...)
+	}
+	return bin, args
+}
+
 // requireOCIDrillEnvironment validates that the real gVisor/containerd
 // environment is available; skips otherwise.
 func requireOCIDrillEnvironment(t *testing.T) {
@@ -32,8 +41,14 @@ func requireOCIDrillEnvironment(t *testing.T) {
 	if _, err := exec.LookPath("ctr"); err != nil {
 		t.Skipf("ctr (containerd CLI) not found: %v", err)
 	}
-	// The agent image must be imported into containerd.
-	out, err := exec.Command("ctr", "-n", "agentos", "images", "ls", "-q").CombinedOutput()
+	// The agent image must be imported into containerd. ctr must talk to the
+	// root-owned containerd socket, so run it through sudo like the workflow
+	// does (the drill CI job runs as a non-root user).
+	listCommand := exec.Command("ctr", "-n", "agentos", "images", "ls", "-q")
+	if _, err := exec.LookPath("sudo"); err == nil {
+		listCommand = exec.Command("sudo", "-n", "ctr", "-n", "agentos", "images", "ls", "-q")
+	}
+	out, err := listCommand.CombinedOutput()
 	if err != nil {
 		t.Skipf("ctr images ls failed: %v\n%s", err, out)
 	}
@@ -75,7 +90,7 @@ func TestOCIIsolation(t *testing.T) {
 		t.Skipf("agentos-runtime-oci binary not found at %s (build with: go build ./cmd/agentos-runtime-oci)", ociWorkerBin)
 	}
 	artifactRoot := t.TempDir()
-	workerCmd := exec.Command(ociWorkerBin,
+	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
 		"-runtime-instance-id", "oci-worker-1",
@@ -83,6 +98,7 @@ func TestOCIIsolation(t *testing.T) {
 		"-image-ref", ociImageName,
 		"-skip-image-pull",
 	)
+	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
 		t.Fatalf("start oci worker: %v", err)
@@ -179,7 +195,7 @@ func TestOCITakeover(t *testing.T) {
 	if _, err := os.Stat(ociWorkerBin); err != nil {
 		t.Skipf("agentos-runtime-oci binary not found")
 	}
-	workerCmd := exec.Command(ociWorkerBin,
+	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
 		"-runtime-instance-id", "oci-worker-1",
@@ -187,6 +203,7 @@ func TestOCITakeover(t *testing.T) {
 		"-image-ref", ociImageName,
 		"-skip-image-pull",
 	)
+	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
 		t.Fatalf("start oci worker: %v", err)
