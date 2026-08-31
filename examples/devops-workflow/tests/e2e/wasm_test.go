@@ -162,16 +162,13 @@ func TestWasmtimeTakeover(t *testing.T) {
 	h := newHarness(t, "wasm-takeover", false)
 	ctx := context.Background()
 
-	binPath, _ := filepath.Abs(filepath.Join("..", "..", "..", "..", "target", "release", "component-fixture.exe"))
+	binPath := resolveBinary(t, filepath.Join("..", "..", "..", "..", "target", "release", "component-fixture"))
 	packageRoot := t.TempDir()
 	wasmPath := filepath.Join(packageRoot, "hello.wasm")
 	if out, err := exec.Command(binPath, "--out", wasmPath).CombinedOutput(); err != nil {
 		t.Fatalf("generate wasm: %v\n%s", err, out)
 	}
-	workerBin, _ := filepath.Abs(filepath.Join("..", "..", "..", "..", "target", "release", "agentos-runtime-wasm.exe"))
-	if _, err := os.Stat(workerBin); os.IsNotExist(err) {
-		t.Skipf("agentos-runtime-wasm.exe not found")
-	}
+	workerBin := resolveBinary(t, filepath.Join("..", "..", "..", "..", "target", "release", "agentos-runtime-wasm"))
 
 	// Publish a dual-class agent (wasm + adapter) so the task can be
 	// re-placed across runtime boundaries.
