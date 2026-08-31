@@ -92,11 +92,13 @@ jobs:
           go-version: 1.26.6
           cache-dependency-path: go.sum
 
-      - name: Install containerd + gVisor (runsc)
+      - name: Install gVisor (runsc) + configure containerd
         run: |
-          # containerd
-          sudo apt-get update
-          sudo apt-get install -y containerd
+          # GitHub runners already ship containerd (as the docker dependency
+          # containerd.io); apt-installing the distro `containerd` package
+          # conflicts with it and takes the docker daemon down. Use the
+          # preinstalled containerd and only add the gVisor runtime.
+          command -v ctr >/dev/null || sudo apt-get install -y containerd.io
           # gVisor (runsc + containerd-shim) from GitHub releases (storage.googleapis.com is stale)
           # gVisor >= 2026 bundles runsc and containerd-shim-runsc-v1 in a single tarball.
           (
@@ -115,8 +117,11 @@ jobs:
             # empty (valid) runsc config satisfies it. New gVisor releases no
             # longer ship runsc.toml.
             sudo touch /etc/containerd/runsc.toml
+            sudo systemctl enable containerd 2>/dev/null || true
             sudo systemctl restart containerd
           )
+          # The system containerd restart must not take docker down with it.
+          docker info >/dev/null 2>&1 || sudo systemctl restart docker
 
       - name: Build agent-runtime image and import into containerd
         run: |
