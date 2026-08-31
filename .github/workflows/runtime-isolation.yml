@@ -97,16 +97,16 @@ jobs:
           # containerd
           sudo apt-get update
           sudo apt-get install -y containerd
-          # gVisor (runsc)
+          # gVisor (runsc) from GitHub releases (storage.googleapis.com is stale)
           (
             set -e
-            ARCH=$(uname -m)
-            URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
-            wget ${URL}/runsc ${URL}/runsc.toml
+            RUNSC_VERSION=$(curl -fsSL https://api.github.com/repos/google/gvisor/releases/latest | grep tag_name | cut -d'"' -f4)
+            curl -fsSL -o runsc "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/runsc"
+            curl -fsSL -o runsc.toml "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/runsc.toml" || true
             chmod 555 runsc
             sudo mv runsc /usr/local/bin
-            sudo mv runsc.toml /etc/containerd/runsc.toml
             sudo mkdir -p /etc/containerd
+            sudo mv runsc.toml /etc/containerd/runsc.toml || true
             sudo cp deploy/ci/containerd-config.toml /etc/containerd/config.toml
             sudo systemctl restart containerd
           )

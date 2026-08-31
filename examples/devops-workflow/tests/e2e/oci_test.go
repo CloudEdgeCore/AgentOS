@@ -49,14 +49,14 @@ func TestOCIIsolation(t *testing.T) {
 
 	// Publish an agent that runs on the oci class.
 	ociAgentSpec, _ := json.Marshal(map[string]any{
-		"runtimeClassPolicy": map[string]any{"allowed": []string{"oci"}, "preferred": "oci"},
+		"runtimeClassPolicy": map[string]any{"allowed": []string{"oci", "research-network"}, "preferred": "oci"},
 		"lifecycle":          map[string]any{"maxAttempts": 3},
 		"runtimes": []any{
 			map[string]any{"class": "oci", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.oci/v1", "entrypoint": []string{"oci://agent-runtime"}},
+			map[string]any{"class": "research-network", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": []string{"agentos-binding://devops"}},
 		},
-		"capabilities": map[string]any{"tools": []any{}, "models": []any{}, "memory": []any{}, "secrets": []any{}},
-		"budget":       map[string]any{"tokens": 1000, "costUsd": 0.10, "toolCalls": 4, "wallSeconds": 60},
-		"checkpoint":   map[string]any{"mode": "logical", "schemaVersion": "devops/v1", "intervalSeconds": 30},
+		"capabilities": map[string]any{"tools": []string{"hello.echo@1.0.0"}, "models": []any{}, "memory": []any{}, "secrets": []any{}},
+		"budget":       map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120}, "checkpoint": map[string]any{"mode": "logical", "schemaVersion": "devops/v1", "intervalSeconds": 30},
 	})
 	if _, err := h.store.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
 		ID: uuid.New(), TenantID: devopsTenant, Namespace: "default",
