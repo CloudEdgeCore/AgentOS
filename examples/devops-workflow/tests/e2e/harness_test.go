@@ -378,13 +378,19 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	t.Cleanup(func() { _ = helloListener.Close() })
 	helloAgentURL := "http://" + helloListener.Addr().String()
 
-	bindingEntries := make([]runtimeadapter.RuntimeBinding, 0, len(agentRefs()))
+	bindingEntries := make([]runtimeadapter.RuntimeBinding, 0, len(agentRefs())+4)
 	for _, ref := range agentRefs() {
 		endpoint := agentURL
 		if slices.Contains(thirdPartyRefs(), ref) {
 			endpoint = helloAgentURL
 		}
 		bindingEntries = append(bindingEntries, runtimeadapter.RuntimeBinding{AgentVersionRef: ref, Endpoint: endpoint})
+	}
+	// Isolation-drill agents (Wasmtime/OCI) are dual-class: when their
+	// sandbox pool is cordoned, cross-class placement lands them on an
+	// adapter pool, which resolves their entrypoint through this table.
+	for _, ref := range []string{"wasm-agent@1.0.0", "wasm-dual-agent@1.0.0", "oci-agent@1.0.0", "oci-dual-agent@1.0.0"} {
+		bindingEntries = append(bindingEntries, runtimeadapter.RuntimeBinding{AgentVersionRef: ref, Endpoint: helloAgentURL})
 	}
 	bindingsFile := filepath.Join(t.TempDir(), "bindings.json")
 	encodedBindings, _ := json.Marshal(map[string]any{"bindings": bindingEntries})
