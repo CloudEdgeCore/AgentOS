@@ -402,7 +402,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	loopCtx, cancelLoop := context.WithCancel(context.Background())
 	h.cancelCtx = cancelLoop
 	h.loopCtx = loopCtx
-	instances := []string{"devops-worker-00", "devops-worker-01", "devops-worker-02", "devops-worker-03"}
+	instances := []string{"devops-worker-00", "devops-worker-01", "devops-worker-02", "devops-worker-03", "wasm-worker-1", "oci-worker-1"}
 	pools := make(staticPools, 0, len(instances))
 	for index, instance := range instances {
 		class := "research-reasoning"
@@ -410,6 +410,10 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 			class = "research-network"
 		} else if index == 2 {
 			class = "research-sandbox"
+		} else if index == 4 {
+			class = "research-wasm"
+		} else if index == 5 {
+			class = "oci"
 		}
 		pools = append(pools, scheduler.RuntimePool{
 			ID: fmt.Sprintf("devops-pool-%d", index), TenantIDs: []string{devopsTenant},
@@ -419,7 +423,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	}
 	h.pools = pools
 	admissionController := admission.NewController(store, admission.New(admission.Limits{
-		RuntimeClasses: []string{"research-reasoning", "research-network", "research-sandbox"}, MaxTokens: 1000000,
+		RuntimeClasses: []string{"research-reasoning", "research-network", "research-sandbox", "research-wasm", "oci"}, MaxTokens: 1000000,
 		MaxCostMicroUSD: money.MustFromUSD(5000), MaxToolCalls: 100000, MaxWallSeconds: 36000,
 		MaxCPU: 16000, MaxMemory: 32768, MaxLLMConcurrency: 64,
 	}), policyEngine, "devops-admission", 50, time.Minute)
@@ -447,6 +451,12 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 		}
 	}()
 	for _, instance := range instances {
+		// wasm-worker-* and oci-worker-* pools are served by external
+		// subprocesses (Wasmtime/OCI isolation drills), not by adapter
+		// workers. Starting an adapter worker here would steal their leases.
+		if strings.HasPrefix(instance, "wasm-worker-") || strings.HasPrefix(instance, "oci-worker-") {
+			continue
+		}
 		h.startWorker(loopCtx, instance)
 	}
 	t.Cleanup(func() { cancelLoop(); h.loopWG.Wait() })
