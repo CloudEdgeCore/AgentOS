@@ -60,7 +60,7 @@ jobs:
 
       - name: Run Wasmtime isolation and takeover drills
         run: |
-          go test -tags=integration -count=1 -timeout 30m -v -run 'TestWasmtimeIsolation|TestWasmtimeTakeover' ./examples/devops-workflow/tests/e2e/
+          go test -tags=integration -count=1 -timeout 30m -v -run 'TestWasmtimeIsolation|TestWasmtimeCrossClassPlacement' ./examples/devops-workflow/tests/e2e/
 
   oci-drill:
     runs-on: ubuntu-latest
@@ -127,6 +127,11 @@ jobs:
         run: |
           docker build -t agentos-runtime:latest -f deploy/oci/agent-runtime/Dockerfile .
           docker save agentos-runtime:latest | sudo ctr -n agentos images import -
+          # docker save writes RepoTags as "agentos-runtime:latest"; the drill
+          # references the fully-qualified docker.io/library/ name. Normalize
+          # so the lookup and the -image-ref match what containerd stores.
+          sudo ctr -n agentos images tag agentos-runtime:latest docker.io/library/agentos-runtime:latest
+          sudo ctr -n agentos images get docker.io/library/agentos-runtime:latest
 
       - name: Build OCI worker
         run: |
