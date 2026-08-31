@@ -97,17 +97,24 @@ jobs:
           # containerd
           sudo apt-get update
           sudo apt-get install -y containerd
-          # gVisor (runsc) from GitHub releases (storage.googleapis.com is stale)
+          # gVisor (runsc + containerd-shim) from GitHub releases (storage.googleapis.com is stale)
+          # gVisor >= 2026 bundles runsc and containerd-shim-runsc-v1 in a single tarball.
           (
             set -e
+            ARCH=$(uname -m)
+            case "$ARCH" in x86_64) GV_ARCH=x86_64 ;; aarch64) GV_ARCH=aarch64 ;; *) echo "unsupported arch $ARCH"; exit 1 ;; esac
             RUNSC_VERSION=$(curl -fsSL https://api.github.com/repos/google/gvisor/releases/latest | grep tag_name | cut -d'"' -f4)
-            curl -fsSL -o runsc "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/runsc"
-            curl -fsSL -o runsc.toml "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/runsc.toml" || true
-            chmod 555 runsc
-            sudo mv runsc /usr/local/bin
+            curl -fsSL -o gvisor.tar.bz2 "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/gvisor-${GV_ARCH}.tar.bz2"
+            tar -xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1
+            chmod 555 runsc containerd-shim-runsc-v1
+            sudo mv runsc /usr/local/bin/runsc
+            sudo mv containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
             sudo mkdir -p /etc/containerd
-            sudo mv runsc.toml /etc/containerd/runsc.toml || true
             sudo cp deploy/ci/containerd-config.toml /etc/containerd/config.toml
+            # The executor passes --runtime-config-path unconditionally; an
+            # empty (valid) runsc config satisfies it. New gVisor releases no
+            # longer ship runsc.toml.
+            sudo touch /etc/containerd/runsc.toml
             sudo systemctl restart containerd
           )
 
