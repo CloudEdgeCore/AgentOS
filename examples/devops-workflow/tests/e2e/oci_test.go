@@ -191,19 +191,19 @@ func TestOCITakeover(t *testing.T) {
 		t.Fatalf("publish dual agent: %v", err)
 	}
 
-ociWorkerBin := filepath.Join("..", "..", "..", "..", "bin", "agentos-runtime-oci")
-		if _, err := os.Stat(ociWorkerBin); err != nil {
-			t.Skipf("agentos-runtime-oci binary not found")
-		}
-		workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
-			"-control-address", h.listener.Addr().String(),
-			"-tenant", devopsTenant,
-			"-runtime-instance-id", "oci-worker-1",
-			"-artifact-root", t.TempDir(),
-			"-image-ref", ociImageName,
-			"-skip-image-pull",
-		)
-		workerCmd := exec.Command(workerBin, workerArgs...)
+	ociWorkerBin := filepath.Join("..", "..", "..", "..", "bin", "agentos-runtime-oci")
+	if _, err := os.Stat(ociWorkerBin); err != nil {
+		t.Skipf("agentos-runtime-oci binary not found")
+	}
+	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
+		"-control-address", h.listener.Addr().String(),
+		"-tenant", devopsTenant,
+		"-runtime-instance-id", "oci-worker-1",
+		"-artifact-root", t.TempDir(),
+		"-image-ref", ociImageName,
+		"-skip-image-pull",
+	)
+	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
 		t.Fatalf("start oci worker: %v", err)
