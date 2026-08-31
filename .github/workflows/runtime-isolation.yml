@@ -105,8 +105,7 @@ jobs:
             curl -fsSL -o runsc.toml "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/runsc.toml" || true
             chmod 555 runsc
             sudo mv runsc /usr/local/bin
-            sudo mv runsc.toml /etc/containerd/runsc.toml || true
-            sudo mkdir -p /etc/containerd
+            sudo mv runsc.toml /etc/containerd/runsc.toml || true            sudo mkdir -p /etc/containerd
             sudo cp deploy/ci/containerd-config.toml /etc/containerd/config.toml
             sudo systemctl restart containerd
           )
