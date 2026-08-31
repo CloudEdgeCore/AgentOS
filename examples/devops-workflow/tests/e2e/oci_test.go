@@ -33,7 +33,8 @@ func requireOCIDrillEnvironment(t *testing.T) {
 		t.Skipf("ctr (containerd CLI) not found: %v", err)
 	}
 	// The agent image must be imported into containerd.
-	if out, err := exec.Command("ctr", "-n", "agentos", "images", "ls", "-q").CombinedOutput(); err != nil {
+	out, err := exec.Command("ctr", "-n", "agentos", "images", "ls", "-q").CombinedOutput()
+	if err != nil {
 		t.Skipf("ctr images ls failed: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), ociImageName) {
