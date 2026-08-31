@@ -33,7 +33,7 @@ func requireOCIDrillEnvironment(t *testing.T) {
 		t.Skipf("ctr (containerd CLI) not found: %v", err)
 	}
 	// The agent image must be imported into containerd.
-	if out, err := exec.Command("ctr", "-n", "agentos", "images", "ls", ociImageName).CombinedOutput(); err != nil {
+	if out, err := exec.Command("ctr", "-n", "agentos", "images", "check", ociImageName).CombinedOutput(); err != nil {
 		t.Skipf("agent image %s not imported into containerd: %v\n%s", ociImageName, err, out)
 	}
 }
@@ -56,7 +56,7 @@ func TestOCIIsolation(t *testing.T) {
 			map[string]any{"class": "research-network", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": []string{"agentos-binding://devops"}},
 		},
 		"capabilities": map[string]any{"tools": []string{"hello.echo@1.0.0"}, "models": []any{}, "memory": []any{}, "secrets": []any{}},
-		"budget":       map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120}, "checkpoint": map[string]any{"mode": "logical", "schemaVersion": "devops/v1", "intervalSeconds": 30},
+		"budget":       map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120}, "checkpoint": map[string]any{"mode": "logical", "schemaVersion": "hello/v1", "intervalSeconds": 30},
 	})
 	if _, err := h.store.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
 		ID: uuid.New(), TenantID: devopsTenant, Namespace: "default",
@@ -162,7 +162,7 @@ func TestOCITakeover(t *testing.T) {
 		},
 		"capabilities": map[string]any{"tools": []string{"hello.echo@1.0.0"}, "models": []any{}, "memory": []any{}, "secrets": []any{}},
 		"budget":       map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120},
-		"checkpoint":   map[string]any{"mode": "logical", "schemaVersion": "devops/v1", "intervalSeconds": 30},
+		"checkpoint":   map[string]any{"mode": "logical", "schemaVersion": "hello/v1", "intervalSeconds": 30},
 	})
 	if _, err := h.store.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
 		ID: uuid.New(), TenantID: devopsTenant, Namespace: "default",

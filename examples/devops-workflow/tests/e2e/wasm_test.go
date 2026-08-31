@@ -43,7 +43,7 @@ func (h *harness) publishWasmAgent(t *testing.T, name string) {
 		},
 		"capabilities": map[string]any{"tools": []string{"hello.echo@1.0.0"}, "models": []any{}, "memory": []any{}, "secrets": []any{}},
 		"budget":       map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120},
-		"checkpoint":   map[string]any{"mode": "logical", "schemaVersion": "devops/v1", "intervalSeconds": 30},
+		"checkpoint":   map[string]any{"mode": "logical", "schemaVersion": "hello/v1", "intervalSeconds": 30},
 	})
 	if _, err := h.store.CreateAgentVersion(context.Background(), kernelstore.CreateAgentVersionInput{
 		ID: uuid.New(), TenantID: devopsTenant, Namespace: "default",
