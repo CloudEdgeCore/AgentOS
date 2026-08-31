@@ -129,7 +129,7 @@ jobs:
           docker save agentos-runtime:latest | sudo ctr -n agentos images import -
           # Verify the image is findable; containerd normalizes docker save
           # RepoTags to docker.io/library/name.
-          sudo ctr -n agentos images get docker.io/library/agentos-runtime:latest
+          sudo ctr -n agentos images ls docker.io/library/agentos-runtime:latest
 
       - name: Build OCI worker
         run: |

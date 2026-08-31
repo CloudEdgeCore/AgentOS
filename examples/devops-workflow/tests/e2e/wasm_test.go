@@ -208,6 +208,13 @@ func TestWasmtimeCrossClassPlacement(t *testing.T) {
 			}
 			if phase == "SUCCEEDED" || phase == "FAILED" || phase == "CANCELLED" || phase == "TIMED_OUT" || phase == "REJECTED" {
 				if phase != "SUCCEEDED" {
+					var failureCode, failureReason string
+					if err := h.pool.QueryRow(ctx,
+						`SELECT COALESCE(a.failure_code,''), COALESCE(a.failure_message,'') FROM attempts a
+						 JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+						 WHERE r.task_id=$1 ORDER BY a.ordinal DESC LIMIT 1`, taskID).Scan(&failureCode, &failureReason); err == nil {
+						t.Fatalf("task %s phase = %s, want SUCCEEDED (failure=%s %s)", taskID, phase, failureCode, failureReason)
+					}
 					t.Fatalf("task %s phase = %s, want SUCCEEDED", taskID, phase)
 				}
 				if class != wantClass {
