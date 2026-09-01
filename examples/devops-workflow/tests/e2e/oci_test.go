@@ -30,6 +30,26 @@ func ociWorkerCommand(bin string, args ...string) (string, []string) {
 	return bin, args
 }
 
+// ociArtifactRoot creates a temporary directory for the OCI worker's artifact
+// store. The worker runs via sudo, so its files are root-owned; remove them
+// with sudo to avoid TempDir cleanup permission errors that Go's testing
+// framework treats as test failures.
+func ociArtifactRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "oci-artifacts-*")
+	if err != nil {
+		t.Fatalf("create artifact root: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := exec.LookPath("sudo"); err == nil {
+			_ = exec.Command("sudo", "-n", "rm", "-rf", dir).Run()
+		} else {
+			_ = os.RemoveAll(dir)
+		}
+	})
+	return dir
+}
+
 // requireOCIDrillEnvironment validates that the real gVisor/containerd
 // environment is available; skips otherwise.
 func requireOCIDrillEnvironment(t *testing.T) {
@@ -89,7 +109,7 @@ func TestOCIIsolation(t *testing.T) {
 	if _, err := os.Stat(ociWorkerBin); err != nil {
 		t.Skipf("agentos-runtime-oci binary not found at %s (build with: go build ./cmd/agentos-runtime-oci)", ociWorkerBin)
 	}
-	artifactRoot := t.TempDir()
+	artifactRoot := ociArtifactRoot(t)
 	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
@@ -200,7 +220,7 @@ func TestOCITakeover(t *testing.T) {
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
 		"-runtime-instance-id", "oci-worker-1",
-		"-artifact-root", t.TempDir(),
+		"-artifact-root", ociArtifactRoot(t),
 		"-image-ref", ociImageName,
 		"-skip-image-pull",
 		"-dev-mode",

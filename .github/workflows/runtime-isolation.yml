@@ -137,6 +137,12 @@ jobs:
           mkdir -p bin
           go build -o bin/agentos-runtime-oci ./cmd/agentos-runtime-oci
 
+      - name: Smoke-test gVisor container execution
+        run: |
+          sudo ctr -n agentos run --rm --runtime io.containerd.runsc.v1 \
+            docker.io/library/agentos-runtime:latest gvisor-smoke 2>&1
+          echo "gVisor sandbox verified: container executed and exited"
+
       - name: Run OCI/gVisor isolation and takeover drills
         run: |
           go test -tags=integration -count=1 -timeout 30m -v -run 'TestOCIIsolation|TestOCITakeover' ./examples/devops-workflow/tests/e2e/
