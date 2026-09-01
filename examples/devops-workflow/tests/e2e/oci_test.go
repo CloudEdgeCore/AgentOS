@@ -97,6 +97,7 @@ func TestOCIIsolation(t *testing.T) {
 		"-artifact-root", artifactRoot,
 		"-image-ref", ociImageName,
 		"-skip-image-pull",
+		"-dev-mode",
 	)
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
@@ -202,6 +203,7 @@ func TestOCITakeover(t *testing.T) {
 		"-artifact-root", t.TempDir(),
 		"-image-ref", ociImageName,
 		"-skip-image-pull",
+		"-dev-mode",
 	)
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
