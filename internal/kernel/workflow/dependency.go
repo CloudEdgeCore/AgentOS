@@ -24,11 +24,12 @@ type stepTransitioner interface {
 // keep waiting.
 type DependencyResolver struct {
 	workflows stepTransitioner
+	owner string
 }
 
 // NewDependencyResolver builds a DependencyResolver bound to a step store.
-func NewDependencyResolver(workflows stepTransitioner) *DependencyResolver {
-	return &DependencyResolver{workflows: workflows}
+func NewDependencyResolver(workflows stepTransitioner, owner string) *DependencyResolver {
+	return &DependencyResolver{workflows: workflows, owner: owner}
 }
 
 // Resolve evaluates one step's dependencies and condition against the
@@ -106,7 +107,7 @@ func (r *DependencyResolver) Resolve(ctx context.Context, workflow kernelstore.W
 }
 
 func (r *DependencyResolver) skip(ctx context.Context, workflow kernelstore.Workflow, step kernelstore.WorkflowStep, code string) error {
-	_, err := r.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, code))
+	_, err := r.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, code, r.owner))
 	return err
 }
 

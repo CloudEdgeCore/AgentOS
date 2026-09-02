@@ -14,11 +14,12 @@ import (
 // instead of retry-looping against a hard ceiling.
 type RetryController struct {
 	workflows stepTransitioner
+	owner string
 }
 
 // NewRetryController builds a retry gate bound to a step store.
-func NewRetryController(workflows stepTransitioner) *RetryController {
-	return &RetryController{workflows: workflows}
+func NewRetryController(workflows stepTransitioner, owner string) *RetryController {
+	return &RetryController{workflows: workflows, owner: owner}
 }
 
 // HandleFailed reacts to a FAILED step task. It reports whether the step
@@ -39,7 +40,7 @@ func (r *RetryController) HandleFailed(ctx context.Context, workflow kernelstore
 		_, err := r.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepPending,
-			FailureCode: "RETRY_AFTER_TASK_FAILED",
+			FailureCode: "RETRY_AFTER_TASK_FAILED", ExpectedOwner: r.owner,
 		})
 		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
 			return false, nil
@@ -50,7 +51,7 @@ func (r *RetryController) HandleFailed(ctx context.Context, workflow kernelstore
 			_, failErr := r.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 				TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 				ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
-				FailureCode: errorcode.WorkflowBudgetExhausted,
+				FailureCode: errorcode.WorkflowBudgetExhausted, ExpectedOwner: r.owner,
 			})
 			if failErr != nil && !errors.Is(failErr, kernelstore.ErrVersionConflict) {
 				return true, failErr
@@ -62,7 +63,7 @@ func (r *RetryController) HandleFailed(ctx context.Context, workflow kernelstore
 	_, err := r.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 		ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
-		FailureCode: "TASK_FAILED",
+		FailureCode: "TASK_FAILED", ExpectedOwner: r.owner,
 	})
 	if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
 		return false, nil

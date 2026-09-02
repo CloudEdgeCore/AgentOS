@@ -17,12 +17,13 @@ type StepDispatcher struct {
 	tasks     TaskPipeline
 	workflows stepTransitioner
 	newID     func() uuid.UUID
+	owner string
 }
 
 // NewStepDispatcher builds a dispatcher bound to the task pipeline and step
 // store of one controller.
-func NewStepDispatcher(tasks TaskPipeline, workflows stepTransitioner, newID func() uuid.UUID) *StepDispatcher {
-	return &StepDispatcher{tasks: tasks, workflows: workflows, newID: newID}
+func NewStepDispatcher(tasks TaskPipeline, workflows stepTransitioner, newID func() uuid.UUID, owner string) *StepDispatcher {
+	return &StepDispatcher{tasks: tasks, workflows: workflows, newID: newID, owner: owner}
 }
 
 // Dispatch creates the step's task and records the RUNNING transition.
@@ -66,7 +67,7 @@ func (d *StepDispatcher) Dispatch(ctx context.Context, workflow kernelstore.Work
 	_, err = d.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 		ExpectedVersion: step.ResourceVersion, To: kernelstore.StepRunning,
-		TaskID: &taskID, AttemptCount: &nextAttempt,
+		TaskID: &taskID, AttemptCount: &nextAttempt, ExpectedOwner: d.owner,
 	})
 	if err != nil {
 		if errors.Is(err, kernelstore.ErrVersionConflict) {

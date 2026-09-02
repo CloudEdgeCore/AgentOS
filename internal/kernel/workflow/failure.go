@@ -23,12 +23,13 @@ type drainStore interface {
 type FailureDrainer struct {
 	workflows drainStore
 	tasks     TaskPipeline
+	owner     string
 }
 
 // NewFailureDrainer builds a drainer bound to the workflow store and task
 // pipeline of one controller.
-func NewFailureDrainer(workflows drainStore, tasks TaskPipeline) *FailureDrainer {
-	return &FailureDrainer{workflows: workflows, tasks: tasks}
+func NewFailureDrainer(workflows drainStore, tasks TaskPipeline, owner string) *FailureDrainer {
+	return &FailureDrainer{workflows: workflows, tasks: tasks, owner: owner}
 }
 
 // Drain cancels active tasks, skips undispatched steps, and finalizes the
@@ -60,7 +61,7 @@ func (d *FailureDrainer) Drain(ctx context.Context, workflow kernelstore.Workflo
 			}
 			_, err = d.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 				TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-				ExpectedVersion: step.ResourceVersion, To: target, FailureCode: code,
+				ExpectedVersion: step.ResourceVersion, To: target, FailureCode: code, ExpectedOwner: d.owner,
 			})
 			if err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
 				return moved, err
@@ -68,7 +69,7 @@ func (d *FailureDrainer) Drain(ctx context.Context, workflow kernelstore.Workflo
 			moved = true
 			continue
 		}
-		_, err := d.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, failureCode))
+		_, err := d.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, failureCode, d.owner))
 		if err != nil {
 			if errors.Is(err, kernelstore.ErrVersionConflict) {
 				continue
@@ -89,7 +90,7 @@ func (d *FailureDrainer) Drain(ctx context.Context, workflow kernelstore.Workflo
 	if workflow.Status != kernelstore.WorkflowFailed {
 		if _, err := d.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
-			To: kernelstore.WorkflowFailed, FailureCode: failureCode,
+			To: kernelstore.WorkflowFailed, FailureCode: failureCode, ExpectedOwner: d.owner,
 		}); err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
 			return moved, err
 		}
@@ -136,7 +137,7 @@ func (d *FailureDrainer) Cancel(ctx context.Context, workflow kernelstore.Workfl
 			}
 			_, err = d.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 				TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-				ExpectedVersion: step.ResourceVersion, To: target, FailureCode: code,
+				ExpectedVersion: step.ResourceVersion, To: target, FailureCode: code, ExpectedOwner: d.owner,
 			})
 			if err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
 				return moved, err
@@ -144,7 +145,7 @@ func (d *FailureDrainer) Cancel(ctx context.Context, workflow kernelstore.Workfl
 			moved = true
 			continue
 		}
-		_, err := d.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "WORKFLOW_CANCELLED"))
+		_, err := d.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "WORKFLOW_CANCELLED", d.owner))
 		if err != nil {
 			if errors.Is(err, kernelstore.ErrVersionConflict) {
 				continue
@@ -166,7 +167,7 @@ func (d *FailureDrainer) Cancel(ctx context.Context, workflow kernelstore.Workfl
 	if workflow.Status != kernelstore.WorkflowCancelled {
 		if _, err := d.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
-			To: kernelstore.WorkflowCancelled, FailureCode: "WORKFLOW_CANCELLED",
+			To: kernelstore.WorkflowCancelled, FailureCode: "WORKFLOW_CANCELLED", ExpectedOwner: d.owner,
 		}); err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
 			return moved, err
 		}

@@ -15,11 +15,12 @@ const approvalRejected = "rejected"
 // rejected decision as SKIPPED.
 type ApprovalController struct {
 	workflows stepTransitioner
+	owner string
 }
 
 // NewApprovalController builds an approval gate bound to a step store.
-func NewApprovalController(workflows stepTransitioner) *ApprovalController {
-	return &ApprovalController{workflows: workflows}
+func NewApprovalController(workflows stepTransitioner, owner string) *ApprovalController {
+	return &ApprovalController{workflows: workflows, owner: owner}
 }
 
 // Park transitions an undecided pending approval-required step to
@@ -28,7 +29,7 @@ func NewApprovalController(workflows stepTransitioner) *ApprovalController {
 func (a *ApprovalController) Park(ctx context.Context, workflow kernelstore.Workflow, step kernelstore.WorkflowStep) (bool, error) {
 	_, err := a.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-		ExpectedVersion: step.ResourceVersion, To: kernelstore.StepWaitingApproval,
+		ExpectedVersion: step.ResourceVersion, To: kernelstore.StepWaitingApproval, ExpectedOwner: a.owner,
 	})
 	return true, err
 }
@@ -39,6 +40,6 @@ func (a *ApprovalController) Reject(ctx context.Context, workflow kernelstore.Wo
 	if step.ApprovalDecision != approvalRejected {
 		return false, nil
 	}
-	_, err := a.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "APPROVAL_REJECTED"))
+	_, err := a.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "APPROVAL_REJECTED", a.owner))
 	return true, err
 }

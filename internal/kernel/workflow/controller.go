@@ -201,7 +201,18 @@ func (c *Controller) Reconcile(ctx context.Context) (int, error) {
 // multi-controller contention even though CAS prevented double dispatch.
 func isConvergenceConflict(err error) bool {
 	return errors.Is(err, kernelstore.ErrVersionConflict) ||
-		errors.Is(err, kernelstore.ErrRetryableTransaction)
+		errors.Is(err, kernelstore.ErrRetryableTransaction) ||
+		errors.Is(err, kernelstore.ErrFenced)
+}
+
+// claimOwner returns the fencing owner for workflow writes when distributed
+// claiming is enabled; empty otherwise (single-instance mode performs no
+// claim, so the store must not enforce claim ownership).
+func (c *Controller) claimOwner() string {
+	if c.claimLease > 0 {
+		return c.owner
+	}
+	return ""
 }
 
 func (c *Controller) processClaimedWorkflow(ctx context.Context, workflow kernelstore.Workflow) (bool, error) {
@@ -233,6 +244,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		_, failErr := c.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
 			To: kernelstore.WorkflowFailed, FailureCode: "WORKFLOW_SPEC_INVALID",
+			ExpectedOwner: c.claimOwner(),
 		})
 		if failErr != nil {
 			return false, errors.Join(err, failErr)
@@ -240,14 +252,14 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		return true, nil
 	}
 	moved := false
-	drainer := NewFailureDrainer(c.workflows, c.tasks)
+	drainer := NewFailureDrainer(c.workflows, c.tasks, c.claimOwner())
 
 	// PENDING workflows start once their steps exist (creation is atomic,
 	// so this always succeeds on the first reconcile).
 	if workflow.Status == kernelstore.WorkflowPending {
 		updated, err := c.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
-			To: kernelstore.WorkflowRunning,
+			To: kernelstore.WorkflowRunning, ExpectedOwner: c.claimOwner(),
 		})
 		if err != nil {
 			if errors.Is(err, kernelstore.ErrVersionConflict) {
@@ -380,7 +392,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		}
 		if _, err := c.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
-			To: target, FailureCode: code,
+			To: target, FailureCode: code, ExpectedOwner: c.claimOwner(),
 		}); err != nil {
 			if errors.Is(err, kernelstore.ErrVersionConflict) {
 				return moved, nil
@@ -406,7 +418,7 @@ func (c *Controller) advanceStep(ctx context.Context, workflow kernelstore.Workf
 			return false, fmt.Errorf("step %q missing from stored spec", step.Name)
 		}
 		if declared.RequiresApproval {
-			approval := NewApprovalController(c.workflows)
+			approval := NewApprovalController(c.workflows, c.claimOwner())
 			rejected, err := approval.Reject(ctx, workflow, step)
 			if rejected || err != nil {
 				return rejected, err
@@ -424,7 +436,7 @@ func (c *Controller) advanceStep(ctx context.Context, workflow kernelstore.Workf
 // the step's Task.
 func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Workflow, step kernelstore.WorkflowStep, byName map[string]kernelstore.WorkflowStep, spec WorkflowSpec) (bool, error) {
 	declared := declaredStep(spec, step.Name)
-	resolver := NewDependencyResolver(c.workflows)
+	resolver := NewDependencyResolver(c.workflows, c.claimOwner())
 	dependencyOutputs, ready, err := resolver.Resolve(ctx, workflow, step, declared, byName)
 	if err != nil {
 		return true, err
@@ -433,10 +445,10 @@ func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Work
 		return false, nil
 	}
 	if requiresApproval(step, declared) && step.DecidedBy == "" && step.Status == kernelstore.StepPending {
-		approval := NewApprovalController(c.workflows)
+		approval := NewApprovalController(c.workflows, c.claimOwner())
 		return approval.Park(ctx, workflow, step)
 	}
-	dispatcher := NewStepDispatcher(c.tasks, c.workflows, c.newID)
+	dispatcher := NewStepDispatcher(c.tasks, c.workflows, c.newID, c.claimOwner())
 	return dispatcher.Dispatch(ctx, workflow, step, declared, spec.DefaultTaskSpec, dependencyOutputs, byName)
 }
 
@@ -466,7 +478,7 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 				_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 					TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 					ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
-					FailureCode: errorcode.OutputContractViolation,
+					FailureCode: errorcode.OutputContractViolation, ExpectedOwner: c.claimOwner(),
 				})
 				return true, err
 			}
@@ -478,6 +490,7 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepSucceeded, ResultSummary: summary,
+			ExpectedOwner: c.claimOwner(),
 		})
 		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
 			return false, nil
@@ -487,7 +500,7 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepCancelled,
-			FailureCode: "TASK_" + string(task.Phase),
+			FailureCode: "TASK_" + string(task.Phase), ExpectedOwner: c.claimOwner(),
 		})
 		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
 			return false, nil
@@ -500,14 +513,14 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
 			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
-			FailureCode: "TASK_" + string(task.Phase),
+			FailureCode: "TASK_" + string(task.Phase), ExpectedOwner: c.claimOwner(),
 		})
 		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
 			return false, nil
 		}
 		return true, err
 	default: // FAILED
-		retry := NewRetryController(c.workflows)
+		retry := NewRetryController(c.workflows, c.claimOwner())
 		return retry.HandleFailed(ctx, workflow, step, declaredStep(spec, step.Name))
 	}
 }
@@ -648,7 +661,7 @@ func firstNonEmpty(value, fallback string) string {
 	return fallback
 }
 
-func skipStepInput(workflow kernelstore.Workflow, step kernelstore.WorkflowStep, code string) kernelstore.TransitionWorkflowStepInput {
+func skipStepInput(workflow kernelstore.Workflow, step kernelstore.WorkflowStep, code string, owner string) kernelstore.TransitionWorkflowStepInput {
 	return kernelstore.TransitionWorkflowStepInput{
 		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
 		ExpectedVersion: step.ResourceVersion, To: kernelstore.StepSkipped, FailureCode: code,
