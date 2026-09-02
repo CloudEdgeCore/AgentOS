@@ -97,16 +97,15 @@ func (e *directExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Execu
 		_ = os.RemoveAll(bundleDir)
 		_ = os.RemoveAll(inputDir)
 		e.unregister(containerID)
-		return nil, fmt.Errorf("create rootfs mount point: %w", err)
+		return nil, fmt.Errorf("create rootfs directory: %w", err)
 	}
-	if err := e.run(ctx, "images", "mount", spec.ImageRef, rootfsDir); err != nil {
+	if err := e.prepareRootfs(ctx, spec.ImageRef, rootfsDir); err != nil {
 		_ = os.RemoveAll(bundleDir)
 		_ = os.RemoveAll(inputDir)
 		e.unregister(containerID)
-		return nil, fmt.Errorf("mount workload image %s: %w", spec.ImageRef, err)
+		return nil, fmt.Errorf("prepare workload rootfs for %s: %w", spec.ImageRef, err)
 	}
 	if err := writeRunscSpec(filepath.Join(bundleDir, "config.json"), spec, inputPath); err != nil {
-		_ = e.run(ctx, "images", "unmount", spec.ImageRef)
 		_ = os.RemoveAll(bundleDir)
 		_ = os.RemoveAll(inputDir)
 		e.unregister(containerID)
@@ -146,21 +145,60 @@ func (e *directExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Execu
 	return &directExecution{executor: e, containerID: containerID, imageRef: spec.ImageRef, bundleDir: bundleDir, inputDir: inputDir, done: done}, nil
 }
 
-// Destroy deletes the sandbox container and unmounts the image root filesystem.
+// Destroy deletes the sandbox container and cleans up the bundle directory.
 func (e *directExecutor) Destroy(ctx context.Context, execution Execution) error {
 	direct, ok := execution.(*directExecution)
 	if !ok {
 		return fmt.Errorf("execution is not a direct runsc execution")
 	}
-	deleteErr := e.run(ctx, "delete", "-f", direct.containerID)
-	if unmountErr := e.run(ctx, "images", "unmount", direct.imageRef); unmountErr != nil && !notFound(unmountErr) {
-		// The image may have been unmounted by an earlier failure path.
-	}
+	deleteErr := e.runscRun(ctx, "delete", "-force", direct.containerID)
 	_ = os.RemoveAll(direct.bundleDir)
 	_ = os.RemoveAll(direct.inputDir)
 	e.unregister(direct.containerID)
 	if deleteErr != nil && !notFound(deleteErr) {
 		return fmt.Errorf("delete sandbox container: %w", deleteErr)
+	}
+	return nil
+}
+
+// prepareRootfs mounts the pinned image read-only, copies its contents into
+// targetDir, and unmounts the image. The resulting directory is a writable copy
+// that the gofer can use for its filesystem store.
+func (e *directExecutor) prepareRootfs(ctx context.Context, imageRef, targetDir string) error {
+	mountPoint, err := os.MkdirTemp("", "agentos-rootfs-mount-*")
+	if err != nil {
+		return fmt.Errorf("create rootfs mount point: %w", err)
+	}
+	defer os.RemoveAll(mountPoint)
+	if err := e.run(ctx, "images", "mount", imageRef, mountPoint); err != nil {
+		return fmt.Errorf("mount image %s: %w", imageRef, err)
+	}
+	defer func() {
+		_ = e.run(ctx, "images", "unmount", imageRef)
+	}()
+	// Copy the mounted rootfs so the gofer has a writable directory.
+	entries, err := os.ReadDir(mountPoint)
+	if err != nil {
+		return fmt.Errorf("read mounted rootfs: %w", err)
+	}
+	for _, entry := range entries {
+		src := filepath.Join(mountPoint, entry.Name())
+		dst := filepath.Join(targetDir, entry.Name())
+		if err := exec.Command("cp", "-a", src, dst).Run(); err != nil {
+			return fmt.Errorf("copy rootfs entry %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+// runscRun executes one runsc command with bounded captured output.
+func (e *directExecutor) runscRun(ctx context.Context, args ...string) error {
+	command := exec.CommandContext(ctx, e.runscPath, append([]string{"--root", e.rootDir}, args...)...)
+	var output limitedBuffer
+	output.max = e.outputLimit
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("runsc %s: %w (output: %s)", strings.Join(args, " "), err, strings.TrimSpace(output.String()))
 	}
 	return nil
 }
@@ -195,7 +233,7 @@ func (e *directExecutor) reapOrphans(ctx context.Context) error {
 		return fmt.Errorf("runsc list: %w", err)
 	}
 	for _, id := range reapTargets(strings.Fields(strings.TrimSpace(output.String())), e.activeSnapshot()) {
-		_ = e.run(ctx, "delete", "-f", id)
+		_ = e.runscRun(ctx, "delete", "-force", id)
 	}
 	return nil
 }
@@ -245,7 +283,7 @@ func (e *directExecution) Wait(ctx context.Context) (RunResult, error) {
 	case <-ctx.Done():
 		killCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = e.executor.run(killCtx, "delete", "-f", e.containerID)
+		_ = e.executor.runscRun(killCtx, "delete", "-force", e.containerID)
 		select {
 		case outcome := <-e.done:
 			return outcome.result, outcome.err
@@ -270,7 +308,8 @@ func directEnvironment(spec ExecutionSpec, inputPath string) []string {
 // writeRunscSpec writes a fail-closed OCI bundle spec: a read-only root
 // filesystem, no Linux capabilities, no-new-privileges, the workload spec
 // bind-mounted read-only, a size-bounded tmpfs workspace, and explicit CPU and
-// memory resources.
+// memory resources. The structure mirrors the spec containerd generates for the
+// runsc runtime so the gVisor sandbox boots without the containerd shim.
 func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
@@ -278,6 +317,8 @@ func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
 		{"destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
 		{"destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
 		{"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue", "options": []string{"nosuid", "noexec", "nodev"}},
+		{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": []string{"nosuid", "noexec", "nodev", "ro"}},
+		{"destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 		{"destination": "/agentos/input/workload.json", "type": "bind", "source": inputPath, "options": []string{"rbind", "ro"}},
 	}
 	if spec.WorkspaceBytes > 0 {
@@ -286,7 +327,19 @@ func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
 			"options": []string{"nosuid", "noexec", "nodev", fmt.Sprintf("size=%d", spec.WorkspaceBytes)},
 		})
 	}
-	resources := map[string]any{}
+	resources := map[string]any{
+		"devices": []map[string]any{
+			{"allow": false, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 1, "minor": 8, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 1, "minor": 7, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 5, "minor": 0, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 1, "minor": 9, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 5, "minor": 1, "access": "rwm"},
+			{"allow": true, "type": "c", "major": 136, "access": "rwm"},
+		},
+	}
 	if spec.CPUQuotaMillis > 0 {
 		resources["cpu"] = map[string]any{"quota": spec.CPUQuotaMillis * 1000, "period": 100000}
 	}
@@ -297,14 +350,23 @@ func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
 	if len(args) == 0 {
 		args = []string{"/bin/sh"}
 	}
+	emptyCaps := []string{}
 	document := map[string]any{
 		"ociVersion": "1.0.0",
 		"process": map[string]any{
-			"user":            map[string]any{"uid": 0, "gid": 0},
+			"user": map[string]any{
+				"uid": 0, "gid": 0,
+				"additionalGids": []int{0, 1, 2, 3, 4, 6, 10, 11, 20, 26, 27},
+			},
 			"args":            args,
 			"env":             directEnvironment(spec, "/agentos/input/workload.json"),
 			"cwd":             "/",
 			"noNewPrivileges": true,
+			"capabilities": map[string]any{
+				"bounding": emptyCaps, "effective": emptyCaps,
+				"permitted": emptyCaps, "inheritable": emptyCaps, "ambient": emptyCaps,
+			},
+			"rlimits": []map[string]any{{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 1024}},
 		},
 		"root":     map[string]any{"path": "rootfs", "readonly": true},
 		"hostname": "agentos",
@@ -317,6 +379,15 @@ func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
 				{"type": "ipc"},
 				{"type": "uts"},
 				{"type": "mount"},
+			},
+			"cgroupsPath": "/agentos",
+			"maskedPaths": []string{
+				"/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys",
+				"/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
+				"/proc/sched_debug", "/proc/scsi", "/sys/firmware",
+			},
+			"readonlyPaths": []string{
+				"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger",
 			},
 		},
 	}
