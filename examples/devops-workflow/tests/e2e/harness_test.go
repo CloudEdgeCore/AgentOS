@@ -215,7 +215,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	if err != nil {
 		t.Fatalf("parse url: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ", public"
 	config.MaxConns = 24
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
