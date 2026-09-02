@@ -145,4 +145,4 @@ jobs:
 
       - name: Run OCI/gVisor isolation and takeover drills
         run: |
-          go test -tags=integration -count=1 -timeout 30m -v -run 'TestOCIIsolation|TestOCITakeover' ./examples/devops-workflow/tests/e2e/
+          go test -tags=integration -count=1 -timeout 30m -v -run 'TestOCIIsolation|TestOCICrossClassPlacement' ./examples/devops-workflow/tests/e2e/
