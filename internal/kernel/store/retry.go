@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"time"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/agentmetrics"
 )
 
 // RetryRetryable runs fn, retrying transient transaction conflicts with
@@ -14,6 +16,10 @@ func RetryRetryable(ctx context.Context, fn func() (int, error)) (int, error) {
 		processed, err := fn()
 		if err == nil || !IsRetryableTransaction(err) {
 			return processed, err
+		}
+		agentmetrics.DBTransactionConflict(ctx)
+		if attempt < 3 {
+			agentmetrics.DBTransactionRetry(ctx)
 		}
 		lastErr = err
 		delay := time.Duration(1<<attempt) * 5 * time.Millisecond

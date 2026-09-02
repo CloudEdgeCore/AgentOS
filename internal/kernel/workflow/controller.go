@@ -121,6 +121,10 @@ func (c *Controller) WithMaxInFlightSteps(limit int) *Controller {
 // reconciles everything visible. Retryable transaction
 // conflicts are retried with bounded backoff (ADR-002).
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
+	start := time.Now()
+	defer func() {
+		agentmetrics.OrchestratorReconcileDuration(ctx, float64(time.Since(start).Milliseconds()))
+	}()
 	claims := NewClaimManager(c.workflows, c.owner, c.batch, c.claimLease, c.claimTokenBudget)
 	active, err := claims.Claim(ctx)
 	if err != nil {

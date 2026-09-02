@@ -14,15 +14,21 @@ import (
 
 var instruments struct {
 	sync.Once
-	schedulerClaims   metric.Int64Counter
-	schedulerOutcomes metric.Int64Counter
-	workflowClaims    metric.Int64Counter
-	workflowOutcomes  metric.Int64Counter
-	spawnOutcomes     metric.Int64Counter
-	budgetEvents      metric.Int64Counter
-	accountingDrift   metric.Int64Counter
-	queueDepth        metric.Int64Histogram
-	firstTokenLatency metric.Float64Histogram
+	schedulerClaims         metric.Int64Counter
+	schedulerOutcomes       metric.Int64Counter
+	workflowClaims          metric.Int64Counter
+	workflowOutcomes        metric.Int64Counter
+	spawnOutcomes           metric.Int64Counter
+	budgetEvents            metric.Int64Counter
+	accountingDrift         metric.Int64Counter
+	queueDepth              metric.Int64Histogram
+	firstTokenLatency       metric.Float64Histogram
+	reconcileDuration       metric.Float64Histogram
+	schedulerDeferrals      metric.Int64Counter
+	leaseExpirations        metric.Int64Counter
+	runtimeTakeovers        metric.Int64Counter
+	dbTransactionRetries    metric.Int64Counter
+	dbTransactionConflicts  metric.Int64Counter
 }
 
 func initInstruments() {
@@ -39,6 +45,19 @@ func initInstruments() {
 		instruments.firstTokenLatency, _ = meter.Float64Histogram("agentos.model.first_token_latency_ms",
 			metric.WithUnit("ms"),
 			metric.WithDescription("model streaming time-to-first-token, measured at the kernel invoker"))
+		instruments.reconcileDuration, _ = meter.Float64Histogram("agentos.orchestrator.reconcile.duration",
+			metric.WithUnit("ms"),
+			metric.WithDescription("duration of one workflow orchestrator reconcile round"))
+		instruments.schedulerDeferrals, _ = meter.Int64Counter("agentos.scheduler.deferral.total",
+			metric.WithDescription("scheduler deferrals due to capacity or lease contention"))
+		instruments.leaseExpirations, _ = meter.Int64Counter("agentos.lease.expiration.total",
+			metric.WithDescription("runtime leases observed expired by the recovery controller"))
+		instruments.runtimeTakeovers, _ = meter.Int64Counter("agentos.runtime.takeover.total",
+			metric.WithDescription("expired attempts successfully recovered onto a new run"))
+		instruments.dbTransactionRetries, _ = meter.Int64Counter("agentos.db.transaction.retry.total",
+			metric.WithDescription("retryable database transactions retried by the store"))
+		instruments.dbTransactionConflicts, _ = meter.Int64Counter("agentos.db.transaction.conflict.total",
+			metric.WithDescription("database transactions that aborted on serialization/version conflict"))
 	})
 }
 
@@ -92,4 +111,47 @@ func QueueDepth(ctx context.Context, queue string, depth int64) {
 func ModelFirstTokenLatency(ctx context.Context, provider string, ms float64) {
 	initInstruments()
 	instruments.firstTokenLatency.Record(ctx, ms, metric.WithAttributes(attribute.String("provider", provider)))
+}
+
+// OrchestratorReconcileDuration records the wall-clock time of one workflow
+// orchestrate round in milliseconds.
+func OrchestratorReconcileDuration(ctx context.Context, ms float64) {
+	initInstruments()
+	instruments.reconcileDuration.Record(ctx, ms)
+}
+
+// SchedulerDeferral increments the total number of scheduler deferrals caused
+// by capacity exhaustion, lease contention, or other transient placement
+// failures.
+func SchedulerDeferral(ctx context.Context) {
+	initInstruments()
+	instruments.schedulerDeferrals.Add(ctx, 1)
+}
+
+// LeaseExpiration increments the total number of runtime lease expirations
+// observed by the recovery controller.
+func LeaseExpiration(ctx context.Context) {
+	initInstruments()
+	instruments.leaseExpirations.Add(ctx, 1)
+}
+
+// RuntimeTakeover increments the total number of expired attempts that the
+// recovery controller successfully recovered onto a new run.
+func RuntimeTakeover(ctx context.Context) {
+	initInstruments()
+	instruments.runtimeTakeovers.Add(ctx, 1)
+}
+
+// DBTransactionRetry increments the total number of retryable database
+// transactions that were retried by the store layer.
+func DBTransactionRetry(ctx context.Context) {
+	initInstruments()
+	instruments.dbTransactionRetries.Add(ctx, 1)
+}
+
+// DBTransactionConflict increments the total number of database transactions
+// that aborted on serialization or version conflict.
+func DBTransactionConflict(ctx context.Context) {
+	initInstruments()
+	instruments.dbTransactionConflicts.Add(ctx, 1)
 }
