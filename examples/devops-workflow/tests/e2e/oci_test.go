@@ -119,6 +119,12 @@ func TestOCIIsolation(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
+	// When the containerd shim path is unavailable (e.g. WSL2), the
+	// environment variable AGENTOS_RUNSC_DIRECT switches to the direct runsc
+	// executor which bypasses containerd.
+	if os.Getenv("AGENTOS_RUNSC_DIRECT") == "1" {
+		workerArgs = append(workerArgs, "-runsc-direct", "-runsc-platform", "kvm")
+	}
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
@@ -225,6 +231,9 @@ func TestOCITakeover(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
+	if os.Getenv("AGENTOS_RUNSC_DIRECT") == "1" {
+		workerArgs = append(workerArgs, "-runsc-direct", "-runsc-platform", "kvm")
+	}
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
