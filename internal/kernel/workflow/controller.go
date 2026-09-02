@@ -43,10 +43,6 @@ type ResultReader interface {
 	Open(context.Context, string, kernelstore.ArtifactReference) (io.ReadCloser, error)
 }
 
-type workflowClaimRenewer interface {
-	RenewWorkflowClaim(context.Context, string, uuid.UUID, string, time.Duration) error
-}
-
 // Controller reconciles active workflows.
 type Controller struct {
 	workflows kernelstore.WorkflowStore
@@ -126,17 +122,8 @@ func (c *Controller) WithMaxInFlightSteps(limit int) *Controller {
 // reconciles everything visible. Retryable transaction
 // conflicts are retried with bounded backoff (ADR-002).
 func (c *Controller) Reconcile(ctx context.Context) (int, error) {
-	var (
-		active []kernelstore.Workflow
-		err    error
-	)
-	if c.claimLease > 0 {
-		active, err = c.workflows.ClaimWorkflows(ctx, kernelstore.ClaimWorkflowsInput{
-			Owner: c.owner, Batch: c.batch, Lease: c.claimLease, MaxTokens: c.claimTokenBudget,
-		})
-	} else {
-		active, err = c.workflows.ListActiveWorkflows(ctx, c.batch)
-	}
+	claims := NewClaimManager(c.workflows, c.owner, c.batch, c.claimLease, c.claimTokenBudget)
+	active, err := claims.Claim(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -219,43 +206,10 @@ func (c *Controller) processClaimedWorkflow(ctx context.Context, workflow kernel
 	if !ok || c.claimLease <= 0 {
 		return c.processWorkflow(ctx, workflow)
 	}
-	workCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	renewErr := make(chan error, 1)
-	interval := c.claimLease / 3
-	if interval < 100*time.Millisecond {
-		interval = 100 * time.Millisecond
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-workCtx.Done():
-				return
-			case <-ticker.C:
-				if err := renewer.RenewWorkflowClaim(workCtx, workflow.TenantID, workflow.ID, c.owner, c.claimLease); err != nil {
-					select {
-					case renewErr <- err:
-					default:
-					}
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	processed, err := c.processWorkflow(workCtx, workflow)
-	cancel()
-	select {
-	case claimErr := <-renewErr:
-		if err != nil {
-			return processed, errors.Join(err, claimErr)
-		}
-		return processed, fmt.Errorf("renew workflow claim: %w", claimErr)
-	default:
-		return processed, err
-	}
+	lease := NewLeaseManager(renewer, c.owner, c.claimLease)
+	return lease.GuardedProcess(ctx, workflow, func(workCtx context.Context) (bool, error) {
+		return c.processWorkflow(workCtx, workflow)
+	})
 }
 
 // processWorkflow advances one workflow; it reports whether state moved.
