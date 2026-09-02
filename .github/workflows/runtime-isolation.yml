@@ -131,6 +131,10 @@ jobs:
           # arg as a filter (which chokes on the / in the reference), so
           # list and match instead.
           sudo ctr -n agentos images ls -q | grep -xF docker.io/library/agentos-runtime:latest
+          # The real-takeover drill runs a long-lived workload inside an
+          # alpine image (the OCI worker starts with -skip-image-pull), so it
+          # must be preloaded into containerd as well.
+          sudo ctr -n agentos images pull docker.io/library/alpine:latest
 
       - name: Build OCI worker
         run: |
@@ -145,4 +149,4 @@ jobs:
 
       - name: Run OCI/gVisor isolation and takeover drills
         run: |
-          go test -tags=integration -count=1 -timeout 30m -v -run 'TestOCIIsolation|TestOCICrossClassPlacement' ./examples/devops-workflow/tests/e2e/
+          go test -tags=integration -count=1 -timeout 30m -v -run 'TestOCIIsolation|TestOCICrossClassPlacement|TestOCIRealTakeover' ./examples/devops-workflow/tests/e2e/
