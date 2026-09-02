@@ -236,6 +236,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		return true, nil
 	}
 	moved := false
+	drainer := NewFailureDrainer(c.workflows, c.tasks)
 
 	// PENDING workflows start once their steps exist (creation is atomic,
 	// so this always succeeds on the first reconcile).
@@ -257,7 +258,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 	// Cancellation propagation: durable intent first, then drain active
 	// steps and finalize.
 	if workflow.CancelRequestedAt != nil {
-		done, err := c.cancelWorkflow(ctx, workflow, steps)
+		done, err := drainer.Cancel(ctx, workflow, steps)
 		if err != nil {
 			return moved, err
 		}
@@ -276,7 +277,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 		return true, nil
 	}
 	if workflow.DeadlineExceededAt != nil {
-		done, err := c.drainFailedWorkflow(ctx, workflow, steps, errorcode.WorkflowDeadlineExceeded)
+		done, err := drainer.Drain(ctx, workflow, steps, errorcode.WorkflowDeadlineExceeded)
 		if err != nil {
 			return moved, err
 		}
@@ -293,7 +294,7 @@ func (c *Controller) processWorkflow(ctx context.Context, workflow kernelstore.W
 			return true, nil
 		}
 	} else {
-		done, err := c.drainBudgetExhausted(ctx, workflow, steps)
+		done, err := drainer.DrainBudgetExhausted(ctx, workflow, steps)
 		if err != nil {
 			return moved, err
 		}
@@ -400,9 +401,12 @@ func (c *Controller) advanceStep(ctx context.Context, workflow kernelstore.Workf
 		if declared == nil {
 			return false, fmt.Errorf("step %q missing from stored spec", step.Name)
 		}
-		if declared.RequiresApproval && step.ApprovalDecision == approvalRejected {
-			_, err := c.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "APPROVAL_REJECTED"))
-			return true, err
+		if declared.RequiresApproval {
+			approval := NewApprovalController(c.workflows)
+			rejected, err := approval.Reject(ctx, workflow, step)
+			if rejected || err != nil {
+				return rejected, err
+			}
 		}
 		return c.dispatchStep(ctx, workflow, step, byName, spec)
 	case kernelstore.StepRunning:
@@ -411,8 +415,6 @@ func (c *Controller) advanceStep(ctx context.Context, workflow kernelstore.Workf
 		return false, nil
 	}
 }
-
-const approvalRejected = "rejected"
 
 // dispatchStep checks dependencies, conditions and approval, then creates
 // the step's Task.
@@ -427,60 +429,11 @@ func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Work
 		return false, nil
 	}
 	if requiresApproval(step, declared) && step.DecidedBy == "" && step.Status == kernelstore.StepPending {
-		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepWaitingApproval,
-		})
-		return true, err
+		approval := NewApprovalController(c.workflows)
+		return approval.Park(ctx, workflow, step)
 	}
-
-	// The stored spec is the raw document; re-apply the default/overlay
-	// merge exactly as publication validation did. Dynamic steps carry
-	// their merged spec inline (spawned through the broker, after the
-	// same merge).
-	var (
-		agentVersionRef string
-		goal            string
-		mergedSpec      json.RawMessage
-	)
-	if step.IsDynamic {
-		agentVersionRef, goal, mergedSpec = step.AgentVersionRef, step.Goal, step.Spec
-	} else {
-		var err error
-		mergedSpec, err = mergeSpecs(objectMap(spec.DefaultTaskSpec), objectMap(declared.Spec))
-		if err != nil {
-			return false, fmt.Errorf("step %q task spec: %w", step.Name, err)
-		}
-		agentVersionRef, goal = declared.AgentVersionRef, declared.Goal
-	}
-
-	// Idempotent per (workflow, step, attempt): racing orchestrators create
-	// exactly one Task.
-	attempt := step.AttemptCount + 1
-	created, err := c.tasks.CreateTask(ctx, kernelstore.CreateTaskInput{
-		ID: c.newID(), TenantID: workflow.TenantID, Namespace: workflow.Namespace,
-		AgentVersionRef: agentVersionRef, Goal: renderGoal(goal, dependencyOutputs),
-		Spec: mergedSpec, IdempotencyKey: fmt.Sprintf("workflow/%s/%s/%d", workflow.ID, step.Name, attempt),
-		WorkflowID: &workflow.ID, WorkflowStepID: &step.ID, WorkflowStepName: step.Name,
-		WorkflowAttempt: attempt, ParentTaskID: parentTaskID(step, byName),
-	})
-	if err != nil {
-		return false, fmt.Errorf("create task for step %q: %w", step.Name, err)
-	}
-	taskID := created.Task.ID
-	nextAttempt := attempt
-	_, err = c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-		TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-		ExpectedVersion: step.ResourceVersion, To: kernelstore.StepRunning,
-		TaskID: &taskID, AttemptCount: &nextAttempt,
-	})
-	if err != nil {
-		if errors.Is(err, kernelstore.ErrVersionConflict) {
-			return false, nil // a concurrent instance dispatched it
-		}
-		return false, err
-	}
-	return true, nil
+	dispatcher := NewStepDispatcher(c.tasks, c.workflows, c.newID)
+	return dispatcher.Dispatch(ctx, workflow, step, declared, spec.DefaultTaskSpec, dependencyOutputs, byName)
 }
 
 // observeStep reacts to the step task's terminal phase: extract the result,
@@ -550,49 +503,8 @@ func (c *Controller) observeStep(ctx context.Context, workflow kernelstore.Workf
 		}
 		return true, err
 	default: // FAILED
-		maxAttempts := 1
-		if step.IsDynamic {
-			maxAttempts = step.MaxAttempts
-			if maxAttempts <= 0 {
-				maxAttempts = 1
-			}
-		} else if declared := declaredStep(spec, step.Name); declared != nil && declared.Retry != nil {
-			maxAttempts = declared.Retry.MaxAttempts
-		}
-		if step.AttemptCount < maxAttempts {
-			// Single-step retry: back to PENDING; completed siblings stay.
-			_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-				TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-				ExpectedVersion: step.ResourceVersion, To: kernelstore.StepPending,
-				FailureCode: "RETRY_AFTER_TASK_FAILED",
-			})
-			if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
-				return false, nil
-			}
-			if code, denied := kernelstore.DenialCode(err); denied && code == errorcode.SpawnBudgetExhausted {
-				// The retry's reservation exceeds the workflow budget: fail
-				// the step instead of retry-looping against a hard ceiling.
-				_, failErr := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-					TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-					ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
-					FailureCode: errorcode.WorkflowBudgetExhausted,
-				})
-				if failErr != nil && !errors.Is(failErr, kernelstore.ErrVersionConflict) {
-					return true, failErr
-				}
-				return true, nil
-			}
-			return true, err
-		}
-		_, err := c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-			TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-			ExpectedVersion: step.ResourceVersion, To: kernelstore.StepFailed,
-			FailureCode: "TASK_FAILED",
-		})
-		if err != nil && errors.Is(err, kernelstore.ErrVersionConflict) {
-			return false, nil
-		}
-		return true, err
+		retry := NewRetryController(c.workflows)
+		return retry.HandleFailed(ctx, workflow, step, declaredStep(spec, step.Name))
 	}
 }
 
@@ -622,154 +534,6 @@ func (c *Controller) checkBudget(ctx context.Context, workflow kernelstore.Workf
 	return true
 }
 
-// drainBudgetExhausted drains a budget-stopped workflow: running step tasks
-// are cancelled, undispatched steps are skipped, and the workflow finalizes
-// FAILED (WORKFLOW_BUDGET_EXHAUSTED) once nothing is running. A step that
-// already succeeded keeps its result.
-func (c *Controller) drainBudgetExhausted(ctx context.Context, workflow kernelstore.Workflow, steps []kernelstore.WorkflowStep) (bool, error) {
-	return c.drainFailedWorkflow(ctx, workflow, steps, errorcode.WorkflowBudgetExhausted)
-}
-
-// drainFailedWorkflow cancels active tasks, skips undispatched steps, and
-// finalizes a workflow with a durable failure reason.
-func (c *Controller) drainFailedWorkflow(ctx context.Context, workflow kernelstore.Workflow, steps []kernelstore.WorkflowStep, failureCode string) (bool, error) {
-	moved := false
-	for _, step := range steps {
-		if step.Status.Terminal() {
-			continue
-		}
-		if step.Status == kernelstore.StepRunning && step.TaskID != nil {
-			task, err := c.tasks.GetTask(ctx, workflow.TenantID, *step.TaskID)
-			if err != nil {
-				return moved, err
-			}
-			if !task.Phase.Terminal() {
-				if _, err := c.tasks.RequestTaskCancellation(ctx, workflow.TenantID, task.ID, task.ResourceVersion); err != nil {
-					if errors.Is(err, kernelstore.ErrVersionConflict) {
-						continue
-					}
-					return moved, err
-				}
-				moved = true
-				continue
-			}
-			target, code := kernelstore.StepCancelled, failureCode
-			if task.Phase == "SUCCEEDED" {
-				target, code = kernelstore.StepSucceeded, ""
-			}
-			_, err = c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-				TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-				ExpectedVersion: step.ResourceVersion, To: target, FailureCode: code,
-			})
-			if err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
-				return moved, err
-			}
-			moved = true
-			continue
-		}
-		_, err := c.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, failureCode))
-		if err != nil {
-			if errors.Is(err, kernelstore.ErrVersionConflict) {
-				continue
-			}
-			return moved, err
-		}
-		moved = true
-	}
-	current, err := c.workflows.ListWorkflowSteps(ctx, workflow.TenantID, workflow.ID)
-	if err != nil {
-		return moved, err
-	}
-	for _, step := range current {
-		if !step.Status.Terminal() {
-			return moved, nil
-		}
-	}
-	if workflow.Status != kernelstore.WorkflowFailed {
-		if _, err := c.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
-			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
-			To: kernelstore.WorkflowFailed, FailureCode: failureCode,
-		}); err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
-			return moved, err
-		}
-		return true, nil
-	}
-	return moved, nil
-}
-
-// cancelWorkflow propagates the durable cancel intent: active step tasks
-// are cancelled through the kernel, undischarged steps are skipped, and the
-// workflow finalizes CANCELLED once nothing is running.
-func (c *Controller) cancelWorkflow(ctx context.Context, workflow kernelstore.Workflow, steps []kernelstore.WorkflowStep) (bool, error) {
-	moved := false
-	for _, step := range steps {
-		if step.Status.Terminal() {
-			continue
-		}
-		if step.Status == kernelstore.StepRunning && step.TaskID != nil {
-			task, err := c.tasks.GetTask(ctx, workflow.TenantID, *step.TaskID)
-			if err != nil {
-				return moved, err
-			}
-			if !task.Phase.Terminal() {
-				if _, err := c.tasks.RequestTaskCancellation(ctx, workflow.TenantID, task.ID, task.ResourceVersion); err != nil {
-					if errors.Is(err, kernelstore.ErrVersionConflict) {
-						continue // already moving; next round observes it
-					}
-					return moved, err
-				}
-				moved = true
-				continue
-			}
-			// The task reached a terminal phase during cancellation: record
-			// the observed outcome (success stays success).
-			target, code := kernelstore.StepCancelled, "WORKFLOW_CANCELLED"
-			if task.Phase == "SUCCEEDED" {
-				target, code = kernelstore.StepSucceeded, ""
-			}
-			_, err = c.workflows.TransitionWorkflowStep(ctx, kernelstore.TransitionWorkflowStepInput{
-				TenantID: workflow.TenantID, WorkflowID: workflow.ID, StepName: step.Name,
-				ExpectedVersion: step.ResourceVersion, To: target, FailureCode: code,
-			})
-			if err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
-				return moved, err
-			}
-			moved = true
-			continue
-		}
-		_, err := c.workflows.TransitionWorkflowStep(ctx, skipStepInput(workflow, step, "WORKFLOW_CANCELLED"))
-		if err != nil {
-			if errors.Is(err, kernelstore.ErrVersionConflict) {
-				continue
-			}
-			return moved, err
-		}
-		moved = true
-	}
-	// Finalize when the drain finished.
-	steps, err := c.workflows.ListWorkflowSteps(ctx, workflow.TenantID, workflow.ID)
-	if err != nil {
-		return moved, err
-	}
-	for _, step := range steps {
-		if !step.Status.Terminal() {
-			return moved, nil
-		}
-	}
-	if workflow.Status != kernelstore.WorkflowCancelled {
-		if _, err := c.workflows.TransitionWorkflow(ctx, kernelstore.TransitionWorkflowInput{
-			TenantID: workflow.TenantID, WorkflowID: workflow.ID, ExpectedVersion: workflow.ResourceVersion,
-			To: kernelstore.WorkflowCancelled, FailureCode: "WORKFLOW_CANCELLED",
-		}); err != nil && !errors.Is(err, kernelstore.ErrVersionConflict) {
-			return moved, err
-		}
-		return true, nil
-	}
-	return moved, nil
-}
-
-// extractResult reads the task result artifact and stores a bounded output
-// summary for conditions and downstream goals.
 func (c *Controller) extractResult(ctx context.Context, tenantID string, task kernelstore.Task, contract *StepOutputContract) (json.RawMessage, error) {
 	if task.ResultRef == "" {
 		return nil, fmt.Errorf("succeeded task has no result artifact")
