@@ -76,12 +76,12 @@ func main() {
 	if *skipImagePull {
 		options = append(options, oci.WithSkipPull())
 	}
-var executor oci.Executor
-		if *directMode {
-			executor, err = oci.NewRunscDirectExecutor(oci.WithRunscPlatform(*runscPlatform))
-		} else {
-			executor, err = oci.NewRunscExecutor(options...)
-		}
+	var executor oci.Executor
+	if *directMode {
+		executor, err = oci.NewRunscDirectExecutor(oci.WithRunscPlatform(*runscPlatform))
+	} else {
+		executor, err = oci.NewRunscExecutor(options...)
+	}
 	if err != nil {
 		slog.Error("create OCI/gVisor executor", "error", err)
 		os.Exit(1)
