@@ -150,6 +150,34 @@ type Executor interface {
 // runsc_linux.go.
 type RunscOption func(*ctrExecutor)
 
+// DirectRunscOption configures the direct runsc executor. It is declared here
+// so the non-Linux stub can reference it; the concrete constructor lives in
+// direct_linux.go.
+type DirectRunscOption func(*directExecutor)
+
+// directExecutor runs workloads directly through the runsc CLI with an OCI
+// bundle, bypassing the containerd shim. The struct is declared here
+// (platform-neutral fields) so the non-Linux stub can name the type; its
+// constructor and methods are Linux-only and live in direct_linux.go.
+type directExecutor struct {
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	ctrPath string
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	namespace string
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	runscPath string
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	platform string
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	rootDir string
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	outputLimit int64
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	mu sync.Mutex
+	//lint:ignore U1000 Used by the Linux implementation in direct_linux.go.
+	active map[string]struct{}
+}
+
 // ctrExecutor is the containerd CLI + runsc executor. The struct is declared
 // here (platform-neutral fields) so the non-Linux stub can name the type; its
 // constructor and methods are Linux-only and live in runsc_linux.go.
@@ -203,6 +231,22 @@ func WithSnapshotter(snapshotter string) RunscOption {
 // containerd only).
 func WithSkipPull() RunscOption {
 	return func(e *ctrExecutor) { e.skipPull = true }
+}
+
+// WithRunscBinary sets the runsc binary path (default "runsc" resolved on PATH).
+func WithRunscBinary(path string) DirectRunscOption {
+	return func(e *directExecutor) { e.runscPath = path }
+}
+
+// WithRunscPlatform sets the runsc platform (default "kvm").
+func WithRunscPlatform(platform string) DirectRunscOption {
+	return func(e *directExecutor) { e.platform = platform }
+}
+
+// WithRunscRoot sets the runsc state root directory (default
+// "/run/containerd/runsc/agentos").
+func WithRunscRoot(root string) DirectRunscOption {
+	return func(e *directExecutor) { e.rootDir = root }
 }
 
 // ExecutionSpecLimits returns the resource limits encoded in an ExecutionSpec

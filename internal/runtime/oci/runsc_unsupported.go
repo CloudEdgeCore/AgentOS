@@ -15,3 +15,10 @@ func NewRunscExecutor(_ ...RunscOption) (Executor, error) {
 	return nil, fmt.Errorf("OCI/gVisor provider requires Linux with containerd and runsc; current platform is %s/%s",
 		runtime.GOOS, runtime.GOARCH)
 }
+
+// NewRunscDirectExecutor exists on non-Linux platforms so the package still
+// compiles, but the direct runsc provider is Linux-only.
+func NewRunscDirectExecutor(_ ...DirectRunscOption) (Executor, error) {
+	return nil, fmt.Errorf("OCI/gVisor provider requires Linux with runsc; current platform is %s/%s",
+		runtime.GOOS, runtime.GOARCH)
+}
