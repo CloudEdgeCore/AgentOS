@@ -63,7 +63,10 @@ func TestCrossControllerKindIsolation(t *testing.T) {
 		t.Fatalf("exactly one admission claim expected, got %d", admissionClaims)
 	}
 
-	// Phase B: admit the task, then race four Scheduling controllers for the
+	// Phase B: advance past the Phase A claim TTL, then admit the task.
+clock.Advance(31 * time.Second)
+
+// Phase C: admit the task, then race four Scheduling controllers for the
 	// same task — only one scheduling claim should win.
 	admitClaims, err := repository.ClaimTasks(ctx, kernelstore.ClaimTasksInput{
 		Kind: kernelstore.ControllerAdmission, Phase: domain.TaskQueued,
@@ -102,7 +105,7 @@ func TestCrossControllerKindIsolation(t *testing.T) {
 		t.Fatalf("exactly one scheduling claim expected, got %d", schedulingClaims)
 	}
 
-	// Phase C: schedule the task and create a live runtime lease, then verify
+	// Phase D: schedule the task and create a live runtime lease, then verify
 	// the recovery controller cannot recover it while the lease is live.
 	assignment := scheduleRuntimeTask(t, ctx, repository, "cross-ctrl-schedule", 2)
 	clock.Advance(5 * time.Second)
@@ -114,7 +117,7 @@ func TestCrossControllerKindIsolation(t *testing.T) {
 		t.Fatalf("expected 0 expired attempts (lease live), got %d", len(expired))
 	}
 
-	// Phase D: after the runtime lease expires, the same attempt becomes a
+	// Phase E: after the runtime lease expires, the same attempt becomes a
 	// recovery candidate for takeover.
 	clock.Advance(5 * time.Minute)
 	expired, err = repository.ListExpiredAttempts(ctx, clock.Now(), 10)
