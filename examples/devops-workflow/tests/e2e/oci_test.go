@@ -5,15 +5,19 @@ package devops_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	kernelstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ociImageName is the containerd image name the OCI drill runs. The CI job
@@ -324,6 +328,272 @@ func TestOCICrossClassPlacement(t *testing.T) {
 	task3 := createDualTask("oci placement: restored", "oci-placement/restored")
 	_, class3, instance3 := awaitClass(task3, "oci")
 	t.Logf("restored placement: %s on %s (oci/gVisor)", class3, instance3)
+}
+
+// TestOCIRealTakeover proves true mid-flight takeover: a long-running workload
+// (sleep 30) is placed on the OCI/gVisor pool, the worker is killed mid-run,
+// the lease lapses, and another runtime reclaims and completes the task.
+// This is the production recovery scenario the pre-cordon placement test cannot
+// cover.
+func TestOCIRealTakeover(t *testing.T) {
+	requireOCIDrillEnvironment(t)
+	h := newHarness(t, "oci-takeover-real", false)
+	ctx := context.Background()
+
+	// Dual-class agent: oci (container) + network (adapter).
+	dualSpec, _ := json.Marshal(map[string]any{
+		"runtimeClassPolicy": map[string]any{
+			"allowed": []string{"oci", "research-network"}, "preferred": "oci",
+		},
+		"lifecycle": map[string]any{"maxAttempts": 3},
+		"runtimes": []any{
+			map[string]any{"class": "oci", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.oci/v1", "entrypoint": []string{"oci://agent-runtime"}},
+			map[string]any{"class": "research-network", "interface": "agentos.runtime.interface/v1", "runtimeABI": "agentos.adapter-http/v1", "entrypoint": []string{"agentos-binding://devops"}},
+		},
+		"capabilities": map[string]any{"tools": []string{"hello.echo@1.0.0"}, "models": []any{}, "memory": []any{}, "secrets": []any{}},
+		"budget":       map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120},
+		"checkpoint":   map[string]any{"mode": "logical", "schemaVersion": "hello/v1", "intervalSeconds": 30},
+	})
+	if _, err := h.store.CreateAgentVersion(ctx, kernelstore.CreateAgentVersionInput{
+		ID: uuid.New(), TenantID: devopsTenant, Namespace: "default",
+		Name: "oci-dual-agent", Version: "1.0.0", Spec: dualSpec,
+	}); err != nil {
+		t.Fatalf("publish dual agent: %v", err)
+	}
+
+	ociWorkerBin := filepath.Join("..", "..", "..", "..", "bin", "agentos-runtime-oci")
+	if _, err := os.Stat(ociWorkerBin); err != nil {
+		t.Skipf("agentos-runtime-oci binary not found")
+	}
+	// Long-running workload: sleep 30 in the alpine image. The worker is
+	// configured with the same alpine reference so the workload pin matches
+	// (worker.go rejects a workload image that differs from its own config).
+	const sleepImage = "docker.io/library/alpine:latest"
+	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
+		"-control-address", h.listener.Addr().String(),
+		"-tenant", devopsTenant,
+		"-runtime-instance-id", "oci-worker-1",
+		"-artifact-root", ociArtifactRoot(t),
+		"-image-ref", sleepImage,
+		"-skip-image-pull",
+		"-dev-mode",
+	)
+	if os.Getenv("AGENTOS_RUNSC_DIRECT") == "1" {
+		workerArgs = append(workerArgs, "-runsc-direct", "-runsc-platform", "kvm")
+	}
+	workerCmd := exec.Command(workerBin, workerArgs...)
+	workerCmd.Stderr = os.Stderr
+	workerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := workerCmd.Start(); err != nil {
+		t.Fatalf("start oci worker: %v", err)
+	}
+	defer func() { _ = syscall.Kill(-workerCmd.Process.Pid, syscall.SIGKILL) }()
+
+	taskID := uuid.New()
+	spec := map[string]any{
+		"priority": 50,
+		"budget":   map[string]any{"tokens": 2000, "costUsd": 0.10, "toolCalls": 8, "wallSeconds": 120},
+		"image":    map[string]any{"ref": sleepImage},
+		"runtime":  map[string]any{"command": []string{"sleep", "30"}},
+		"placement": map[string]any{
+			"runtimeClasses": []string{"oci", "research-network"},
+			"preferredClass": "oci",
+			"region":         "cn-east",
+			"cpuMillis":      250,
+			"memoryMiB":      128,
+			"workspaceBytes": 8388608,
+			"llmConcurrency": 1,
+		},
+		"retryPolicy": map[string]any{"maxAttempts": 3},
+	}
+	specJSON, _ := json.Marshal(spec)
+	if _, err := h.store.CreateTask(ctx, kernelstore.CreateTaskInput{
+		ID: taskID, TenantID: devopsTenant, Namespace: "default",
+		AgentVersionRef: "oci-dual-agent@1.0.0", Goal: "oci real takeover test",
+		Spec: specJSON, IdempotencyKey: "oci-takeover-real/" + taskID.String(),
+	}); err != nil {
+		t.Fatalf("create takeover task: %v", err)
+	}
+
+	// Wait until the attempt is RUNNING on the oci worker (mid-flight).
+	runningDeadline := time.Now().Add(90 * time.Second)
+	var runningPhase string
+	for {
+		if err := h.pool.QueryRow(ctx,
+			`SELECT COALESCE(a.phase, '') FROM attempts a
+			 JOIN runs r ON r.id = a.run_id AND r.tenant_id = a.tenant_id
+			 WHERE r.task_id = $1 AND a.runtime_instance_id = 'oci-worker-1'
+			 ORDER BY a.ordinal DESC LIMIT 1`, taskID).Scan(&runningPhase); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("get attempt phase: %v", err)
+		}
+		if runningPhase == "RUNNING" {
+			break
+		}
+		if runningPhase == "FAILED" || runningPhase == "SUCCEEDED" {
+			t.Fatalf("task reached %s before takeover could start", runningPhase)
+		}
+		if time.Now().After(runningDeadline) {
+			t.Fatalf("task never reached RUNNING on oci worker (phase=%s)", runningPhase)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Logf("task RUNNING on oci worker (gVisor), starting takeover")
+
+	// Cordon the oci pool and kill the worker mid-run via its process group
+	// (covers the sudo wrapper and the real worker child).
+	h.cordonPool("devops-pool-5")
+	_ = syscall.Kill(-workerCmd.Process.Pid, syscall.SIGKILL)
+	killTime := time.Now()
+
+	// Expire the lease immediately so recovery reclaims the attempt.
+	if _, err := h.pool.Exec(ctx, `
+		UPDATE runtime_leases l SET expires_at = l.acquired_at + INTERVAL '1 microsecond'
+		FROM attempts a
+		JOIN runs r ON r.id = a.run_id AND r.tenant_id = a.tenant_id
+		WHERE a.id = l.attempt_id AND r.task_id = $1 AND l.released_at IS NULL`, taskID); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	// Wait for terminal; the task must be re-claimed by another runtime.
+	// Note: recovery creates a new run (not a higher ordinal on the same run),
+	// so we order by attempt updated_at DESC to get the most recent attempt.
+	var phase, finalClass, finalInstance string
+	recoverDeadline := time.Now().Add(2 * time.Minute)
+	for {
+		if err := h.pool.QueryRow(ctx,
+			`SELECT t.phase, COALESCE(a.runtime_class,''), COALESCE(a.runtime_instance_id,'') FROM tasks t
+				 LEFT JOIN runs r ON r.task_id=t.id AND r.tenant_id=t.tenant_id
+				 LEFT JOIN attempts a ON a.run_id=r.id AND a.tenant_id=r.tenant_id
+				 WHERE t.id = $1 ORDER BY a.updated_at DESC LIMIT 1`, taskID).Scan(&phase, &finalClass, &finalInstance); err != nil {
+			t.Fatalf("get task state: %v", err)
+		}
+		if phase == "SUCCEEDED" || phase == "FAILED" || phase == "CANCELLED" || phase == "TIMED_OUT" || phase == "REJECTED" {
+			break
+		}
+		if time.Now().After(recoverDeadline) {
+			t.Fatalf("oci takeover did not converge (phase=%s)", phase)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	takeoverLatency := time.Since(killTime)
+
+	if phase != "SUCCEEDED" {
+		dumpTakeoverState(t, h.pool, taskID)
+		var failureCode, failureMessage string
+		if err := h.pool.QueryRow(ctx,
+			`SELECT COALESCE(a.failure_code,''), COALESCE(a.failure_message,'') FROM attempts a
+			 JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+			 WHERE r.task_id=$1 ORDER BY a.updated_at DESC LIMIT 1`, taskID).Scan(&failureCode, &failureMessage); err == nil {
+			t.Fatalf("takeover: task phase = %s, want SUCCEEDED (failure=%s %s)", phase, failureCode, failureMessage)
+		}
+		t.Fatalf("takeover: task phase = %s, want SUCCEEDED", phase)
+	}
+	if finalClass == "oci" {
+		dumpTakeoverState(t, h.pool, taskID)
+		t.Fatalf("takeover failed: final attempt still on oci (%s)", finalInstance)
+	}
+
+	// Acceptance criteria (plan §4): Lost Task=0, Duplicate Final Result=0,
+	// Stuck Task=0, plus recorded takeover/lease-expiry/recovery timing.
+	// Lost/Stuck are implied by SUCCEEDED within the deadline above. Verify
+	// exactly one attempt produced a final result (no duplicate), and that the
+	// original gVisor attempt was fenced out with LEASE_EXPIRED.
+	var completedCount int
+	var leakedResult string
+	if err := h.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE a.phase IN ('COMPLETED','SUCCEEDED')),
+		       COALESCE(string_agg(a.runtime_instance_id, ',') FILTER (WHERE a.phase IN ('COMPLETED','SUCCEEDED')), '')
+		FROM attempts a JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+		WHERE r.task_id=$1`, taskID).Scan(&completedCount, &leakedResult); err != nil {
+		t.Fatalf("count final results: %v", err)
+	}
+	if completedCount != 1 {
+		dumpTakeoverState(t, h.pool, taskID)
+		t.Fatalf("duplicate/lost final result: %d attempts COMPLETED/SUCCEEDED (%s), want exactly 1", completedCount, leakedResult)
+	}
+	var leaseExpiredAttempts int
+	if err := h.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM attempts a JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+		WHERE r.task_id=$1 AND a.failure_code='LEASE_EXPIRED'`, taskID).Scan(&leaseExpiredAttempts); err != nil {
+		t.Fatalf("count lease-expired attempts: %v", err)
+	}
+	if leaseExpiredAttempts == 0 {
+		dumpTakeoverState(t, h.pool, taskID)
+		t.Fatalf("original gVisor attempt was not fenced out by lease expiry")
+	}
+	// Record lease-expiry recovery timing: when recovery released the original
+	// lease (fencing) and how long the replacement attempt took to reconverge.
+	var leaseReleasedAt time.Time
+	if err := h.pool.QueryRow(ctx, `
+			SELECT l.released_at
+			FROM attempts a
+			JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+			JOIN runtime_leases l ON l.attempt_id = a.id
+			WHERE r.task_id=$1 AND a.failure_code='LEASE_EXPIRED' AND l.released_at IS NOT NULL
+			ORDER BY a.updated_at DESC LIMIT 1`, taskID).Scan(&leaseReleasedAt); err == nil && !leaseReleasedAt.IsZero() {
+		terminalAt := killTime.Add(takeoverLatency)
+		t.Logf("leaseExpiry: worker killed %s, lease fenced %s (leaseExpiration=%s), reconverged %s (recoveryTime=%s)",
+			killTime.Format("15:04:05.000"), leaseReleasedAt.Format("15:04:05.000"),
+			leaseReleasedAt.Sub(killTime).Round(time.Millisecond),
+			terminalAt.Format("15:04:05.000"),
+			terminalAt.Sub(leaseReleasedAt).Round(time.Millisecond))
+	}
+	t.Logf("acceptance: Lost=0 Duplicate=0 Stuck=0 (original gVisor attempt fenced with LEASE_EXPIRED)")
+	t.Logf("OCI real takeover verified: gVisor(oci) → %s (%s), task SUCCEEDED, takeoverLatency=%s",
+		finalClass, finalInstance, takeoverLatency)
+}
+
+// dumpTakeoverState prints the full run/attempt/lease history for a takeover
+// investigation, so a failed assertion shows exactly which branch recovery took.
+func dumpTakeoverState(t *testing.T, pool *pgxpool.Pool, taskID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	t.Logf("--- takeover state dump for task %s ---", taskID)
+	rows, err := pool.Query(ctx, `
+		SELECT a.ordinal, a.phase, COALESCE(a.runtime_class,''), COALESCE(a.runtime_instance_id,''),
+		       COALESCE(a.failure_code,''), COALESCE(a.failure_message,''),
+		       to_char(a.created_at, 'HH24:MI:SS.US'), to_char(a.updated_at, 'HH24:MI:SS.US')
+		FROM attempts a
+		JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+		WHERE r.task_id=$1 ORDER BY a.ordinal ASC`, taskID)
+	if err != nil {
+		t.Logf("dump attempts: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ord, phase, class, inst, fcode, fmsg, created, updated string
+		if err := rows.Scan(&ord, &phase, &class, &inst, &fcode, &fmsg, &created, &updated); err != nil {
+			t.Logf("dump scan: %v", err)
+			return
+		}
+		t.Logf("attempt ordinal=%s phase=%s class=%s instance=%s failure=%s/%s created=%s updated=%s",
+			ord, phase, class, inst, fcode, fmsg, created, updated)
+	}
+	leaseRows, err := pool.Query(ctx, `
+		SELECT l.attempt_id, l.released_at IS NOT NULL, COALESCE(l.release_reason,''), l.expires_at, l.acquired_at
+		FROM runtime_leases l
+		JOIN attempts a ON a.id = l.attempt_id
+		JOIN runs r ON r.id=a.run_id AND r.tenant_id=a.tenant_id
+		WHERE r.task_id=$1 ORDER BY l.acquired_at ASC`, taskID)
+	if err != nil {
+		t.Logf("dump leases: %v", err)
+		return
+	}
+	defer leaseRows.Close()
+	for leaseRows.Next() {
+		var attemptID uuid.UUID
+		var released bool
+		var reason string
+		var expiresAt, acquiredAt time.Time
+		if err := leaseRows.Scan(&attemptID, &released, &reason, &expiresAt, &acquiredAt); err != nil {
+			t.Logf("lease scan: %v", err)
+			return
+		}
+		t.Logf("lease attempt=%s released=%v reason=%s expires=%s acquired=%s",
+			attemptID, released, reason, expiresAt.Format("15:04:05.000"), acquiredAt.Format("15:04:05.000"))
+	}
+	t.Logf("--- end takeover state dump ---")
 }
 
 var _ = strings.TrimSpace
