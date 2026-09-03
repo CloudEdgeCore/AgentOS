@@ -14,7 +14,7 @@ import (
 // instead of retry-looping against a hard ceiling.
 type RetryController struct {
 	workflows stepTransitioner
-	owner string
+	owner     string
 }
 
 // NewRetryController builds a retry gate bound to a step store.

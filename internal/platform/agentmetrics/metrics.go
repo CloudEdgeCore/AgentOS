@@ -14,21 +14,21 @@ import (
 
 var instruments struct {
 	sync.Once
-	schedulerClaims         metric.Int64Counter
-	schedulerOutcomes       metric.Int64Counter
-	workflowClaims          metric.Int64Counter
-	workflowOutcomes        metric.Int64Counter
-	spawnOutcomes           metric.Int64Counter
-	budgetEvents            metric.Int64Counter
-	accountingDrift         metric.Int64Counter
-	queueDepth              metric.Int64Histogram
-	firstTokenLatency       metric.Float64Histogram
-	reconcileDuration       metric.Float64Histogram
-	schedulerDeferrals      metric.Int64Counter
-	leaseExpirations        metric.Int64Counter
-	runtimeTakeovers        metric.Int64Counter
-	dbTransactionRetries    metric.Int64Counter
-	dbTransactionConflicts  metric.Int64Counter
+	schedulerClaims        metric.Int64Counter
+	schedulerOutcomes      metric.Int64Counter
+	workflowClaims         metric.Int64Counter
+	workflowOutcomes       metric.Int64Counter
+	spawnOutcomes          metric.Int64Counter
+	budgetEvents           metric.Int64Counter
+	accountingDrift        metric.Int64Counter
+	queueDepth             metric.Int64Histogram
+	firstTokenLatency      metric.Float64Histogram
+	reconcileDuration      metric.Float64Histogram
+	schedulerDeferrals     metric.Int64Counter
+	leaseExpirations       metric.Int64Counter
+	runtimeTakeovers       metric.Int64Counter
+	dbTransactionRetries   metric.Int64Counter
+	dbTransactionConflicts metric.Int64Counter
 }
 
 func initInstruments() {

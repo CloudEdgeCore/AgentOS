@@ -17,7 +17,7 @@ type StepDispatcher struct {
 	tasks     TaskPipeline
 	workflows stepTransitioner
 	newID     func() uuid.UUID
-	owner string
+	owner     string
 }
 
 // NewStepDispatcher builds a dispatcher bound to the task pipeline and step

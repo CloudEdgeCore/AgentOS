@@ -64,9 +64,9 @@ func TestCrossControllerKindIsolation(t *testing.T) {
 	}
 
 	// Phase B: advance past the Phase A claim TTL, then admit the task.
-clock.Advance(31 * time.Second)
+	clock.Advance(31 * time.Second)
 
-// Phase C: admit the task, then race four Scheduling controllers for the
+	// Phase C: admit the task, then race four Scheduling controllers for the
 	// same task — only one scheduling claim should win.
 	admitClaims, err := repository.ClaimTasks(ctx, kernelstore.ClaimTasksInput{
 		Kind: kernelstore.ControllerAdmission, Phase: domain.TaskQueued,

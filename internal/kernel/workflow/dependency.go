@@ -24,7 +24,7 @@ type stepTransitioner interface {
 // keep waiting.
 type DependencyResolver struct {
 	workflows stepTransitioner
-	owner string
+	owner     string
 }
 
 // NewDependencyResolver builds a DependencyResolver bound to a step store.

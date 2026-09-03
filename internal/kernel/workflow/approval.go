@@ -15,7 +15,7 @@ const approvalRejected = "rejected"
 // rejected decision as SKIPPED.
 type ApprovalController struct {
 	workflows stepTransitioner
-	owner string
+	owner     string
 }
 
 // NewApprovalController builds an approval gate bound to a step store.
