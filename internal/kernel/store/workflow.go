@@ -249,13 +249,18 @@ type CreateWorkflowResult struct {
 	Existing bool
 }
 
-// TransitionWorkflowInput CAS-transitions one workflow.
+// TransitionWorkflowInput CAS-transitions one workflow. ExpectedOwner, when
+// non-empty, fences the transition to the orchestrator instance that holds a
+// live claim: the write fails with ErrFenced when the claim was lost or
+// expired. Empty disables the check (single-instance mode, non-claiming
+// controllers).
 type TransitionWorkflowInput struct {
 	TenantID        string
 	WorkflowID      uuid.UUID
 	ExpectedVersion int64
 	To              WorkflowStatus
 	FailureCode     string
+	ExpectedOwner   string
 }
 
 // DecideWorkflowStepApprovalInput records a human decision on one step.
@@ -269,7 +274,9 @@ type DecideWorkflowStepApprovalInput struct {
 }
 
 // TransitionWorkflowStepInput CAS-transitions one step. Zero fields are
-// left unchanged; TaskID/AttemptCount set when provided.
+// left unchanged; TaskID/AttemptCount set when provided. ExpectedOwner, when
+// non-empty, fences the transition to the orchestrator instance that holds a
+// live claim on the parent workflow (see TransitionWorkflowInput).
 type TransitionWorkflowStepInput struct {
 	TenantID        string
 	WorkflowID      uuid.UUID
@@ -280,6 +287,7 @@ type TransitionWorkflowStepInput struct {
 	AttemptCount    *int
 	ResultSummary   json.RawMessage
 	FailureCode     string
+	ExpectedOwner   string
 }
 
 // SpawnWorkflowStepInput creates one dynamic step. SpawnKey is the

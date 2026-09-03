@@ -465,6 +465,7 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 				_ = c.store.ReleaseTaskClaim(ctx, claim)
 				slog.Error("schedule deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
 			}
+			agentmetrics.SchedulerDeferral(ctx)
 			agentmetrics.SchedulerOutcome(ctx, "placement_deferred")
 			return false, nil
 		}
@@ -528,6 +529,7 @@ func (c *Controller) processClaim(ctx context.Context, claim store.TaskClaim) (b
 		_ = c.store.ReleaseTaskClaim(ctx, claim)
 		slog.Error("capacity deferral failed for task; isolated", "task", claim.Task.ID, "tenant", claim.Task.TenantID, "error", deferErr)
 	}
+	agentmetrics.SchedulerDeferral(ctx)
 	agentmetrics.SchedulerOutcome(ctx, "placement_deferred")
 	return false, nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
+	"github.com/CloudEdgeCore/AgentOS/internal/platform/agentmetrics"
 	"github.com/google/uuid"
 )
 
@@ -56,6 +57,9 @@ func (c *Controller) reconcileOnce(ctx context.Context) (int, error) {
 	candidates, err := c.repository.ListExpiredAttempts(ctx, c.now(), c.batch)
 	if err != nil {
 		return 0, err
+	}
+	for range candidates {
+		agentmetrics.LeaseExpiration(ctx)
 	}
 	if c.parallel <= 1 || len(candidates) <= 1 {
 		processed := 0
@@ -134,6 +138,7 @@ func (c *Controller) processCandidate(ctx context.Context, candidate store.Recov
 		slog.Error("recovery failed for expired attempt; isolated", "attempt", candidate.AttemptID, "tenant", candidate.TenantID, "error", err)
 		return false, nil
 	}
+	agentmetrics.RuntimeTakeover(ctx)
 	return true, nil
 }
 

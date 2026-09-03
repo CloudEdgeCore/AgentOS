@@ -13,6 +13,7 @@ on:
         options:
           - all
           - capacity-baseline
+          - capacity-baseline-1m
           - scale-fuzz-and-live-model
           - research-live-acceptance
           - soak-24h
@@ -69,6 +70,33 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: capacity-baseline-evidence
+          path: /tmp/capacity-evidence.txt
+          if-no-files-found: warn
+
+  # 1M capacity baseline: dispatch-only, runs on self-hosted runner because
+  # GitHub hosted runners have a 360 min job timeout cap and 1M takes ~7h.
+  capacity-baseline-1m:
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline-1m')
+    runs-on: [self-hosted, Linux, X64, agentos-soak]
+    timeout-minutes: 600
+    env:
+      AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
+      AGENTOS_CAPACITY_TASKS: "1000000"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: go.sum
+      - name: Run 1M capacity baseline
+        run: go test -tags=integration -count=1 -timeout 540m -run 'TestControlPlanePipelineCapacityBaseline' -v ./internal/kernel/store/postgres/
+      - name: Upload capacity evidence log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: capacity-baseline-1m-evidence
           path: /tmp/capacity-evidence.txt
           if-no-files-found: warn
 

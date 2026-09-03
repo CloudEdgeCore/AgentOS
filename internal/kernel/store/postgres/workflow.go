@@ -261,6 +261,12 @@ func (s *Store) TransitionWorkflow(ctx context.Context, in kernelstore.Transitio
 			kernelstore.ErrInvalidTransition, current.Status, in.To)
 	}
 	now := s.now()
+	// Write fencing: in claiming mode only the instance holding the live
+	// claim may transition the workflow (the row lock above serializes the
+	// check against concurrent claim steals).
+	if err := requireClaimOwnership(ctx, tx, in.TenantID, in.WorkflowID, in.ExpectedOwner, now); err != nil {
+		return kernelstore.Workflow{}, err
+	}
 	updated, err := scanWorkflow(tx.QueryRow(ctx, `
 		UPDATE workflows SET status = $4, failure_code = NULLIF($5, ''), resource_version = resource_version + 1,
 			updated_at = $6 WHERE tenant_id = $1 AND id = $2 AND resource_version = $3 RETURNING `+workflowColumns,
@@ -280,6 +286,28 @@ func (s *Store) TransitionWorkflow(ctx context.Context, in kernelstore.Transitio
 		return kernelstore.Workflow{}, classify(err)
 	}
 	return updated, nil
+}
+
+// requireClaimOwnership fences a workflow write to the instance that holds a
+// live claim when expectedOwner is non-empty. It locks the workflow row so
+// the check cannot race a claim steal; callers must hold or acquire that
+// lock themselves (TransitionWorkflow already did, TransitionWorkflowStep
+// locks the row here). Empty expectedOwner disables the check.
+func requireClaimOwnership(ctx context.Context, tx pgx.Tx, tenantID string, workflowID uuid.UUID, expectedOwner string, now time.Time) error {
+	if expectedOwner == "" {
+		return nil
+	}
+	var owner string
+	var until time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT orchestrator_claim, orchestrator_claim_until FROM workflows WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+		tenantID, workflowID.String()).Scan(&owner, &until); err != nil {
+		return classify(err)
+	}
+	if owner != expectedOwner || !until.After(now) {
+		return kernelstore.ErrFenced
+	}
+	return nil
 }
 
 // TransitionWorkflowStep CAS-transitions one step, applying the optional
@@ -305,6 +333,11 @@ func (s *Store) TransitionWorkflowStep(ctx context.Context, in kernelstore.Trans
 	if !kernelstore.CanTransitionStep(current.Status, in.To) {
 		return kernelstore.WorkflowStep{}, fmt.Errorf("%w: step %s -> %s",
 			kernelstore.ErrInvalidTransition, current.Status, in.To)
+	}
+	// Write fencing: a step transition is owned by the orchestrator instance
+	// that holds the parent workflow's live claim (see requireClaimOwnership).
+	if err := requireClaimOwnership(ctx, tx, in.TenantID, in.WorkflowID, in.ExpectedOwner, s.now()); err != nil {
+		return kernelstore.WorkflowStep{}, err
 	}
 	taskID := current.TaskID
 	if in.TaskID != nil {
