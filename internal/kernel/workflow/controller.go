@@ -444,6 +444,12 @@ func (c *Controller) dispatchStep(ctx context.Context, workflow kernelstore.Work
 	if !ready {
 		return false, nil
 	}
+	// The resolver returned nil outputs when it transitioned the step to
+	// SKIPPED (upstream failed, group not closed, or condition not met),
+	// so there is nothing more to dispatch this round.
+	if dependencyOutputs == nil {
+		return true, nil
+	}
 	if requiresApproval(step, declared) && step.DecidedBy == "" && step.Status == kernelstore.StepPending {
 		approval := NewApprovalController(c.workflows, c.claimOwner())
 		return approval.Park(ctx, workflow, step)
