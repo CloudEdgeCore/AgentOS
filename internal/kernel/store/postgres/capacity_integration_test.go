@@ -77,7 +77,9 @@ func TestControlPlanePipelineCapacityBaseline(t *testing.T) {
 	// is scheduled, and the baseline measures pure control-plane throughput
 	// (lease renewal by a live worker is exercised by the runtime conformance
 	// suite, not here). A short TTL would fence the first tasks while the
-	// drain is still running.
+	// drain is still running. Scale the TTL with the task count (the drain
+	// paces at ~60ms/task; 100ms/task gives headroom for CI runners).
+	leaseTTL := time.Duration(taskCount)*100*time.Millisecond + 30*time.Minute
 	pools := staticPools{{
 		ID: "capacity-pool", TenantIDs: []string{tenant}, RuntimeClass: "oci", RuntimeInstanceID: "capacity-worker-1",
 		Region: "cn-east", DataResidency: "cn", Ready: true,
@@ -86,7 +88,7 @@ func TestControlPlanePipelineCapacityBaseline(t *testing.T) {
 	if err := store.RegisterRuntimePools(ctx, pools); err != nil {
 		t.Fatalf("register capacity fixture pools: %v", err)
 	}
-	schedulerController := scheduler.NewController(store, pools, "capacity/scheduler", 50, time.Minute, 30*time.Minute)
+	schedulerController := scheduler.NewController(store, pools, "capacity/scheduler", 50, time.Minute, leaseTTL)
 	scheduleWall := time.Now()
 	drainPhase(t, ctx, pool, schedulerController.Reconcile, "RUNNING", taskCount)
 	scheduleDuration := time.Since(scheduleWall)
