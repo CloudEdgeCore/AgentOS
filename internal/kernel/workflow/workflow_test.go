@@ -722,7 +722,7 @@ func TestV13Orchestrates10KDynamicTasks(t *testing.T) {
 	reconcileUntil(t, engine, func() bool {
 		current, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
 		return current.Status.Terminal()
-	}, 30*time.Second)
+	}, v13ScaleLegWait)
 	elapsed := time.Since(started)
 	final, _ := store.GetWorkflow(context.Background(), workflow.TenantID, workflow.ID)
 	if final.Status != kernelstore.WorkflowSucceeded || len(tasks.byKey) != 10_000 {
