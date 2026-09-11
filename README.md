@@ -454,6 +454,7 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | Firecracker runtime | Evaluation only | Dedicated real-KVM scheduled probe; no production provider yet |
 | Live model execution | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
 | 24-hour recovery soak | Scheduled evidence | Weekly dedicated self-hosted runner job |
+| Longer soaks (72h / 7d) | Scheduled + on-demand evidence | Monthly 72h (15th) and 7d (1st) jobs plus `soak_hours` dispatch; 7d runs as two sequential 84h jobs under GitHub's 5-day self-hosted job cap |
 
 ## Current boundaries
 

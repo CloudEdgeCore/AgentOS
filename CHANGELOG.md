@@ -19,7 +19,8 @@ public protocol versions evolve independently.
 - Workflow CLI operations and one-command Runtime Interface conformance.
 - A typed TypeScript Control API and Runtime Interface SDK.
 - Python RuntimeHost watchdogs, bounded concurrency and payloads, unit tests, and PEP 561 metadata.
-- Scheduled scale, fuzz, live-model, real-KVM, and 24-hour soak evidence workflows.
+- Scheduled scale, fuzz, live-model, and real-KVM evidence workflows.
+- Recovery-soak duration matrix: weekly 24h and monthly 72h scheduled runs, a monthly 7d run chunked into two sequential 84h jobs (GitHub terminates self-hosted jobs after 5 days), and on-demand `soak_hours` dispatch (24h/72h/168h). Long soaks use a dedicated concurrency group so a multi-day soak no longer delays the daily nightly evidence run.
 - Multi-language release SBOMs and SLSA build provenance attestations.
 - Typed workflow output contracts with JSON Schema validation and RFC 6901 conditions.
 - Logical-model routing independent of provider endpoint and wire-model selection.
@@ -43,6 +44,7 @@ public protocol versions evolve independently.
 - Runtime Adapter polling is adaptive and immutable AgentVersion decoding is forward-compatible.
 - Workflow approval decisions preserve both the deciding principal and the decision.
 - The Python RuntimeHost releases a stuck execution's ledger capacity after the termination grace and documents its protocol-host (non-isolation) boundary.
+- The 1M capacity-baseline job allows 20h with an 18h test timeout (was 10h/9h): the 100k baseline takes 1-1.4h, so 1M is expected to need 8-13h and the previous test timeout could kill the leg mid-pipeline.
 
 ### Security
 

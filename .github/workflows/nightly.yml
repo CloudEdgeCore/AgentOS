@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: "17 18 * * *"
     - cron: "41 17 * * 0"
+    - cron: "41 17 15 * *"
+    - cron: "41 17 1 * *"
   workflow_dispatch:
     inputs:
       jobs:
@@ -16,14 +18,18 @@ on:
           - capacity-baseline-1m
           - scale-fuzz-and-live-model
           - research-live-acceptance
-          - soak-24h
+          - soak
+      soak_hours:
+        description: "Soak duration in hours (24 weekly, 72 monthly, 168 = 7d chunked)"
+        type: choice
+        default: "24"
+        options:
+          - "24"
+          - "72"
+          - "168"
 
 permissions:
   contents: read
-
-concurrency:
-  group: nightly-production-evidence
-  cancel-in-progress: false
 
 jobs:
   # 100k capacity baseline: throughput benchmark, measured WITHOUT the race
@@ -34,6 +40,9 @@ jobs:
   capacity-baseline:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline'))
     runs-on: ubuntu-latest
+    concurrency:
+      group: nightly-evidence
+      cancel-in-progress: false
     timeout-minutes: 300
     services:
       postgres:
@@ -74,11 +83,16 @@ jobs:
           if-no-files-found: warn
 
   # 1M capacity baseline: dispatch-only, runs on self-hosted runner because
-  # GitHub hosted runners have a 360 min job timeout cap and 1M takes ~7h.
+  # GitHub hosted runners have a 360 min job timeout cap. The pipeline is
+  # expected to need 8-13h (100k takes 1-1.4h), so the job allows 20h and
+  # the go test timeout allows 18h.
   capacity-baseline-1m:
     if: github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline-1m')
     runs-on: [self-hosted, Linux, X64, agentos-soak]
-    timeout-minutes: 600
+    concurrency:
+      group: agentos-soak-runner
+      cancel-in-progress: false
+    timeout-minutes: 1200
     env:
       AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
       AGENTOS_CAPACITY_TASKS: "1000000"
@@ -91,7 +105,7 @@ jobs:
           go-version: 1.26.6
           cache-dependency-path: go.sum
       - name: Run 1M capacity baseline
-        run: go test -tags=integration -count=1 -timeout 540m -run 'TestControlPlanePipelineCapacityBaseline' -v ./internal/kernel/store/postgres/
+        run: go test -tags=integration -count=1 -timeout 1080m -run 'TestControlPlanePipelineCapacityBaseline' -v ./internal/kernel/store/postgres/
       - name: Upload capacity evidence log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -103,6 +117,9 @@ jobs:
   scale-fuzz-and-live-model:
     if: github.event_name == 'schedule' && github.event.schedule == '17 18 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'scale-fuzz-and-live-model'))
     runs-on: ubuntu-latest
+    concurrency:
+      group: nightly-evidence
+      cancel-in-progress: false
     timeout-minutes: 180
     services:
       postgres:
@@ -198,6 +215,9 @@ jobs:
     # §5 metrics plus schema-versioned evidence JSON, uploaded as an artifact.
     if: github.event_name == 'schedule' && github.event.schedule == '17 18 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'research-live-acceptance'))
     runs-on: ubuntu-latest
+    concurrency:
+      group: nightly-evidence
+      cancel-in-progress: false
     timeout-minutes: 90
     services:
       postgres:
@@ -277,26 +297,82 @@ jobs:
           path: artifacts/research-live/*.json
           if-no-files-found: warn
 
-  soak-24h:
-    if: github.event_name == 'schedule' && github.event.schedule == '41 17 * * 0' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak-24h'))
+  # Recovery and orchestration soak. Duration matrix:
+  #   - weekly Sunday run "41 17 * * 0"   -> 24h
+  #   - monthly 15th run "41 17 15 * *"   -> 72h
+  #   - dispatch soak_hours                -> 24h / 72h / 168h
+  # The 168h (7d) dispatch and the monthly 1st run are handled by soak-7d
+  # below, because a self-hosted job is terminated after 5 days.
+  # Long soaks use their own concurrency group so they no longer delay the
+  # daily hosted nightly evidence run while the runner is busy.
+  soak:
+    if: github.event_name == 'schedule' && (github.event.schedule == '41 17 * * 0' || github.event.schedule == '41 17 15 * *') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours != '168')
     runs-on: [self-hosted, Linux, X64, agentos-soak]
-    timeout-minutes: 1500
+    concurrency:
+      group: agentos-soak-runner
+      cancel-in-progress: false
+    timeout-minutes: 4500
     env:
       AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
       AGENTOS_TEST_NATS_URL: ${{ secrets.AGENTOS_SOAK_NATS_URL }}
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Run recovery and orchestration acceptance continuously for 24 hours
+      - name: Run recovery and orchestration acceptance continuously
         shell: bash
         run: |
           set -euo pipefail
           test -n "$AGENTOS_TEST_DATABASE_URL"
           test -n "$AGENTOS_TEST_NATS_URL"
-          deadline=$(( $(date +%s) + 86400 ))
+          hours=24
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            hours="${{ github.event.inputs.soak_hours }}"
+          elif [ "${{ github.event.schedule }}" = "41 17 15 * *" ]; then
+            hours=72
+          fi
+          echo "soak duration: ${hours}h"
+          deadline=$(( $(date +%s) + hours * 3600 ))
           iterations=0
           while (( $(date +%s) < deadline )); do
             go test -race -tags=integration -count=1 -timeout 60m ./internal/kernel/store/postgres ./internal/kernel/recovery ./internal/kernel/workflow ./e2e/workflows
             iterations=$((iterations + 1))
+            echo "soak iteration ${iterations} complete"
+          done
+          test "$iterations" -gt 0
+
+  # 7-day soak: a single self-hosted job is terminated after 5 days, so the
+  # month-start schedule and a soak_hours=168 dispatch run two sequential 84h
+  # chunks (max-parallel: 1) on the same runner. A 1st-of-month run can
+  # overlap the weekly 24h soak; the shared concurrency group serializes them.
+  soak-7d:
+    if: github.event_name == 'schedule' && github.event.schedule == '41 17 1 * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours == '168')
+    runs-on: [self-hosted, Linux, X64, agentos-soak]
+    concurrency:
+      group: agentos-soak-runner
+      cancel-in-progress: false
+    timeout-minutes: 5100
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        chunk: [1, 2]
+    env:
+      AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
+      AGENTOS_TEST_NATS_URL: ${{ secrets.AGENTOS_SOAK_NATS_URL }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run recovery and orchestration acceptance for 84h (chunk ${{ matrix.chunk }}/2)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$AGENTOS_TEST_DATABASE_URL"
+          test -n "$AGENTOS_TEST_NATS_URL"
+          deadline=$(( $(date +%s) + 84 * 3600 ))
+          iterations=0
+          while (( $(date +%s) < deadline )); do
+            go test -race -tags=integration -count=1 -timeout 60m ./internal/kernel/store/postgres ./internal/kernel/recovery ./internal/kernel/workflow ./e2e/workflows
+            iterations=$((iterations + 1))
+            echo "soak chunk ${{ matrix.chunk }}/2 iteration ${iterations} complete"
           done
           test "$iterations" -gt 0
