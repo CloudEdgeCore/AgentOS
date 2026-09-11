@@ -54,21 +54,37 @@ func (s *Store) ClaimTasks(ctx context.Context, in kernelstore.ClaimTasksInput) 
 		shardEligible = ` AND ('x' || substr(md5(t.tenant_id), 1, 8))::bit(32)::bigint % $5 = $6`
 		args = append(args, in.ShardCount, in.ShardIndex)
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskColumns+` FROM tasks t
+	// The candidate ordering is selected in a CTE without locking so the
+	// planner can use a bounded top-N sort, then the chosen rows are locked
+	// in the outer query. Locking the ordered join directly would force a
+	// full sort of every queued task (external merge at 1M queued rows) on
+	// every claim batch, making the pipeline quadratic under load.
+	rows, err := tx.Query(ctx, `WITH candidates AS (
+		SELECT t.id AS candidate_id,
+		  COALESCE(active.active_claims, 0) AS fairness,
+		  COALESCE((t.spec->>'priority')::int, 0) AS priority_key,
+		  NULLIF(t.spec->>'deadline', '')::timestamptz AS deadline_key,
+		  t.created_at AS created_key
+		FROM tasks t
+		LEFT JOIN (
+		  SELECT tenant_id AS claim_tenant_id, COUNT(*) AS active_claims
+		  FROM task_controller_claims
+		  WHERE controller_kind = $2 AND expires_at > $3
+		  GROUP BY tenant_id
+		) active ON active.claim_tenant_id = t.tenant_id
 		WHERE t.phase = $1
 		  AND NOT EXISTS (
 			SELECT 1 FROM task_controller_claims c
 			WHERE c.tenant_id = t.tenant_id AND c.task_id = t.id
 			  AND c.controller_kind = $2 AND c.expires_at > $3
 		  )`+scheduleEligible+shardEligible+`
-		ORDER BY
-		  (SELECT COUNT(*) FROM task_controller_claims active
-		   WHERE active.tenant_id = t.tenant_id AND active.controller_kind = $2 AND active.expires_at > $3),
-		  COALESCE((t.spec->>'priority')::int, 0) DESC,
-		  NULLIF(t.spec->>'deadline', '')::timestamptz ASC NULLS LAST,
-		  t.created_at, t.id
-		FOR UPDATE OF t SKIP LOCKED
-		LIMIT $4`, args...)
+		ORDER BY fairness, priority_key DESC, deadline_key ASC NULLS LAST, created_key, candidate_id
+		LIMIT $4
+	)
+	SELECT `+taskColumns+` FROM tasks t
+	JOIN candidates c ON c.candidate_id = t.id
+	ORDER BY c.fairness, c.priority_key DESC, c.deadline_key ASC NULLS LAST, c.created_key, c.candidate_id
+	FOR UPDATE OF t SKIP LOCKED`, args...)
 	if err != nil {
 		return nil, classify(err)
 	}
