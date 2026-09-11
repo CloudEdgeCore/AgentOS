@@ -347,8 +347,8 @@ func TestV13DynamicSpawnScale10K(t *testing.T) {
 	if err != nil || len(steps) != 10_001 {
 		t.Fatalf("10k scale steps = %d err=%v", len(steps), err)
 	}
-	if elapsed > 2*time.Minute {
-		t.Fatalf("10k dynamic spawns took %s, exceeds 2m local acceptance bound", elapsed)
+	if elapsed > v13SpawnScaleBound {
+		t.Fatalf("10k dynamic spawns took %s, exceeds %s local acceptance bound", elapsed, v13SpawnScaleBound)
 	}
 	t.Logf("10k dynamic spawns committed in %s (%.1f spawns/s)", elapsed, 10_000/elapsed.Seconds())
 }
