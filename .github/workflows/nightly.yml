@@ -31,6 +31,21 @@ on:
 permissions:
   contents: read
 
+# Serialize runs per runner pool. Long evidence runs (multi-day soaks and
+# the 1M baseline, which hold the self-hosted runner for hours) get their
+# own group so they never delay the daily hosted nightly run, while
+# simultaneous dispatches of the same class still queue instead of
+# overlapping. Job-level concurrency is deliberately not used: GitHub
+# cancels previously pending sibling jobs in the same group, which would
+# cancel every queued job but one whenever a workflow run has several
+# jobs sharing a group.
+concurrency:
+  group: >-
+    ${{ ((github.event_name == 'schedule' && (github.event.schedule == '41 17 * * 0' || github.event.schedule == '41 17 15 * *' || github.event.schedule == '41 17 1 * *')) ||
+         (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'soak' || github.event.inputs.jobs == 'capacity-baseline-1m' || github.event.inputs.jobs == 'all')))
+        && 'agentos-long-evidence' || 'nightly-production-evidence' }}
+  cancel-in-progress: false
+
 jobs:
   # 100k capacity baseline: throughput benchmark, measured WITHOUT the race
   # detector (which distorts timing by 5-10x). Kept as its own job so it can
@@ -40,9 +55,6 @@ jobs:
   capacity-baseline:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline'))
     runs-on: ubuntu-latest
-    concurrency:
-      group: nightly-evidence
-      cancel-in-progress: false
     timeout-minutes: 300
     services:
       postgres:
@@ -89,9 +101,6 @@ jobs:
   capacity-baseline-1m:
     if: github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline-1m')
     runs-on: [self-hosted, Linux, X64, agentos-soak]
-    concurrency:
-      group: agentos-soak-runner
-      cancel-in-progress: false
     timeout-minutes: 1200
     env:
       AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
@@ -117,9 +126,6 @@ jobs:
   scale-fuzz-and-live-model:
     if: github.event_name == 'schedule' && github.event.schedule == '17 18 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'scale-fuzz-and-live-model'))
     runs-on: ubuntu-latest
-    concurrency:
-      group: nightly-evidence
-      cancel-in-progress: false
     timeout-minutes: 180
     services:
       postgres:
@@ -215,9 +221,6 @@ jobs:
     # §5 metrics plus schema-versioned evidence JSON, uploaded as an artifact.
     if: github.event_name == 'schedule' && github.event.schedule == '17 18 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'research-live-acceptance'))
     runs-on: ubuntu-latest
-    concurrency:
-      group: nightly-evidence
-      cancel-in-progress: false
     timeout-minutes: 90
     services:
       postgres:
@@ -308,9 +311,6 @@ jobs:
   soak:
     if: github.event_name == 'schedule' && (github.event.schedule == '41 17 * * 0' || github.event.schedule == '41 17 15 * *') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours != '168')
     runs-on: [self-hosted, Linux, X64, agentos-soak]
-    concurrency:
-      group: agentos-soak-runner
-      cancel-in-progress: false
     timeout-minutes: 4500
     env:
       AGENTOS_TEST_DATABASE_URL: ${{ secrets.AGENTOS_SOAK_DATABASE_URL }}
@@ -347,9 +347,6 @@ jobs:
   soak-7d:
     if: github.event_name == 'schedule' && github.event.schedule == '41 17 1 * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours == '168')
     runs-on: [self-hosted, Linux, X64, agentos-soak]
-    concurrency:
-      group: agentos-soak-runner
-      cancel-in-progress: false
     timeout-minutes: 5100
     strategy:
       max-parallel: 1
