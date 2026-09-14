@@ -47,6 +47,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Self-hosted evidence pool gate.
+  #
+  # The long-running evidence jobs below (1M capacity baseline, 24h/72h soak,
+  # 7d soak) need the fixed-hardware self-hosted pool, because the <=10%
+  # throughput / <=15% P95 stability gate in docs/benchmark/100k.md cannot be
+  # certified on a shared hosted runner. When that pool is not provisioned,
+  # GitHub leaves a job with no matching runner queued indefinitely: the run
+  # never reaches a terminal state and reports neither pass nor failure.
+  #
+  # This gate turns "the pool is missing" into an explicit, terminal skip so
+  # every run ends in a state an operator can act on (never a silent queue).
+  #
+  # Operator action: once the `agentos-soak` runner is online, set the
+  # repository variable AGENTOS_SELF_HOSTED_PROVISIONED to "true". Until then
+  # the self-hosted evidence jobs are skipped with a notice and never queue.
+  runner-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      provisioned: ${{ steps.check.outputs.provisioned }}
+    steps:
+      - name: Check whether the self-hosted evidence pool is provisioned
+        id: check
+        env:
+          AGENTOS_SELF_HOSTED_PROVISIONED: ${{ vars.AGENTOS_SELF_HOSTED_PROVISIONED }}
+        run: |
+          if [ "${AGENTOS_SELF_HOSTED_PROVISIONED}" = "true" ]; then
+            echo "provisioned=true" >> "$GITHUB_OUTPUT"
+            echo "self-hosted evidence pool (agentos-soak) declared provisioned"
+          else
+            echo "provisioned=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::self-hosted evidence pool runs-on [self-hosted, Linux, X64, agentos-soak] is NOT provisioned. Skipping soak, soak-7d and capacity-baseline-1m instead of leaving them queued forever. Set the repository variable AGENTOS_SELF_HOSTED_PROVISIONED=true once the runner is online."
+          fi
+
   # 100k capacity baseline: throughput benchmark, measured WITHOUT the race
   # detector (which distorts timing by 5-10x). Kept as its own job so it can
   # be dispatched alone (`-f jobs=capacity-baseline`) and never depends on
@@ -99,7 +133,11 @@ jobs:
   # expected to need 8-13h (100k takes 1-1.4h), so the job allows 20h and
   # the go test timeout allows 18h.
   capacity-baseline-1m:
-    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline-1m')
+    needs: runner-preflight
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'capacity-baseline-1m') &&
+      needs.runner-preflight.outputs.provisioned == 'true'
     runs-on: [self-hosted, Linux, X64, agentos-soak]
     timeout-minutes: 1200
     env:
@@ -309,7 +347,11 @@ jobs:
   # Long soaks use their own concurrency group so they no longer delay the
   # daily hosted nightly evidence run while the runner is busy.
   soak:
-    if: github.event_name == 'schedule' && (github.event.schedule == '41 17 * * 0' || github.event.schedule == '41 17 15 * *') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours != '168')
+    needs: runner-preflight
+    if: >-
+      (github.event_name == 'schedule' && (github.event.schedule == '41 17 * * 0' || github.event.schedule == '41 17 15 * *')
+      || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours != '168'))
+      && needs.runner-preflight.outputs.provisioned == 'true'
     runs-on: [self-hosted, Linux, X64, agentos-soak]
     timeout-minutes: 4500
     env:
@@ -345,7 +387,11 @@ jobs:
   # chunks (max-parallel: 1) on the same runner. A 1st-of-month run can
   # overlap the weekly 24h soak; the shared concurrency group serializes them.
   soak-7d:
-    if: github.event_name == 'schedule' && github.event.schedule == '41 17 1 * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours == '168')
+    needs: runner-preflight
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '41 17 1 * *'
+      || (github.event_name == 'workflow_dispatch' && (github.event.inputs.jobs == 'all' || github.event.inputs.jobs == 'soak') && github.event.inputs.soak_hours == '168'))
+      && needs.runner-preflight.outputs.provisioned == 'true'
     runs-on: [self-hosted, Linux, X64, agentos-soak]
     timeout-minutes: 5100
     strategy:
