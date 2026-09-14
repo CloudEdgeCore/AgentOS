@@ -80,8 +80,8 @@ jobs:
           go build ./cmd/...
           (cd sdk/python && python3 -m unittest discover -s tests -v)
           python3 -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/python-wheel" sdk/python
-          npm --prefix sdk/typescript ci
-          npm --prefix sdk/typescript test
+          (cd sdk/typescript && npm ci)
+          (cd sdk/typescript && npm test)
 
       - name: Install pinned supply-chain tools
         env:
@@ -137,7 +137,7 @@ jobs:
           rust_sbom="$(find runtime/wasm -maxdepth 1 -type f \( -name '*.cdx.json' -o -name 'bom.json' \) -print -quit)"
           test -n "$rust_sbom"
           mv "$rust_sbom" "dist/agentos-${GITHUB_REF_NAME}-rust.cdx.json"
-          npm --prefix sdk/typescript sbom --sbom-format cyclonedx > "dist/agentos-${GITHUB_REF_NAME}-typescript.cdx.json"
+          (cd sdk/typescript && npm sbom --sbom-format cyclonedx) > "dist/agentos-${GITHUB_REF_NAME}-typescript.cdx.json"
           python3 -m venv "$RUNNER_TEMP/agentos-sbom-venv"
           "$RUNNER_TEMP/agentos-sbom-venv/bin/pip" install cyclonedx-bom==7.3.1 dist/*.whl
           "$RUNNER_TEMP/agentos-sbom-venv/bin/cyclonedx-py" environment --output-format JSON --output-file "dist/agentos-${GITHUB_REF_NAME}-python.cdx.json"
