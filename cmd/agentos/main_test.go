@@ -21,7 +21,7 @@ func TestVersionAndManifestMigration(t *testing.T) {
 	if err := run([]string{"version", "-json"}, &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"productVersion":"1.0.0.0"`) || !strings.Contains(output.String(), `"releaseStage":"GA"`) {
+	if !strings.Contains(output.String(), `"productVersion":"1.1.0.0"`) || !strings.Contains(output.String(), `"releaseStage":"GA"`) {
 		t.Fatalf("unexpected version output: %s", output.String())
 	}
 
