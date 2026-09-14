@@ -16,8 +16,14 @@ __pycache__/
 /sdk/typescript/dist/
 /sdk/typescript/node_modules/
 
-# Local-only documentation (internal design docs, ADRs — never pushed)
-/docs/
+# Documentation policy.
+# Published: docs/evidence/ — the benchmark and drill reports the Release Gate
+# requires to be public, each carrying its own commit SHA and run id.
+# Local-only: plans, remediation lists, decision records, and internal status
+# notes under docs/internal/ are never pushed.
+/docs/*
+!/docs/evidence/
+!/docs/evidence/**
 
 # Local-only model endpoints and tenant policy overrides (private infra)
 deploy/dev/*.local.json
