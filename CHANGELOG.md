@@ -1,10 +1,46 @@
 # Changelog
 
 All notable changes use [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-categories. AgentOS product version `1.0.0.0` maps to SemVer tag `v1.0.0`;
+categories. AgentOS product version `X.Y.Z.0` maps to SemVer tag `vX.Y.Z`;
 public protocol versions evolve independently.
 
 ## Unreleased
+
+## 1.1.0 - 2026-09-14
+
+### Added
+
+- Public evidence layer under `docs/evidence/`: 100k/baseline benchmark records, the
+  database consistency contract, two isolation-drill delivery reports, and a
+  multi-runtime takeover evidence report (cordon-migration and kill+lease-expiry
+  takeover across runtimes, 4/4 scenarios). Internal plans stay untracked under
+  `docs/internal/`.
+- README section documenting non-preemptible execution semantics: cancellation is
+  cooperative (`cancel_requested` + `AcknowledgeCancellation`), the only forceful
+  path is lease expiry + fencing takeover, and cross-runtime recovery is
+  checkpoint-based.
+
+### Changed
+
+- Self-hosted evidence jobs (nightly soak matrix, 1M capacity baseline, Firecracker
+  KVM) are gated behind explicit runner-preflight repository variables; when runners
+  are not provisioned the jobs skip immediately with a notice instead of queueing
+  indefinitely.
+
+### Security
+
+- Bump `google.golang.org/grpc` from 1.83.0 to 1.83.2 (xDS server DoS via missing
+  `:authority`/`Host` headers; heap memory exhaustion via HTTP/2 DATA frame
+  fragmentation; xDS RBAC header-matching bypass).
+- Bump `setuptools` from 80.9.0 to 83.0.0 in `/sdk/python` (sdist MANIFEST.in
+  exclusion bypass).
+
+### Fixed
+
+- The single-agent acceptance e2e settled-usage invariant credited only succeeded
+  tasks' first rounds, but failed tasks' completed first round is settled by design;
+  the invariant now requires each SUCCEEDED task to settle exactly the per-task
+  amount plus global lower/upper bounds, which still catches double settlement.
 
 ### Added
 
