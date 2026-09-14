@@ -41,6 +41,35 @@ A typical task moves through the following lifecycle:
 8. Checkpoints, results, and side-effect receipts are persisted before the task reaches a terminal state.
 9. If a worker disappears, a lease expires, or a process restarts, the Recovery Controller converges and reschedules the workload.
 
+## Execution semantics: non-preemptible attempts
+
+AgentOS schedules agents as **non-preemptible processes**. The scheduler orders
+claim batches by fair share, priority, earliest deadline, and FIFO
+([`internal/kernel/store/postgres/control.go`](internal/kernel/store/postgres/control.go)),
+but it never interrupts a running attempt to run a different one, and the
+Runtime Protocol carries no preemption primitive. This is a deliberate
+boundary, not a missing feature to be silently added later.
+
+- **Cancellation is cooperative.** The kernel marks the attempt
+  `CANCEL_REQUESTED` and reports `cancel_requested` on the next `Heartbeat`;
+  the worker must acknowledge through `AcknowledgeCancellation`
+  ([`proto/agentos/runtime/v1/runtime.proto`](proto/agentos/runtime/v1/runtime.proto)).
+  Convergence to a terminal phase is a verified liveness property of the kernel
+  model ([`modelcheck/tla`](modelcheck/tla/README.md)), but the kernel never
+  kills in-flight execution itself.
+- **The forceful path is lease expiry plus fencing.** A worker that stops
+  heartbeating loses its lease; recovery re-acquires the attempt under a
+  strictly higher fencing token, and every call from the expired owner —
+  heartbeat, checkpoint, transition — is rejected `PermissionDenied` before
+  any durable state is written
+  ([`internal/security/negative_integration_test.go`](internal/security/negative_integration_test.go)).
+  This is restart-based recovery, not preemption.
+- **Cross-runtime recovery is checkpoint-based.** Every assignment carries an
+  optional `resume_checkpoint` whose reference pins the agent version, runtime
+  class, provider, runtime ABI, schema version, and a SHA-256-pinned state
+  artifact, so a replacement attempt resumes on a different runtime instead of
+  restarting from zero.
+
 ## What v1.0 provides
 
 | Area | Implemented capability |
