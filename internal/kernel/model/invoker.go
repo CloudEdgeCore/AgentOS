@@ -169,8 +169,8 @@ func (inv *Invoker) invoke(ctx context.Context, in InvokeInput, onDelta func(str
 		// innermost layer that observes provider deltas — so it is recorded even
 		// when no downstream consumer is attached (onDelta nil, the current MCP
 		// broker seam). This makes streaming first-token latency measurable
-	// today; continuous delta delivery to the client is deferred transport
-	// work (decision P1-03 in the internal remediation decision log, 2026-08-23).
+		// today; continuous delta delivery to the client is deferred transport
+		// work (decision P1-03 in the internal remediation decision log, 2026-08-23).
 		streamStart := inv.now()
 		firstToken := true
 		observedContent := func(delta string) {
