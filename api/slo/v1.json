@@ -1,6 +1,6 @@
 {
   "schema": "agentos.slo/v1",
-  "productVersion": "1.0.0.0",
+  "productVersion": "1.1.0.0",
   "windowDays": 30,
   "objectives": {
     "controlApiAvailability": {"operator": ">=", "target": 0.999},
