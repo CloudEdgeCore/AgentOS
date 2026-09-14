@@ -1,7 +1,17 @@
 # Firecracker KVM evidence: standalone workflow so a missing agentos-kvm
 # runner can never block the rest of the nightly production evidence. This
-# workflow runs independently and reports its own status; when the runner is
-# not provisioned, the job stays queued in THIS workflow only.
+# workflow runs independently and reports its own status.
+#
+# A job whose runs-on labels match no online runner is queued indefinitely,
+# which leaves the run with no terminal state: run 34717646564 sat queued
+# from 2026-09-12T20:37 onward. The preflight gate below converts "the
+# runner is missing" into an explicit skip, so every run ends in a state an
+# operator can act on.
+#
+# Operator action: once the `agentos-kvm` runner is online, set the
+# repository variable AGENTOS_KVM_RUNNER_PROVISIONED to "true". Until then
+# this job is skipped with a notice and never queues. The gate never turns a
+# missing runner into a pass: the KVM job still asserts real /dev/kvm.
 name: firecracker-kvm-evidence
 
 on:
@@ -17,8 +27,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runner-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      provisioned: ${{ steps.check.outputs.provisioned }}
+    steps:
+      - name: Check whether the agentos-kvm runner is provisioned
+        id: check
+        env:
+          AGENTOS_KVM_RUNNER_PROVISIONED: ${{ vars.AGENTOS_KVM_RUNNER_PROVISIONED }}
+        run: |
+          if [ "${AGENTOS_KVM_RUNNER_PROVISIONED}" = "true" ]; then
+            echo "provisioned=true" >> "$GITHUB_OUTPUT"
+            echo "agentos-kvm runner declared provisioned"
+          else
+            echo "provisioned=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::the agentos-kvm runner is NOT provisioned. Skipping the Firecracker KVM probe instead of leaving it queued forever. Set the repository variable AGENTOS_KVM_RUNNER_PROVISIONED=true once the runner is online."
+          fi
+
   firecracker-kvm:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *'
+    needs: runner-preflight
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 18 * * *')
+      && needs.runner-preflight.outputs.provisioned == 'true'
     runs-on: [self-hosted, Linux, X64, agentos-kvm]
     timeout-minutes: 60
     steps:
@@ -31,4 +63,4 @@ jobs:
       - name: Report failure reason
         if: failure()
         run: |
-          echo "::notice::KVM evidence failed. If the agentos-kvm runner is not provisioned, this job stays queued in this workflow only; it does not block the nightly production evidence."
+          echo "::notice::KVM evidence failed on a runner declared provisioned. The preflight gate only routes here when the runner is online, so this is a real failure of the Firecracker probe path, not a missing runner."
