@@ -1,7 +1,8 @@
 # Multi-Agent Research Workflow (Reference Application)
 
 A complete, runnable AgentOS-native implementation of the multi-agent deep
-research workflow from `docs/AgentOS_Multi-Agent_Research_Workflow_具体开发方案.md`.
+research workflow from the project's internal design doc (not published in
+this repository; this README is the complete behavioral specification).
 Seven agent roles, dynamic spawn fan-out, Evidence Memory, critic-driven
 second-round research, budget governance, citation validation, and
 failure-injection recovery — every layer running on the real kernel stack
