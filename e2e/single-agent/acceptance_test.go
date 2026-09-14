@@ -182,11 +182,32 @@ func TestV11ThousandTaskPipeline(t *testing.T) {
 	}
 	elapsed := time.Since(started)
 
-	// Exactness: total settled tokens equal 150 per succeeded task.
-	expected := int64(succeeded) * 150
+	// Exactness: every SUCCEEDED task settled exactly 150 tokens (40+20 then
+	// 60+30 across its two model calls). A FAILED task is not free: the Model
+	// Gateway settles known usage for every terminal status, failure included
+	// (internal/kernel/model/gateway.go Finish -> SettleTaskUsageDelta, and
+	// the CHANGELOG entry "Failed model calls record known-zero, known, or
+	// unknown usage instead of treating uncertainty as free usage"). So the
+	// ledger total is not 150 x succeeded — a task that fails after its first
+	// model call legitimately settles that call. The invariant that catches
+	// duplicate settlement is exactness on the succeeded tasks, bounded by a
+	// per-task ceiling on the whole run.
+	misSettled := queryInt(ctx, t, env, `SELECT count(*) FROM (
+		SELECT t.id, COALESCE(SUM(s.tokens), 0) AS settled
+		FROM tasks t
+		LEFT JOIN task_budget_settlements s
+			ON s.tenant_id = t.tenant_id AND s.task_id = t.id
+		WHERE t.tenant_id = $1 AND t.phase = 'SUCCEEDED'
+		GROUP BY t.id) d WHERE d.settled <> 150`, e2eTenant)
+	if misSettled != 0 {
+		t.Fatalf("succeeded tasks that did not settle exactly 150 tokens: %d", misSettled)
+	}
 	settled := queryInt(ctx, t, env, `SELECT COALESCE(SUM(tokens),0) FROM task_budget_settlements WHERE tenant_id = $1`, e2eTenant)
-	if settled != expected {
-		t.Fatalf("settled tokens = %d, want exactly %d (150 per succeeded task)", settled, expected)
+	if floor := int64(succeeded) * 150; settled < floor {
+		t.Fatalf("settled tokens = %d, want at least %d (150 per succeeded task)", settled, floor)
+	}
+	if ceiling := int64(total) * 150; settled > ceiling {
+		t.Fatalf("settled tokens = %d, above the %d ceiling (150 per submitted task): duplicate settlement", settled, ceiling)
 	}
 	// Result uniqueness: no task result artifact is referenced twice.
 	duplicates := queryInt(ctx, t, env, `SELECT count(*) FROM (
