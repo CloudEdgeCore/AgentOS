@@ -2,9 +2,9 @@
 
 AgentOS is a control and runtime platform for securely publishing, scheduling, executing, recovering, governing, and auditing AI agents.
 
-> **Current release: AgentOS 1.0.0.0 (GA)**
+> **Current release: AgentOS 1.1.0.0 (GA)**
 >
-> SemVer / Git tag: [`v1.0.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.0.0)
+> SemVer / Git tag: [`v1.1.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.1.0)
 >
 > Stable contracts: Control API v1, Agent Manifest v1, Runtime / Gateway / Model Protocol v1, and Runtime Interface v1
 
@@ -130,7 +130,7 @@ Build every Go command:
 go build ./cmd/...
 ```
 
-The official [`v1.0.0` release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.0.0) contains complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64, plus a Python wheel.
+The official [`v1.1.0` release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.1.0) contains complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64, plus a Python wheel.
 
 ### Create and certify a Python agent runtime
 
@@ -444,7 +444,7 @@ The official release workflow runs the GA gates and generates:
 Download and verify all release assets:
 
 ```shell
-gh release download v1.0.0 --repo CloudEdgeCore/AgentOS
+gh release download v1.1.0 --repo CloudEdgeCore/AgentOS
 sha256sum -c checksums.txt
 ```
 
