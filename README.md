@@ -326,8 +326,8 @@ go test -race -count=1 ./...
 go tool govulncheck ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 (cd sdk/python && python -m unittest discover -s tests -v)
-npm --prefix sdk/typescript ci
-npm --prefix sdk/typescript test
+(cd sdk/typescript && npm ci)
+(cd sdk/typescript && npm test)
 ```
 
 Real PostgreSQL/NATS integration tests:
@@ -480,10 +480,13 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | Runtime Interface event streaming | Stable (additive) | SSE round-trip, cursor resume, and v1 polling fallback tests |
 | TypeScript Control/Runtime client SDK | Stable client surface | Strict TypeScript build and HTTP contract tests |
 | Wasmtime and OCI/gVisor runtimes | Stable | Rust tests and real Linux isolation CI |
-| Firecracker runtime | Evaluation only | Dedicated real-KVM scheduled probe; no production provider yet |
+| Firecracker runtime | Evaluation only | Real-KVM probe is gated by runner-preflight and currently skips because no `agentos-kvm` runner is provisioned; no production provider yet |
 | Live model execution | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
-| 24-hour recovery soak | Scheduled evidence | Weekly dedicated self-hosted runner job |
-| Longer soaks (72h / 7d) | Scheduled + on-demand evidence | Monthly 72h (15th) and 7d (1st) jobs plus `soak_hours` dispatch; 7d runs as two sequential 84h jobs under GitHub's 5-day self-hosted job cap |
+| 24-hour recovery soak | **Not produced** | The weekly job exists but skips: no self-hosted runner is provisioned, so runner-preflight turns it into an explicit skip (nightly run 34900840087: `soak` skipped) |
+| Longer soaks (72h / 7d) | **Not produced** | Same gate. The 72h (15th), 7d (1st) and `soak_hours` dispatch jobs all skip today |
+| 100K-scale pipeline correctness | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
+| Performance stability (≤10% throughput, ≤15% P95 spread) | **Not certified** | The targets assume fixed hardware; on shared CI runners the measured spread was 35% / 38%, consistent with host variance rather than system behaviour |
+| 1M-scale capacity baseline | **Never run** | The `capacity-baseline-1m` job is ready but gated by the same missing runner |
 
 ## Current boundaries
 
@@ -491,5 +494,16 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 - The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
 - Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
 - Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
+- **Performance stability is not certified and no capacity number is claimed.** The
+  100K-scale pipeline is verified for correctness, not for throughput stability. The
+  stability targets (throughput spread ≤10%, P95 spread ≤15%) assume fixed hardware and
+  were not met on shared CI runners, where the measured spread was 35% / 38% and is
+  consistent with host variance rather than system behaviour. The 1M-scale baseline has
+  never been run.
+- **Scheduled soak evidence is not currently produced.** The repository has no
+  self-hosted runners provisioned, so the 24h/72h/7d soak jobs and the Firecracker KVM
+  probe are gated by an explicit runner-preflight check and skip with a notice instead
+  of queueing. Evidence exists only where it is published under
+  [`docs/evidence/`](docs/evidence/); a scheduled job that did not run proves nothing.
 
 These boundaries are intentional. AgentOS v1.0 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.
