@@ -485,7 +485,7 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | 24-hour recovery soak | **Not produced** | The weekly job exists but skips: no self-hosted runner is provisioned, so runner-preflight turns it into an explicit skip (nightly run 34900840087: `soak` skipped) |
 | Longer soaks (72h / 7d) | **Not produced** | Same gate. The 72h (15th), 7d (1st) and `soak_hours` dispatch jobs all skip today |
 | 100K-scale pipeline correctness | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
-| Performance stability (≤10% throughput, ≤15% P95 spread) | **Not certified** | The targets assume fixed hardware; on shared CI runners the measured spread was 35% / 38%, consistent with host variance rather than system behaviour |
+| Performance stability (≤10% throughput, ≤15% P95 spread) | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured a 2.56% throughput spread and a 1.78% P95 spread, meeting both targets — [`docs/evidence/benchmark/100k-stability-2026-09-15.md`](docs/evidence/benchmark/100k-stability-2026-09-15.md). Shared CI runners remain unsuitable for this measurement (35% / 38%, host variance) |
 | 1M-scale capacity baseline | **Not produced** | The `capacity-baseline-1m` job is ready but gated by the same missing runner and has never run. On a local workstation, three 1M attempts on 2026-09-12 reached 257K / 48K / 475K of 1M before host-side process or database termination; those runs are not published and no 1M run has ever completed |
 
 ## Current boundaries
@@ -494,15 +494,21 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 - The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
 - Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
 - Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
-- **Performance stability is not certified and no capacity number is claimed.** The
-  100K-scale pipeline is verified for correctness, not for throughput stability. The
-  stability targets (throughput spread ≤10%, P95 spread ≤15%) assume fixed hardware and
-  were not met on shared CI runners, where the measured spread was 35% / 38% and is
-  consistent with host variance rather than system behaviour. No 1M-scale run has ever
-  completed: the scheduled job has not run because no self-hosted runner is provisioned,
-  and three attempts on a local workstation (2026-09-12) reached 257K / 48K / 475K of 1M
-  before host-side process or database termination. Those attempts are not published
-  evidence.
+- **Performance stability is certified on one fixed host, and no production capacity number
+  is claimed.** Three consecutive 100K-task runs on a single workstation at `45598a9`
+  measured a 2.56% end-to-end throughput spread and a 1.78% P95 spread, inside the
+  ≤10% / ≤15% targets — [`docs/evidence/benchmark/100k-stability-2026-09-15.md`](docs/evidence/benchmark/100k-stability-2026-09-15.md).
+  The absolute throughput (~40 tasks/s) describes that workstation, which was running 15
+  unrelated containers at the time, not supported production hardware, and it is not
+  comparable to the Linux CI figures in `100k.md`. One caveat is recorded rather than
+  smoothed over: the `enqueue` sub-phase alone spread 12.8%, above the 10% figure, while the
+  end-to-end metric that the target is defined on met it. The same targets remain unmet on
+  shared CI runners, where the measured spread was 35% / 38% and is consistent with host
+  variance rather than system behaviour.
+- **No 1M-scale run has ever completed.** The scheduled job has not run because no
+  self-hosted runner is provisioned, and three attempts on a local workstation (2026-09-12)
+  reached 257K / 48K / 475K of 1M before host-side process or database termination. Those
+  attempts are not published evidence.
 - **Scheduled soak evidence is not currently produced.** The repository has no
   self-hosted runners provisioned, so the 24h/72h/7d soak jobs and the Firecracker KVM
   probe are gated by an explicit runner-preflight check and skip with a notice instead

@@ -1,0 +1,8 @@
+[2026-09-15T20:32:02] START source_commit=45598a9c09782529359f550446a9f7ff554f8d21 runs=3 tasks=100000
+[2026-09-15T20:32:02] RUNNING run=1/3 phase=start started=2026-09-15T20:32:02
+[2026-09-15T21:13:54] RUNNING run=1/3 done exit=0 elapsed=41.9min throughput=40.0 p95=37m16.62s
+[2026-09-15T21:13:54] RUNNING run=2/3 phase=start started=2026-09-15T21:13:54
+[2026-09-15T21:55:40] RUNNING run=2/3 done exit=0 elapsed=41.8min throughput=40.0 p95=37m30.557s
+[2026-09-15T21:55:40] RUNNING run=3/3 phase=start started=2026-09-15T21:55:40
+[2026-09-15T22:38:19] RUNNING run=3/3 done exit=0 elapsed=42.6min throughput=39.0 p95=37m56.382s
+[2026-09-15T22:38:19] SUCCESS source_commit=45598a9c09782529359f550446a9f7ff554f8d21 throughput_spread=2.6% p95_spread=1.8% throughputs=[40.0, 40.0, 39.0] p95_seconds=[2236.6, 2250.6, 2276.4] ended=2026-09-15T22:38:19

@@ -1,0 +1,116 @@
+[
+  {
+    "pass": true,
+    "tasks": 100000,
+    "wall": "41m47.945s",
+    "wall_s": 2507.945,
+    "throughput": 40.0,
+    "enqueue": {
+      "wall": "4m11.954s",
+      "wall_s": 251.954,
+      "throughput": 397.0
+    },
+    "admit": {
+      "wall": "7m11.553s",
+      "wall_s": 431.553,
+      "throughput": 232.0
+    },
+    "schedule": {
+      "wall": "18m46.023s",
+      "wall_s": 1126.023,
+      "throughput": 89.0
+    },
+    "complete": {
+      "wall": "11m38.374s",
+      "wall_s": 698.374,
+      "throughput": 143.0
+    },
+    "end_to_end": {
+      "p50": "33m50.795s",
+      "p95": "37m16.62s",
+      "p99": "37m32.981s",
+      "p95_s": 2236.62,
+      "p99_s": 2252.981
+    },
+    "go_test_s": 2509.463,
+    "run": 1,
+    "exit_code": 0,
+    "elapsed_s": 2511.6
+  },
+  {
+    "pass": true,
+    "tasks": 100000,
+    "wall": "41m42.718s",
+    "wall_s": 2502.718,
+    "throughput": 40.0,
+    "enqueue": {
+      "wall": "3m47.113s",
+      "wall_s": 227.113,
+      "throughput": 440.0
+    },
+    "admit": {
+      "wall": "7m4.395s",
+      "wall_s": 424.395,
+      "throughput": 236.0
+    },
+    "schedule": {
+      "wall": "18m12.479s",
+      "wall_s": 1092.479,
+      "throughput": 92.0
+    },
+    "complete": {
+      "wall": "12m38.716s",
+      "wall_s": 758.716,
+      "throughput": 132.0
+    },
+    "end_to_end": {
+      "p50": "33m41.582s",
+      "p95": "37m30.557s",
+      "p99": "37m50.562s",
+      "p95_s": 2250.557,
+      "p99_s": 2270.562
+    },
+    "go_test_s": 2503.974,
+    "run": 2,
+    "exit_code": 0,
+    "elapsed_s": 2506.4
+  },
+  {
+    "pass": true,
+    "tasks": 100000,
+    "wall": "42m34.865s",
+    "wall_s": 2554.865,
+    "throughput": 39.0,
+    "enqueue": {
+      "wall": "4m16.089s",
+      "wall_s": 256.089,
+      "throughput": 390.0
+    },
+    "admit": {
+      "wall": "7m23.436s",
+      "wall_s": 443.436,
+      "throughput": 226.0
+    },
+    "schedule": {
+      "wall": "19m2.747s",
+      "wall_s": 1142.747,
+      "throughput": 88.0
+    },
+    "complete": {
+      "wall": "11m52.559s",
+      "wall_s": 712.559,
+      "throughput": 140.0
+    },
+    "end_to_end": {
+      "p50": "34m32.44s",
+      "p95": "37m56.382s",
+      "p99": "38m14.709s",
+      "p95_s": 2276.382,
+      "p99_s": 2294.709
+    },
+    "go_test_s": 2556.224,
+    "run": 3,
+    "exit_code": 0,
+    "elapsed_s": 2558.8
+  }
+]
