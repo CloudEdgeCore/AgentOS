@@ -125,7 +125,7 @@ jobs:
             fi
           done
           python3 -m pip wheel --no-deps --wheel-dir dist sdk/python
-          npm --prefix sdk/typescript pack --pack-destination "$GITHUB_WORKSPACE/dist"
+          (cd sdk/typescript && npm pack --pack-destination "$GITHUB_WORKSPACE/dist")
       - name: Generate SBOM, checksums, and keyless signature
         shell: bash
         env:
