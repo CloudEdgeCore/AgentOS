@@ -486,7 +486,7 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | Longer soaks (72h / 7d) | **Not produced** | Same gate. The 72h (15th), 7d (1st) and `soak_hours` dispatch jobs all skip today |
 | 100K-scale pipeline correctness | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
 | Performance stability (≤10% throughput, ≤15% P95 spread) | **Not certified** | The targets assume fixed hardware; on shared CI runners the measured spread was 35% / 38%, consistent with host variance rather than system behaviour |
-| 1M-scale capacity baseline | **Never run** | The `capacity-baseline-1m` job is ready but gated by the same missing runner |
+| 1M-scale capacity baseline | **Not produced** | The `capacity-baseline-1m` job is ready but gated by the same missing runner and has never run. On a local workstation, three 1M attempts on 2026-09-12 reached 257K / 48K / 475K of 1M before host-side process or database termination; those runs are not published and no 1M run has ever completed |
 
 ## Current boundaries
 
@@ -498,8 +498,11 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
   100K-scale pipeline is verified for correctness, not for throughput stability. The
   stability targets (throughput spread ≤10%, P95 spread ≤15%) assume fixed hardware and
   were not met on shared CI runners, where the measured spread was 35% / 38% and is
-  consistent with host variance rather than system behaviour. The 1M-scale baseline has
-  never been run.
+  consistent with host variance rather than system behaviour. No 1M-scale run has ever
+  completed: the scheduled job has not run because no self-hosted runner is provisioned,
+  and three attempts on a local workstation (2026-09-12) reached 257K / 48K / 475K of 1M
+  before host-side process or database termination. Those attempts are not published
+  evidence.
 - **Scheduled soak evidence is not currently produced.** The repository has no
   self-hosted runners provisioned, so the 24h/72h/7d soak jobs and the Firecracker KVM
   probe are gated by an explicit runner-preflight check and skip with a notice instead
