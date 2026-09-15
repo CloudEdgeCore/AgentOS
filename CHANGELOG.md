@@ -6,6 +6,12 @@ public protocol versions evolve independently.
 
 ## Unreleased
 
+### Fixed
+
+- TypeScript SDK version aligned with the product version: `sdk/typescript/package.json`
+  and its lockfile now declare `1.1.0`, so `npm pack` produces `agentos-sdk-1.1.0.tgz`
+  instead of `agentos-sdk-1.0.0.tgz`.
+
 ## 1.1.0 - 2026-09-14
 
 ### Added
