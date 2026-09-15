@@ -6,13 +6,7 @@ public protocol versions evolve independently.
 
 ## Unreleased
 
-### Fixed
-
-- TypeScript SDK version aligned with the product version: `sdk/typescript/package.json`
-  and its lockfile now declare `1.1.0`, so `npm pack` produces `agentos-sdk-1.1.0.tgz`
-  instead of `agentos-sdk-1.0.0.tgz`.
-
-## 1.1.0 - 2026-09-14
+## 1.1.0 - 2026-09-15
 
 ### Added
 
@@ -32,6 +26,16 @@ public protocol versions evolve independently.
   KVM) are gated behind explicit runner-preflight repository variables; when runners
   are not provisioned the jobs skip immediately with a notice instead of queueing
   indefinitely.
+- README states the evidence gaps explicitly instead of presenting scheduled jobs as
+  if they produced evidence: performance stability is not certified (the 100K pipeline
+  is verified for correctness, but the ≤10% throughput / ≤15% P95 spread targets assume
+  fixed hardware and were not met on shared runners), the 1M capacity baseline has never
+  run, and the 24h/72h/7d soak and KVM jobs skip because no self-hosted runner is
+  provisioned.
+- The TypeScript SDK checks in CI and in the README run from `sdk/typescript` in a `cd`
+  subshell instead of `npm --prefix`, matching the release workflow. npm 11 (Node 24)
+  resolves the project root from the current directory when no `package.json` is present
+  there, so `--prefix` failed with ENOENT in the release pipeline.
 
 ### Security
 
@@ -43,6 +47,9 @@ public protocol versions evolve independently.
 
 ### Fixed
 
+- TypeScript SDK version aligned with the product version: `sdk/typescript/package.json`
+  and its lockfile now declare `1.1.0`, so `npm pack` produces `agentos-sdk-1.1.0.tgz`
+  instead of `agentos-sdk-1.0.0.tgz`.
 - The single-agent acceptance e2e settled-usage invariant credited only succeeded
   tasks' first rounds, but failed tasks' completed first round is settled by design;
   the invariant now requires each SUCCEEDED task to settle exactly the per-task
