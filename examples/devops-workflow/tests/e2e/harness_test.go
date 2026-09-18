@@ -234,7 +234,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 		provider_circuit_breakers, workflow_usage_ledgers,
 		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts, memory_records,
-		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
+		task_budget_settlements, task_budget_ledgers, agent_versions, ipc_messages, inbox_receipts, outbox_events,
 		runtime_leases, attempts, runs, tasks, workflows, workflow_steps RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset schema: %v", err)
 	}
