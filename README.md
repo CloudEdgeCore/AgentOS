@@ -486,7 +486,7 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 | Longer soaks (72h / 7d) | **Not produced** | Same gate. The 72h (15th), 7d (1st) and `soak_hours` dispatch jobs all skip today |
 | 100K-scale pipeline correctness | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
 | Performance stability (≤10% throughput, ≤15% P95 spread) | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured a 2.56% throughput spread and a 1.78% P95 spread, meeting both targets — [`docs/evidence/benchmark/100k-stability-2026-09-15.md`](docs/evidence/benchmark/100k-stability-2026-09-15.md). Shared CI runners remain unsuitable for this measurement (35% / 38%, host variance) |
-| 1M-scale capacity baseline | **Not produced** | The `capacity-baseline-1m` job is ready but gated by the same missing runner and has never run. On a local workstation, three 1M attempts on 2026-09-12 reached 257K / 48K / 475K of 1M before host-side process or database termination; those runs are not published and no 1M run has ever completed |
+| 1M-scale capacity baseline | Measured on fixed hardware | Three consecutive 1M-task runs on one host at `45598a9` completed with a 3.45% throughput spread and a 2.95% P95 spread, zero lost / duplicated / stuck tasks — [`docs/evidence/benchmark/1m-2026-09-16.md`](docs/evidence/benchmark/1m-2026-09-16.md). The `capacity-baseline-1m` nightly job is still gated by the missing self-hosted runner, so this was produced out of band |
 
 ## Current boundaries
 
@@ -505,10 +505,20 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
   end-to-end metric that the target is defined on met it. The same targets remain unmet on
   shared CI runners, where the measured spread was 35% / 38% and is consistent with host
   variance rather than system behaviour.
-- **No 1M-scale run has ever completed.** The scheduled job has not run because no
-  self-hosted runner is provisioned, and three attempts on a local workstation (2026-09-12)
-  reached 257K / 48K / 475K of 1M before host-side process or database termination. Those
-  attempts are not published evidence.
+- **The 1M baseline is measured, but not on the scheduled path.** Three consecutive
+  1M-task runs on a single `m7i.2xlarge` at `45598a9` completed with a 3.45% end-to-end
+  throughput spread and a 2.95% P95 spread, with zero lost, duplicated, or stuck tasks —
+  [`docs/evidence/benchmark/1m-2026-09-16.md`](docs/evidence/benchmark/1m-2026-09-16.md).
+  This replaces the previous "no 1M run has ever completed" boundary: three attempts on a
+  local workstation (2026-09-12) had reached only 257K / 48K / 475K of 1M, and those
+  attempts remain unpublished. What the new result does **not** claim: ~30 tasks/s end to
+  end is the figure for that one host with an untuned 2 GiB `shared_buffers`, not a
+  production capacity number; the `capacity-baseline-1m` nightly job still skips, because
+  the self-hosted pool it needs is not provisioned, so nothing here is reproduced by CI;
+  and no same-host 100K → 1M comparison was run, so this is not a measurement of scaling
+  degradation. Disk utilisation inside the 1M runs peaked at 98.7% against a gp3 baseline
+  of 125 MiB/s — recorded as a burst (1.71% of samples ≥95%) rather than a sustained
+  bottleneck, but no run was made on a faster volume, so a gp3 limit at 1M is not ruled out.
 - **Scheduled soak evidence is not currently produced.** The repository has no
   self-hosted runners provisioned, so the 24h/72h/7d soak jobs and the Firecracker KVM
   probe are gated by an explicit runner-preflight check and skip with a notice instead
