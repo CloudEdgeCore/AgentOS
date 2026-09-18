@@ -27,11 +27,17 @@ import (
 
 // System tool names exposed alongside the tenant tool registry.
 const (
-	SystemModelInvoke   = "agentos.model.invoke"
-	SystemMemoryPut     = "agentos.memory.put"
-	SystemMemorySearch  = "agentos.memory.search"
-	SystemTaskSpawn     = "agentos.task.spawn"
-	systemToolsRevision = "v1.4"
+	SystemModelInvoke  = "agentos.model.invoke"
+	SystemMemoryPut    = "agentos.memory.put"
+	SystemMemorySearch = "agentos.memory.search"
+	SystemTaskSpawn    = "agentos.task.spawn"
+	SystemIPCSend      = "agentos.ipc.send"
+	SystemIPCReceive   = "agentos.ipc.receive"
+	SystemIPCAck       = "agentos.ipc.ack"
+	// systemToolsRevision is the version advertised in every system tool
+	// description. It moves whenever the set or the contract of the advertised
+	// tools changes, so an agent that caches tools/list can tell.
+	systemToolsRevision = "v1.5"
 )
 
 // Bounds of the tool-contract surface an agent may attach to one model call:
@@ -111,6 +117,85 @@ func (k KernelMemoryBroker) Search(ctx context.Context, identity AttemptContext,
 	return k.Gateway.Search(ctx, in)
 }
 
+// MailboxBroker sends, drains and acknowledges durable agent mailboxes with the
+// fenced identity of the calling attempt. As with MemoryBroker the identity is
+// explicit: the tenant, the sender's version reference and the mailbox a drain
+// reads are all derived from the fence, so no agent argument can widen them.
+//
+// Delivery is pull-only. The platform cannot notify a running agent that mail
+// has arrived — agentos.runtime.v1 exposes pull RPCs and its HeartbeatResponse
+// carries no payload — so an agent discovers mail by draining its own mailbox.
+// A drain may wait for a bounded time, which is a poll, not a push.
+type MailboxBroker interface {
+	SendMessage(context.Context, AttemptContext, MailboxSendInput) (MailboxSendOutcome, error)
+	ReceiveMessages(context.Context, AttemptContext, MailboxReceiveInput) ([]MailboxMessage, error)
+	AcknowledgeMessages(context.Context, AttemptContext, MailboxAckInput) (MailboxAckOutcome, error)
+}
+
+// MailboxSendInput is one send with the sender taken from the fenced identity.
+type MailboxSendInput struct {
+	// ToAgentVersionRef and ToRunID name the receiving mailbox. The run id,
+	// not an attempt id: a mailbox follows the run so a message outlives the
+	// attempt that was draining it.
+	ToAgentVersionRef string
+	ToRunID           string
+	Kind              string
+	// PayloadJSON is the message body as a JSON document; empty means {}.
+	PayloadJSON json.RawMessage
+	// IdempotencyKey is chosen by the caller on purpose: retrying a send must
+	// resolve to the message the first attempt stored, while two deliberate
+	// sends of the same body must remain two messages.
+	IdempotencyKey   string
+	CorrelationID    string
+	ReplyToMessageID string
+	// Deadline is optional; the zero time means the message carries none.
+	Deadline time.Time
+}
+
+type MailboxSendOutcome struct {
+	MessageID string
+	// Replayed reports that the idempotency key resolved to a message an
+	// earlier attempt had already stored.
+	Replayed   bool
+	AcceptedAt time.Time
+}
+
+type MailboxReceiveInput struct {
+	// MaxMessages is the batch bound; zero means the server default.
+	MaxMessages int32
+	// WaitMillis is the bounded wait for an empty mailbox; zero reads once.
+	WaitMillis int32
+}
+
+// MailboxMessage is one message as drained. Attachments travel as references:
+// a body above the mailbox payload limit has to be referenced, not inlined.
+type MailboxMessage struct {
+	MessageID           string
+	FromAgentVersionRef string
+	ToAgentVersionRef   string
+	ToRunID             string
+	Kind                string
+	PayloadJSON         json.RawMessage
+	AttachmentsJSON     json.RawMessage
+	CorrelationID       string
+	ReplyToMessageID    string
+	SentAt              time.Time
+	Deadline            time.Time
+}
+
+// MailboxAckInput acknowledges a batch the caller has drained.
+type MailboxAckInput struct {
+	MessageIDs []string
+}
+
+// MailboxAckOutcome partitions the batch into receipts this call created and
+// receipts an earlier call had already created, so a retry is distinguishable
+// from a first attempt.
+type MailboxAckOutcome struct {
+	Acknowledged        []string
+	AlreadyAcknowledged []string
+}
+
 // Broker extends a ToolAdapter with the system tools: tools/list merges the
 // tenant registry with the brokered declarations, tools/call dispatches the
 // system names and delegates everything else to the tenant adapter.
@@ -119,14 +204,15 @@ type Broker struct {
 	models   ModelBroker
 	memory   MemoryBroker
 	spawner  WorkflowSpawner
+	mailbox  MailboxBroker
 	identity IdentityResolver
 }
 
-// NewBroker builds the brokered MCP surface. models, memory and spawner may
-// be nil: the corresponding tools are then not listed and their calls deny
-// closed.
-func NewBroker(tools *ToolAdapter, models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner, identity IdentityResolver) *Broker {
-	return &Broker{tools: tools, models: models, memory: memories, spawner: spawner, identity: identity}
+// NewBroker builds the brokered MCP surface. models, memory, spawner and
+// mailbox may be nil: the corresponding tools are then not listed and their
+// calls deny closed.
+func NewBroker(tools *ToolAdapter, models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner, mailbox MailboxBroker, identity IdentityResolver) *Broker {
+	return &Broker{tools: tools, models: models, memory: memories, spawner: spawner, mailbox: mailbox, identity: identity}
 }
 
 type systemTool struct {
@@ -172,7 +258,30 @@ type spawnToolInput struct {
 	MaxAttempts     int             `json:"maxAttempts,omitempty"`
 }
 
-func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner) []systemTool {
+// ipcSendToolInput names the receiving mailbox by its two parts rather than by
+// the canonical "ref#run" form: the separator is an internal encoding, and an
+// agent should not have to know it.
+type ipcSendToolInput struct {
+	ToAgentVersionRef string          `json:"toAgentVersionRef" required:"true"`
+	ToRunID           string          `json:"toRunId" required:"true"`
+	Kind              string          `json:"kind" required:"true"`
+	PayloadJSON       json.RawMessage `json:"payloadJson,omitempty"`
+	IdempotencyKey    string          `json:"idempotencyKey" required:"true"`
+	CorrelationID     string          `json:"correlationId,omitempty"`
+	ReplyToMessageID  string          `json:"replyToMessageId,omitempty"`
+	DeadlineSeconds   int32           `json:"deadlineSeconds,omitempty"`
+}
+
+type ipcReceiveToolInput struct {
+	MaxMessages int32 `json:"maxMessages,omitempty"`
+	WaitMillis  int32 `json:"waitMillis,omitempty"`
+}
+
+type ipcAckToolInput struct {
+	MessageIDs []string `json:"messageIds" required:"true"`
+}
+
+func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner WorkflowSpawner, mailbox MailboxBroker) []systemTool {
 	var declarations []systemTool
 	if models != nil {
 		declarations = append(declarations, systemTool{
@@ -201,6 +310,27 @@ func systemToolDeclarations(models ModelBroker, memories MemoryBroker, spawner W
 			schema:      schemaFor[spawnToolInput](),
 		})
 	}
+	if mailbox != nil {
+		declarations = append(declarations,
+			systemTool{
+				name: SystemIPCSend,
+				description: "Send one durable message to another run's mailbox in this tenant (the mailbox follows the run, so it survives an attempt failure; " +
+					"delivery is at-least-once and idempotencyKey decides whether a retry replays the stored message)",
+				schema: schemaFor[ipcSendToolInput](),
+			},
+			systemTool{
+				name: SystemIPCReceive,
+				description: "Drain the calling run's own mailbox (there is no push channel, so this is how an agent learns it has mail; waitMillis waits for a bounded time " +
+					"and never exceeds the caller's lease, and messages come back until they are acknowledged)",
+				schema: schemaFor[ipcReceiveToolInput](),
+			},
+			systemTool{
+				name: SystemIPCAck,
+				description: "Acknowledge drained messages so later drains of the same mailbox no longer return them (the receipt is scoped to the calling run, " +
+					"so it cannot hide a message from anyone else)",
+				schema: schemaFor[ipcAckToolInput](),
+			})
+	}
 	return declarations
 }
 
@@ -221,7 +351,7 @@ func (b *Broker) ListTools(ctx context.Context, params json.RawMessage) (any, *E
 	if tools == nil {
 		tools = []map[string]any{}
 	}
-	for _, declaration := range systemToolDeclarations(b.models, b.memory, b.spawner) {
+	for _, declaration := range systemToolDeclarations(b.models, b.memory, b.spawner, b.mailbox) {
 		tools = append(tools, map[string]any{
 			"name":        declaration.name,
 			"description": declaration.description + " (system tool " + systemToolsRevision + ")",
@@ -261,6 +391,21 @@ func (b *Broker) CallTool(ctx context.Context, params json.RawMessage) (any, *Er
 			return nil, invalidParams("dynamic spawn is not configured on this runtime")
 		}
 		return b.spawnTask(ctx, call.Arguments)
+	case SystemIPCSend:
+		if b.mailbox == nil {
+			return nil, invalidParams("agent mailboxes are not configured on this runtime")
+		}
+		return b.sendIPCMessage(ctx, call.Arguments)
+	case SystemIPCReceive:
+		if b.mailbox == nil {
+			return nil, invalidParams("agent mailboxes are not configured on this runtime")
+		}
+		return b.receiveIPCMessages(ctx, call.Arguments)
+	case SystemIPCAck:
+		if b.mailbox == nil {
+			return nil, invalidParams("agent mailboxes are not configured on this runtime")
+		}
+		return b.acknowledgeIPCMessages(ctx, call.Arguments)
 	default:
 		return b.tools.CallTool(ctx, params)
 	}
@@ -511,6 +656,134 @@ func (b *Broker) searchMemory(ctx context.Context, params json.RawMessage) (any,
 		used += len(record.Content)
 	}
 	document, _ := json.Marshal(map[string]any{"records": results, "truncated": truncated})
+	return textResult(document, false), nil
+}
+
+// sendIPCMessage stores one message in another run's mailbox. The sender's
+// identity is the fenced attempt, so the agent names only the recipient, the
+// kind and the body; the sender's version reference and the tenant are not
+// parameters at all.
+func (b *Broker) sendIPCMessage(ctx context.Context, params json.RawMessage) (any, *Error) {
+	var call ipcSendToolInput
+	if err := strictDecode(params, &call); err != nil {
+		return nil, invalidParams(err.Error())
+	}
+	if strings.TrimSpace(call.ToAgentVersionRef) == "" || strings.TrimSpace(call.ToRunID) == "" {
+		return nil, invalidParams("toAgentVersionRef and toRunId are required")
+	}
+	if strings.TrimSpace(call.Kind) == "" {
+		return nil, invalidParams("kind is required")
+	}
+	if strings.TrimSpace(call.IdempotencyKey) == "" {
+		return nil, invalidParams("idempotencyKey is required: it is what makes a retried send replay the stored message")
+	}
+	if len(call.PayloadJSON) > store.IPCPayloadLimit {
+		return nil, invalidParams("payloadJson exceeds 256 KiB; send a reference to the content instead")
+	}
+	if call.DeadlineSeconds < 0 {
+		return nil, invalidParams("deadlineSeconds must not be negative")
+	}
+	identity, err := b.resolveIdentity(ctx)
+	if err != nil {
+		return toolErrorResult("no fenced attempt identity"), nil
+	}
+	input := MailboxSendInput{
+		ToAgentVersionRef: call.ToAgentVersionRef, ToRunID: call.ToRunID,
+		Kind: call.Kind, PayloadJSON: call.PayloadJSON, IdempotencyKey: call.IdempotencyKey,
+		CorrelationID: call.CorrelationID, ReplyToMessageID: call.ReplyToMessageID,
+	}
+	if call.DeadlineSeconds > 0 {
+		input.Deadline = time.Now().Add(time.Duration(call.DeadlineSeconds) * time.Second)
+	}
+	outcome, sendErr := b.mailbox.SendMessage(ctx, identity, input)
+	if sendErr != nil {
+		return toolErrorResult("ipc send failed: " + boundedMessage(sendErr)), nil
+	}
+	document, _ := json.Marshal(map[string]any{
+		"messageId":  outcome.MessageID,
+		"replayed":   outcome.Replayed,
+		"acceptedAt": outcome.AcceptedAt.UTC().Format(time.RFC3339),
+	})
+	return textResult(document, false), nil
+}
+
+// receiveIPCMessages drains the calling run's own mailbox. The mailbox is not a
+// parameter: it is derived from the fenced identity, so an agent can only ever
+// drain its own run's mail.
+func (b *Broker) receiveIPCMessages(ctx context.Context, params json.RawMessage) (any, *Error) {
+	var call ipcReceiveToolInput
+	if err := strictDecode(params, &call); err != nil {
+		return nil, invalidParams(err.Error())
+	}
+	if call.MaxMessages < 0 || call.WaitMillis < 0 {
+		return nil, invalidParams("maxMessages and waitMillis must not be negative")
+	}
+	identity, err := b.resolveIdentity(ctx)
+	if err != nil {
+		return toolErrorResult("no fenced attempt identity"), nil
+	}
+	messages, receiveErr := b.mailbox.ReceiveMessages(ctx, identity, MailboxReceiveInput{
+		MaxMessages: call.MaxMessages, WaitMillis: call.WaitMillis,
+	})
+	if receiveErr != nil {
+		return toolErrorResult("ipc receive failed: " + boundedMessage(receiveErr)), nil
+	}
+	const maxIPCResponseBytes = 1 << 20
+	results := make([]map[string]any, 0, len(messages))
+	used := 0
+	truncated := false
+	for _, message := range messages {
+		if used+len(message.PayloadJSON) > maxIPCResponseBytes {
+			truncated = true
+			break
+		}
+		entry := map[string]any{
+			"messageId": message.MessageID, "fromAgentVersionRef": message.FromAgentVersionRef,
+			"toAgentVersionRef": message.ToAgentVersionRef, "toRunId": message.ToRunID,
+			"kind": message.Kind, "payloadJson": message.PayloadJSON,
+			"correlationId": message.CorrelationID, "sentAt": message.SentAt.UTC().Format(time.RFC3339),
+		}
+		if message.ReplyToMessageID != "" {
+			entry["replyToMessageId"] = message.ReplyToMessageID
+		}
+		if !message.Deadline.IsZero() {
+			entry["deadline"] = message.Deadline.UTC().Format(time.RFC3339)
+		}
+		if len(message.AttachmentsJSON) > 0 {
+			entry["attachments"] = message.AttachmentsJSON
+		}
+		results = append(results, entry)
+		used += len(message.PayloadJSON)
+	}
+	document, _ := json.Marshal(map[string]any{
+		"messages": results, "truncated": truncated, "acknowledgeWith": SystemIPCAck,
+		// Reading does not receipt: an agent that processes a batch and never
+		// acknowledges it rediscovers the same messages on its next drain.
+		"note": "messages stay in the mailbox until they are acknowledged with " + SystemIPCAck,
+	})
+	return textResult(document, false), nil
+}
+
+// acknowledgeIPCMessages records the calling run's receipts for a drained batch.
+func (b *Broker) acknowledgeIPCMessages(ctx context.Context, params json.RawMessage) (any, *Error) {
+	var call ipcAckToolInput
+	if err := strictDecode(params, &call); err != nil {
+		return nil, invalidParams(err.Error())
+	}
+	if len(call.MessageIDs) == 0 {
+		return nil, invalidParams("messageIds is required")
+	}
+	identity, err := b.resolveIdentity(ctx)
+	if err != nil {
+		return toolErrorResult("no fenced attempt identity"), nil
+	}
+	outcome, ackErr := b.mailbox.AcknowledgeMessages(ctx, identity, MailboxAckInput{MessageIDs: call.MessageIDs})
+	if ackErr != nil {
+		return toolErrorResult("ipc acknowledge failed: " + boundedMessage(ackErr)), nil
+	}
+	document, _ := json.Marshal(map[string]any{
+		"acknowledged": outcome.Acknowledged, "alreadyAcknowledged": outcome.AlreadyAcknowledged,
+	})
 	return textResult(document, false), nil
 }
 

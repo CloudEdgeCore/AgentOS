@@ -442,7 +442,7 @@ func newHarnessWith(t *testing.T, name string, tune func(*scenario), cfg Harness
 		runtimeadapter.NewGrpcModelBroker(modelv1.NewModelInvocationServiceClient(gatewayConn)),
 		runtimeadapter.NewGrpcMemoryBroker(gatewayv1.NewMemoryGatewayServiceClient(gatewayConn)),
 		runtimeadapter.NewGrpcWorkflowSpawner(runtimev1.NewWorkflowSpawnServiceClient(gatewayConn)),
-		registry)
+		nil, registry)
 	mcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("mcp listen: %v", err)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/cmd/mtlsutil"
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	ipcv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/ipc/v1"
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
@@ -178,7 +179,8 @@ func main() {
 		broker := mcp.NewBroker(tools,
 			runtimeadapter.NewGrpcModelBroker(modelv1.NewModelInvocationServiceClient(gatewayConnection)),
 			runtimeadapter.NewGrpcMemoryBroker(gatewayv1.NewMemoryGatewayServiceClient(gatewayConnection)),
-			spawner, slot)
+			spawner,
+			runtimeadapter.NewGrpcMailboxBroker(ipcv1.NewIPCGatewayServiceClient(gatewayConnection)), slot)
 		worker.WithExecutionWindow(slot)
 		mcpServer := mcp.NewServer("agentos-adapter", "v1.1.0", broker)
 		listener, listenErr := net.Listen("tcp", *mcpListen)

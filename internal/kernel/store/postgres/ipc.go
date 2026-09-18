@@ -14,7 +14,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var _ kernelstore.IPCStore = (*Store)(nil)
+var (
+	_ kernelstore.IPCStore          = (*Store)(nil)
+	_ kernelstore.MailboxScopeStore = (*Store)(nil)
+)
 
 // ipcMessageColumns is the projection shared by every read of a stored message.
 // idempotency_key is included even though the read model does not expose it:
@@ -31,14 +34,21 @@ const ipcMessageColumns = `sequence, id::text, tenant_id, from_agent_version_ref
 
 // AppendIPCMessage stores one message in the recipient's mailbox.
 //
-// No outbox event is written here. The event that announces a message, and the
-// receiver that consumes it, are the delivery stage's contract; this method is
-// deliberately only the durable write, so the delivery path can be designed
-// against a mailbox that already cannot lose a message.
+// A message stored for the first time also enqueues the IPCMessageStoredEventType
+// dispatch event into outbox_events, in the same transaction as the row it
+// announces. The two cannot diverge: a rolled-back send leaves no announcement,
+// and a committed send cannot be missing one. An idempotent replay enqueues
+// nothing, because the message it resolves to was announced by the attempt that
+// created it.
 //
-// No audit row is written either: audit attribution for IPC (which principal
-// sent what to whom) is a later concern, so until then a stored message is not
-// represented in the audit chain. That is a stated gap, not an oversight.
+// The event payload is a notification, not the message. The body stays in the
+// mailbox: a payload at the IPCPayloadLimit would sit close to the 1 MiB
+// JetStream MaxMsgSize once embedded in the event envelope, and the event stream
+// is not the place for message contents.
+//
+// No audit row is written: audit attribution for IPC (which principal sent what
+// to whom) is a later concern, so until then a stored message is not represented
+// in the audit chain. That is a stated gap, not an oversight.
 //
 // There is no retry loop around the transaction. The insert takes no row lock
 // and leans on a unique constraint with ON CONFLICT DO NOTHING, so contention
@@ -86,6 +96,14 @@ func (s *Store) AppendIPCMessage(ctx context.Context, in kernelstore.AppendIPCMe
 		[]byte(in.Payload), []byte(attachments), in.CorrelationID, replyTo,
 		in.IdempotencyKey, in.TraceID, in.SentAt.UTC(), deadline))
 	if scanErr == nil {
+		// occurred_at is the caller-supplied send time rather than s.now(): the
+		// announcement describes the send, and deriving the timestamp from the
+		// input keeps the event a function of the message it announces.
+		if err := insertEvent(ctx, tx, in.TenantID, kernelstore.IPCMessageEventAggregateType,
+			stored.ID, stored.Sequence, kernelstore.IPCMessageStoredEventType,
+			ipcMessageStoredPayload(stored), in.SentAt.UTC(), s.newID()); err != nil {
+			return result, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return result, classify(err)
 		}
@@ -108,6 +126,36 @@ func (s *Store) AppendIPCMessage(ctx context.Context, in kernelstore.AppendIPCMe
 		return result, classify(err)
 	}
 	return kernelstore.AppendIPCMessageResult{Message: existing, Replayed: true}, nil
+}
+
+// ipcMessageStoredPayload renders the announcement of a stored message. It
+// carries the addressing and correlation facts a consumer needs to decide
+// whether the message concerns it, and never the body: a reader that wants the
+// body reads the mailbox. Optional fields are omitted rather than written as
+// empty strings, so a consumer can tell "absent" from "present but empty".
+func ipcMessageStoredPayload(message kernelstore.IPCMessage) map[string]any {
+	payload := map[string]any{
+		"tenantId":            message.TenantID,
+		"messageId":           message.ID.String(),
+		"sequence":            message.Sequence,
+		"fromAgentVersionRef": message.FromAgentVersionRef,
+		"toAddress":           message.To.Canonical(),
+		"kind":                message.Kind,
+		"sentAt":              message.SentAt.UTC().Format(time.RFC3339Nano),
+	}
+	if message.CorrelationID != "" {
+		payload["correlationId"] = message.CorrelationID
+	}
+	if message.ReplyToMessageID != uuid.Nil {
+		payload["replyToMessageId"] = message.ReplyToMessageID.String()
+	}
+	if message.TraceID != "" {
+		payload["traceId"] = message.TraceID
+	}
+	if !message.Deadline.IsZero() {
+		payload["deadline"] = message.Deadline.UTC().Format(time.RFC3339Nano)
+	}
+	return payload
 }
 
 // readIPCAppendConflict reads back the row an insert could have collided with.
@@ -157,6 +205,30 @@ func (s *Store) GetIPCMessage(ctx context.Context, tenantID string, id uuid.UUID
 	message, _, err := scanIPCAppendRow(s.pool.QueryRow(ctx, `SELECT `+ipcMessageColumns+`
 		FROM ipc_messages WHERE tenant_id = $1 AND id = $2`, tenantID, id.String()))
 	return message, classify(err)
+}
+
+// GetRunMailboxScope resolves the mailbox scope a run id names.
+//
+// The agent version reference is read from the run's task rather than from the
+// run: a run carries no version of its own, and the task held the immutable
+// publication resolved during admission. A run id that exists in another tenant
+// is reported as ErrNotFound, exactly like one that does not exist, because
+// tenant scoping is not a filter the caller may observe.
+func (s *Store) GetRunMailboxScope(ctx context.Context, tenantID string, runID uuid.UUID) (kernelstore.RunMailboxScope, error) {
+	if strings.TrimSpace(tenantID) == "" || runID == uuid.Nil {
+		return kernelstore.RunMailboxScope{}, fmt.Errorf("tenant and run id are required")
+	}
+	var scope kernelstore.RunMailboxScope
+	err := s.pool.QueryRow(ctx, `SELECT r.id::text, r.task_id::text, t.agent_version_ref
+		FROM runs r
+		JOIN tasks t ON t.tenant_id = r.tenant_id AND t.id = r.task_id
+		WHERE r.tenant_id = $1 AND r.id = $2`, tenantID, runID.String()).
+		Scan(&scope.RunID, &scope.TaskID, &scope.AgentVersionRef)
+	if err != nil {
+		return kernelstore.RunMailboxScope{}, classify(err)
+	}
+	scope.TenantID = tenantID
+	return scope, nil
 }
 
 // ListMailbox drains one mailbox forward by sequence. Messages the consumer has
