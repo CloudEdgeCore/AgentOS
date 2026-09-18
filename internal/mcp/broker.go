@@ -722,9 +722,10 @@ func (b *Broker) receiveIPCMessages(ctx context.Context, params json.RawMessage)
 	if err != nil {
 		return toolErrorResult("no fenced attempt identity"), nil
 	}
-	messages, receiveErr := b.mailbox.ReceiveMessages(ctx, identity, MailboxReceiveInput{
-		MaxMessages: call.MaxMessages, WaitMillis: call.WaitMillis,
-	})
+	// ipcReceiveToolInput is field-for-field identical to MailboxReceiveInput, so
+	// convert rather than re-list: a field added to one and not the other then
+	// fails to compile instead of being silently dropped on the floor.
+	messages, receiveErr := b.mailbox.ReceiveMessages(ctx, identity, MailboxReceiveInput(call))
 	if receiveErr != nil {
 		return toolErrorResult("ipc receive failed: " + boundedMessage(receiveErr)), nil
 	}
@@ -777,7 +778,8 @@ func (b *Broker) acknowledgeIPCMessages(ctx context.Context, params json.RawMess
 	if err != nil {
 		return toolErrorResult("no fenced attempt identity"), nil
 	}
-	outcome, ackErr := b.mailbox.AcknowledgeMessages(ctx, identity, MailboxAckInput{MessageIDs: call.MessageIDs})
+	// Same shape as ipcAckToolInput; the conversion is what keeps them in step.
+	outcome, ackErr := b.mailbox.AcknowledgeMessages(ctx, identity, MailboxAckInput(call))
 	if ackErr != nil {
 		return toolErrorResult("ipc acknowledge failed: " + boundedMessage(ackErr)), nil
 	}
