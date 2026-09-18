@@ -174,7 +174,7 @@ func newSoakDatabase(t *testing.T) (*pgxpool.Pool, *postgres.Store) {
 		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
 		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,
 		runtime_operation_receipts, checkpoints, artifacts,
-		task_budget_settlements, task_budget_ledgers, agent_versions, inbox_receipts, outbox_events,
+		task_budget_settlements, task_budget_ledgers, agent_versions, ipc_messages, inbox_receipts, outbox_events,
 		audit_events,
 		tenant_consumption_windows, tenant_quotas,
 		runtime_leases, attempts, runs, tasks RESTART IDENTITY CASCADE`); err != nil {
