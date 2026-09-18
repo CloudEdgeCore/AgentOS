@@ -112,9 +112,32 @@ schedule 阶段推进至 **75,300/100,000 RUNNING（deferred=0, maxRetry=0, 零�
 ### Baseline v1 — 正式基线（待 nightly 硬件产出）
 
 > 100K/1M 由 nightly（GitHub Actions ubuntu-latest）持续产出，数据以 nightly artifact 为准。
+> **注意**：`capacity-baseline-1m` job 因自托管 runner 池未配置而持续 skip，
+> 2026-09-16 的 1M 结果是在等效固定硬件上带外（out of band）产出的，非 nightly 产出。
 
 | 日期 | Commit | 场景 | 环境 | Create QPS | Schedule QPS | P95 | 结论 |
 |------|--------|------|------|-----------|-------------|-----|------|
 | (待填) | | 10K | | | | | |
 | (待填) | | 100K | | | | | |
-| (待填) | | 1M | | | | | |
+| 2026-09-16 | `45598a9` | 1M | EC2 m7i.2xlarge, 8 vCPU / 30.81 GiB / gp3 300G | 1764–1817 | 50–53 | 9h3m55s–9h19m58s | 3/3 PASS；吞吐 spread 3.45%、P95 spread 2.95%，两项达标 — [证据](1m-2026-09-16.md) |
+
+场景 C（1M Tasks）三次运行关键数字：
+
+```text
+任务数:            1,000,000
+总耗时:            9h9m33.531s / 9h25m42.190s / 9h9m42.495s
+端到端吞吐:         30 / 29 / 30 tasks/s
+Lost / Duplicate / Stuck: 0 / 0 / 0
+
+enqueue:   1764 / 1717 / 1817 tasks/s   p95=72ms / 72ms / 67ms
+admit:       85 /   85 /   88 tasks/s   p95=3h13m9.038s / 3h12m38.615s / 3h7m5.477s
+schedule:    53 /   50 /   52 tasks/s   p95=5h7m49.13s / 5h25m24.557s / 5h17m7.429s
+complete:   574 /  570 /  581 tasks/s   p95=5h8m59.236s / 5h26m2.034s / 5h14m49.791s
+end-to-end:                             p95=9h3m55.014s / 9h19m58.048s / 9h3m58.337s
+```
+
+> ⚠️ 该结果不是生产容量数字：~30 tasks/s 描述的是这台机器 + 未调优的 2 GiB
+> `shared_buffers` + 单 admission/scheduler 控制器串行 drain，不是受支持硬件的吞吐上限。
+> 未做同机 100K → 1M 对比，因此不构成规模劣化的测量。磁盘利用率峰值 98.7%（gp3 基线
+> 125 MiB/s）按突发记录（仅 1.71% 采样 ≥95%），但未在更快卷上复跑，
+> "1M 下 gp3 不是瓶颈"未被证实。详见 [1m-2026-09-16.md](1m-2026-09-16.md) §6。

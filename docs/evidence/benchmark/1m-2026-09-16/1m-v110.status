@@ -1,0 +1,1 @@
+SUCCESS tasks=1000000 commit=45598a9c09782529359f550446a9f7ff554f8d21 throughput_spread=3.45% p95_spread=2.95% throughputs=[30.0, 29.0, 30.0] p95_seconds=[32635.0, 33598.0, 32638.3] ended=2026-09-17T09:10:20 peak_disk_util_pct=98.7 peak_disk_write_mibps=126.16 peak_pg_conn=20 end_swap_used_mb=28
