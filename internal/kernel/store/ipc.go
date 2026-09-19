@@ -49,6 +49,18 @@ const (
 	// '-'.
 	IPCMessageEventAggregateType = "ipc"
 
+	// IPCMessageStoredEventType is the outbox event type of the notification
+	// that announces a stored message. Like the aggregate type it is pinned
+	// before the delivery code exists, because the outbox renders both into one
+	// NATS subject ("agentos.events.ipc.messagestored") and validates each token
+	// against ^[A-Za-z][A-Za-z0-9_]{0,127}$.
+	//
+	// The event announces that a message reached a mailbox. It does not mean the
+	// message was delivered to a receiver: the runtime protocol is pull-only, so
+	// a receiver observes its mailbox when it chooses to drain it and the
+	// platform has no way to notify it.
+	IPCMessageStoredEventType = "MessageStored"
+
 	// ipcAddressSeparator joins the two address segments. Neither segment may
 	// contain it: the AgentVersion reference grammar ("[namespace/]name@version")
 	// admits only [A-Za-z0-9._-] tokens, and the instance is validated to the
@@ -289,14 +301,25 @@ type AcknowledgeIPCMessagesResult struct {
 	AlreadyAcknowledged []uuid.UUID
 }
 
-// IPCStore is the durable mailbox surface. It deliberately has no delivery
-// method: writing the outbox event that wakes a receiver and publishing it to
-// NATS both belong to the delivery stage, which is not part of this contract.
+// IPCStore is the durable mailbox surface. Delivery is expressed as a side
+// effect of the durable write rather than as a method of its own:
+// AppendIPCMessage enqueues the dispatch event in the same transaction, so a
+// stored message and its announcement cannot diverge. Publishing that event to
+// NATS is the dispatcher's job (internal/platform/outbox), and notifying a
+// receiver is deliberately absent: agentos.runtime.v1 is pull-only, so a
+// receiver drains its mailbox on its own schedule and no method here pretends
+// otherwise.
 type IPCStore interface {
 	// AppendIPCMessage stores one message in the recipient's mailbox. A
 	// replay of the same idempotency key returns the message the first attempt
 	// stored, with Replayed=true; the same key carrying a different message is
 	// ErrIdempotencyConflict.
+	//
+	// A message that is stored for the first time also enqueues one
+	// IPCMessageStoredEventType event into outbox_events in the same
+	// transaction. A replay enqueues nothing: the message it resolves to was
+	// already announced, and announcing it again would turn one send into two
+	// events.
 	AppendIPCMessage(context.Context, AppendIPCMessageInput) (AppendIPCMessageResult, error)
 	// GetIPCMessage returns one message or ErrNotFound. A message belonging to
 	// another tenant is not found.
@@ -308,6 +331,31 @@ type IPCStore interface {
 	// messages that exist in the tenant may be acknowledged: a receipt for an
 	// unknown id would hide the real message if it arrived later.
 	AcknowledgeIPCMessages(context.Context, AcknowledgeIPCMessagesInput) (AcknowledgeIPCMessagesResult, error)
+}
+
+// RunMailboxScope is the mailbox identity a run id resolves to. A mailbox is
+// addressed by (agent version reference, run id), and the version reference is
+// not a property of the run itself: it comes from the run's task, which is the
+// immutable publication resolved during admission.
+type RunMailboxScope struct {
+	TenantID string
+	RunID    string
+	TaskID   string
+	// AgentVersionRef is the version reference of the run's task. A send that
+	// pairs a run with any other version reference names a mailbox that no
+	// attempt will ever drain.
+	AgentVersionRef string
+}
+
+// MailboxScopeStore resolves the run an address names. It is separate from
+// IPCStore because it reads the run/task tables rather than the mailbox, and
+// because a send needs it before it has anything to store: without the check, a
+// sender that mistypes a run id stores a message into a mailbox that is never
+// drained, and nothing reports it.
+type MailboxScopeStore interface {
+	// GetRunMailboxScope returns the scope of runID within the tenant, or
+	// ErrNotFound when no such run exists in that tenant.
+	GetRunMailboxScope(context.Context, string, uuid.UUID) (RunMailboxScope, error)
 }
 
 // validateIPCSegment rejects a value that cannot be one half of a canonical

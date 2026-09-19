@@ -19,6 +19,7 @@ import (
 	"time"
 
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	ipcv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/ipc/v1"
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
 	"github.com/CloudEdgeCore/AgentOS/internal/gateway"
 	"github.com/CloudEdgeCore/AgentOS/internal/gateway/bao"
@@ -313,10 +314,15 @@ func main() {
 	)
 	modelService := gateway.NewModelService(modelGateway, allowedTenant, capabilityAuthorizer)
 	modelInvocationService := gateway.NewModelInvocationService(modelInvoker, allowedTenant, capabilityAuthorizer)
+	// The IPC mailbox needs no capability authorizer yet: a fenced attempt is
+	// already confined to its own tenant, its own version reference and its own
+	// run, so grants add nothing until cross-agent addresses exist.
+	ipcService := gateway.NewIPCService(repository, repository, repository, allowedTenant)
 	gatewayv1.RegisterToolGatewayServiceServer(server, toolService)
 	gatewayv1.RegisterMemoryGatewayServiceServer(server, memoryService)
 	modelv1.RegisterModelGatewayServiceServer(server, modelService)
 	modelv1.RegisterModelInvocationServiceServer(server, modelInvocationService)
+	ipcv1.RegisterIPCGatewayServiceServer(server, ipcService)
 	legacyAliases := []struct {
 		descriptor grpc.ServiceDesc
 		service    any

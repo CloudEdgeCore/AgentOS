@@ -89,7 +89,7 @@ func newBrokerForTest(t *testing.T, identity AttemptContext, models ModelBroker,
 	t.Helper()
 	slot := &StaticIdentity{Context: identity}
 	tools := NewToolAdapter(&fakeToolInvokerForBroker{listed: listed}, slot)
-	return NewBroker(tools, models, memories, nil, slot)
+	return NewBroker(tools, models, memories, nil, nil, slot)
 }
 
 func decodeToolJSON(t *testing.T, result any) map[string]any {
@@ -316,7 +316,7 @@ func TestBrokerSpawnEnforcesCapabilityAllowlistAndFencedIdentity(t *testing.T) {
 	identity.AllowedChildAgents = []string{"worker@1"}
 	spawner := &fakeWorkflowSpawner{output: SpawnOutcome{Code: "created", StepName: "child-1", SpawnDepth: 1}}
 	slot := &StaticIdentity{Context: identity}
-	broker := NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, slot), nil, nil, spawner, slot)
+	broker := NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, slot), nil, nil, spawner, nil, slot)
 
 	result, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name": SystemTaskSpawn,
@@ -340,7 +340,7 @@ func TestBrokerSpawnEnforcesCapabilityAllowlistAndFencedIdentity(t *testing.T) {
 	denied := identity
 	denied.CanSpawnTasks = false
 	deniedSlot := &StaticIdentity{Context: denied}
-	deniedBroker := NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, deniedSlot), nil, nil, spawner, deniedSlot)
+	deniedBroker := NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, deniedSlot), nil, nil, spawner, nil, deniedSlot)
 	result, rpcErr = deniedBroker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name": SystemTaskSpawn, "arguments": map[string]any{"name": "child-2", "goal": "no", "agentVersionRef": "worker@1"},
 	}))
@@ -354,7 +354,7 @@ func TestBrokerSpawnEnforcesCapabilityAllowlistAndFencedIdentity(t *testing.T) {
 	denied.CanSpawnTasks = true
 	denied.AllowedChildAgents = []string{"other@1"}
 	deniedSlot = &StaticIdentity{Context: denied}
-	deniedBroker = NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, deniedSlot), nil, nil, spawner, deniedSlot)
+	deniedBroker = NewBroker(NewToolAdapter(&fakeToolInvokerForBroker{}, deniedSlot), nil, nil, spawner, nil, deniedSlot)
 	result, rpcErr = deniedBroker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name": SystemTaskSpawn, "arguments": map[string]any{"name": "child-3", "goal": "no", "agentVersionRef": "worker@1"},
 	}))
@@ -381,7 +381,7 @@ func TestBrokerDeniesWithoutIdentity(t *testing.T) {
 		output: kernelmodel.InvokeOutput{Call: store.ModelCall{ID: uuid.New(), Status: store.ModelCallCompleted}},
 	}
 	tools := NewToolAdapter(&fakeToolInvokerForBroker{}, closedWindowResolver{})
-	broker := NewBroker(tools, models, &fakeMemoryBroker{}, nil, closedWindowResolver{})
+	broker := NewBroker(tools, models, &fakeMemoryBroker{}, nil, nil, closedWindowResolver{})
 	result, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name":      SystemModelInvoke,
 		"arguments": map[string]any{"modelRef": "fake/agent-model", "messages": []map[string]any{{"role": "user", "content": "hi"}}},
@@ -417,7 +417,7 @@ func TestBrokerFailsClosedWithoutBrokers(t *testing.T) {
 	identity := brokerTestContext()
 	identity.AllowedModels = nil
 	tools := NewToolAdapter(&fakeToolInvokerForBroker{}, &StaticIdentity{Context: identity})
-	broker := NewBroker(tools, nil, nil, nil, &StaticIdentity{Context: identity})
+	broker := NewBroker(tools, nil, nil, nil, nil, &StaticIdentity{Context: identity})
 	_, rpcErr := broker.CallTool(context.Background(), mustJSON(t, map[string]any{
 		"name":      SystemModelInvoke,
 		"arguments": map[string]any{"modelRef": "fake/agent-model", "messages": []map[string]any{{"role": "user", "content": "hi"}}},

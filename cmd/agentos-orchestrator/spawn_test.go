@@ -181,7 +181,7 @@ func TestSpawnVerticalSliceBrokerGrpcAndAuthoritativeService(t *testing.T) {
 	}
 	broker := mcp.NewBroker(nil, nil, nil,
 		runtimeadapter.NewGrpcWorkflowSpawner(runtimev1.NewWorkflowSpawnServiceClient(connection)),
-		fakeSpawnIdentityResolver{identity: identity})
+		nil, fakeSpawnIdentityResolver{identity: identity})
 	result, rpcErr := broker.CallTool(context.Background(), []byte(`{
 		"name":"agentos.task.spawn",
 		"arguments":{"name":"child","goal":"execute child","agentVersionRef":"worker@1"}

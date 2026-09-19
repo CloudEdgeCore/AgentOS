@@ -344,7 +344,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 	broker := mcp.NewBroker(toolsAdapter,
 		runtimeadapter.NewGrpcModelBroker(modelv1.NewModelInvocationServiceClient(gatewayConn)),
 		runtimeadapter.NewGrpcMemoryBroker(gatewayv1.NewMemoryGatewayServiceClient(gatewayConn)),
-		nil, registry)
+		nil, nil, registry)
 	mcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("mcp listen: %v", err)

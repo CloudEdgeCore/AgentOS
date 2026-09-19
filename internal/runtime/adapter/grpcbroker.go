@@ -5,11 +5,13 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
 	gatewayv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/gateway/v1"
+	ipcv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/ipc/v1"
 	modelv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/model/v1"
 	runtimev1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/runtime/v1"
 	kernelmodel "github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
@@ -19,6 +21,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/mcp"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // GrpcModelBroker implements mcp.ModelBroker against ModelInvocationService.
@@ -169,6 +172,115 @@ func memoryRecordFromProto(record *gatewayv1.MemoryRecord) store.MemoryRecord {
 		converted.UpdatedAt = record.GetUpdatedAt().AsTime()
 	}
 	return converted
+}
+
+// GrpcMailboxBroker implements mcp.MailboxBroker against IPCGatewayService.
+type GrpcMailboxBroker struct {
+	client ipcv1.IPCGatewayServiceClient
+}
+
+// NewGrpcMailboxBroker binds the broker to a gateway connection.
+func NewGrpcMailboxBroker(client ipcv1.IPCGatewayServiceClient) *GrpcMailboxBroker {
+	return &GrpcMailboxBroker{client: client}
+}
+
+// SendMessage stores one message in the recipient's mailbox with the fenced
+// identity of the calling attempt. The sender's version reference is sent
+// alongside the identity because the service cross-checks it against the fenced
+// assignment; the recipient is two fields rather than one canonical address
+// because the address encoding is not the agent's business.
+func (b *GrpcMailboxBroker) SendMessage(ctx context.Context, identity mcp.AttemptContext, in mcp.MailboxSendInput) (mcp.MailboxSendOutcome, error) {
+	request := &ipcv1.SendMessageRequest{
+		Identity:        ipcAttemptIdentity(identity),
+		AgentVersionRef: identity.AgentVersionRef,
+		TaskId:          identity.TaskID.String(), RunId: identity.RunID.String(),
+		To:   &ipcv1.AgentAddress{AgentVersionRef: in.ToAgentVersionRef, Instance: in.ToRunID},
+		Kind: in.Kind, PayloadJson: in.PayloadJSON, IdempotencyKey: in.IdempotencyKey,
+		CorrelationId: in.CorrelationID, ReplyToMessageId: in.ReplyToMessageID,
+	}
+	if !in.Deadline.IsZero() {
+		request.Deadline = timestamppb.New(in.Deadline)
+	}
+	response, err := b.client.SendMessage(ctx, request)
+	if err != nil {
+		return mcp.MailboxSendOutcome{}, fmt.Errorf("ipc send: %w", err)
+	}
+	outcome := mcp.MailboxSendOutcome{MessageID: response.GetMessageId(), Replayed: response.GetReplayed()}
+	if response.GetAcceptedAt() != nil {
+		outcome.AcceptedAt = response.GetAcceptedAt().AsTime()
+	}
+	return outcome, nil
+}
+
+// ReceiveMessages drains the calling run's mailbox. No address is sent: the
+// service derives the mailbox from the fenced assignment, so the runtime cannot
+// drain a mailbox other than its own.
+func (b *GrpcMailboxBroker) ReceiveMessages(ctx context.Context, identity mcp.AttemptContext, in mcp.MailboxReceiveInput) ([]mcp.MailboxMessage, error) {
+	response, err := b.client.ReceiveMessages(ctx, &ipcv1.ReceiveMessagesRequest{
+		Identity:        ipcAttemptIdentity(identity),
+		AgentVersionRef: identity.AgentVersionRef,
+		MaxMessages:     in.MaxMessages, WaitMillis: in.WaitMillis,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ipc receive: %w", err)
+	}
+	messages := make([]mcp.MailboxMessage, 0, len(response.GetMessages()))
+	for _, message := range response.GetMessages() {
+		entry := mcp.MailboxMessage{
+			MessageID:           message.GetMessageId(),
+			FromAgentVersionRef: message.GetFromAgentVersionRef(),
+			ToAgentVersionRef:   message.GetTo().GetAgentVersionRef(),
+			ToRunID:             message.GetTo().GetInstance(),
+			Kind:                message.GetKind(),
+			PayloadJSON:         json.RawMessage(message.GetPayloadJson()),
+			CorrelationID:       message.GetCorrelationId(),
+			ReplyToMessageID:    message.GetReplyToMessageId(),
+			SentAt:              message.GetSentAt().AsTime(),
+		}
+		if message.GetDeadline() != nil {
+			entry.Deadline = message.GetDeadline().AsTime()
+		}
+		if len(message.GetAttachments()) > 0 {
+			references := make([]map[string]any, 0, len(message.GetAttachments()))
+			for _, attachment := range message.GetAttachments() {
+				references = append(references, map[string]any{
+					"uri": attachment.GetUri(), "sha256": attachment.GetSha256(),
+					"sizeBytes": attachment.GetSizeBytes(), "mediaType": attachment.GetMediaType(),
+				})
+			}
+			encoded, marshalErr := json.Marshal(references)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("encode ipc attachments: %w", marshalErr)
+			}
+			entry.AttachmentsJSON = encoded
+		}
+		messages = append(messages, entry)
+	}
+	return messages, nil
+}
+
+// AcknowledgeMessages receipts a drained batch. The consumer name is left unset
+// on purpose: the service derives it from the fenced run, and sending one would
+// only be a value the service has to reject.
+func (b *GrpcMailboxBroker) AcknowledgeMessages(ctx context.Context, identity mcp.AttemptContext, in mcp.MailboxAckInput) (mcp.MailboxAckOutcome, error) {
+	response, err := b.client.AcknowledgeMessage(ctx, &ipcv1.AcknowledgeMessageRequest{
+		Identity:        ipcAttemptIdentity(identity),
+		AgentVersionRef: identity.AgentVersionRef,
+		MessageIds:      in.MessageIDs,
+	})
+	if err != nil {
+		return mcp.MailboxAckOutcome{}, fmt.Errorf("ipc acknowledge: %w", err)
+	}
+	return mcp.MailboxAckOutcome{
+		Acknowledged:        response.GetAcknowledgedMessageIds(),
+		AlreadyAcknowledged: response.GetAlreadyAcknowledgedMessageIds(),
+	}, nil
+}
+
+func ipcAttemptIdentity(identity mcp.AttemptContext) *ipcv1.AttemptIdentity {
+	return &ipcv1.AttemptIdentity{
+		TenantId: identity.TenantID, AttemptId: identity.AttemptID.String(), FencingToken: identity.FencingToken,
+	}
 }
 
 // GrpcWorkflowSpawner implements mcp.WorkflowSpawner against the
