@@ -21,6 +21,11 @@ const (
 	Model  Kind = "model"
 	Memory Kind = "memory"
 	Secret Kind = "secret"
+	// IPC is the grant kind for agent-to-agent messaging. A candidate is the
+	// receiving AgentVersion reference the send addresses, so the grant
+	// answers "which agents may this version write to" rather than "may this
+	// version use the mailbox".
+	IPC Kind = "ipc"
 )
 
 var ErrDenied = errors.New("agent version capability denied")
@@ -75,6 +80,8 @@ func (a *Authorizer) Authorize(
 		grants = spec.Capabilities.Memory
 	case Secret:
 		grants = spec.Capabilities.Secrets
+	case IPC:
+		grants = spec.Capabilities.Peers
 	default:
 		return fmt.Errorf("%w: unknown capability kind %q", ErrDenied, kind)
 	}

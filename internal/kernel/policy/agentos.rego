@@ -9,6 +9,8 @@
 #   input.tenant.max_priority      int
 #   input.tenant.allowed_tools     [string]  tool names this tenant may call
 #   input.tenant.approval_required_risk string  risk level requiring approval
+#   input.tenant.allowed_peers     [string]  AgentVersion refs this tenant may message
+#   input.peer.to                  string  receiving AgentVersion reference
 #   input.tool.name                string
 #   input.tool.version             string
 #   input.tool.action              string
@@ -59,4 +61,20 @@ model.allow if model_allowed_by_name
 
 model.deny_reasons contains "MODEL_NOT_ALLOWED" if {
 	not model_allowed_by_name
+}
+
+# Peer decisions: an IPC send is allowed only when the tenant's policy data
+# names the receiving AgentVersion reference. Matching is exact, the same
+# contract the tool and model allowlists use; per-version wildcards are the
+# AgentVersion capability grants' job, one layer down. Missing or empty tenant
+# data denies by default. The nested rules form
+# data.agentos.policy.peer = {allow, deny_reasons}.
+peer_allowed_by_name if {
+	input.tenant.allowed_peers[_] == input.peer.to
+}
+
+peer.allow if peer_allowed_by_name
+
+peer.deny_reasons contains "PEER_NOT_ALLOWED" if {
+	not peer_allowed_by_name
 }

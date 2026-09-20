@@ -9,6 +9,8 @@ import (
 	"time"
 
 	ipcv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/ipc/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -102,9 +104,50 @@ func (f *fakeFence) GetRuntimeAssignment(context.Context, string, uuid.UUID, int
 
 const ipcTestTenant = "tenant-ipc"
 
+// fakePeerAuthorizer stands in for the AgentVersion capability authorizer. Its
+// zero value allows everything, so tests about the fence and the store do not
+// have to restate the grant they are not exercising.
+type fakePeerAuthorizer struct {
+	err     error
+	calls   int
+	tenants []string
+	peers   []string
+}
+
+func (f *fakePeerAuthorizer) Authorize(_ context.Context, tenantID, _ string, _ capability.Kind, candidates ...string) error {
+	f.calls++
+	f.tenants = append(f.tenants, tenantID)
+	f.peers = append(f.peers, candidates...)
+	return f.err
+}
+
+// fakePeerPolicy stands in for the tenant policy engine. Unlike the authorizer
+// its zero value denies, matching the engine it replaces: allow is explicit.
+type fakePeerPolicy struct {
+	allow  bool
+	reason string
+	calls  int
+	peers  []string
+}
+
+func (f *fakePeerPolicy) EvaluatePeer(_ context.Context, _ string, peer policy.PeerContext) policy.Decision {
+	f.calls++
+	f.peers = append(f.peers, peer.To)
+	if f.allow {
+		return policy.Decision{Allow: true}
+	}
+	return policy.Decision{DenyReasons: []string{f.reason}}
+}
+
 // ipcTestService wires the service to fakes whose fenced assignment is a live
-// attempt, which is the only state any RPC accepts.
+// attempt, which is the only state any RPC accepts. Authorization is permitted
+// by default; use ipcTestServiceWith to exercise a denial.
 func ipcTestService(t *testing.T, mailbox *fakeMailbox, scope *fakeMailboxScope, fence *fakeFence) (*IPCService, store.RuntimeAssignment) {
+	t.Helper()
+	return ipcTestServiceWith(t, mailbox, scope, fence, &fakePeerAuthorizer{}, &fakePeerPolicy{allow: true})
+}
+
+func ipcTestServiceWith(t *testing.T, mailbox *fakeMailbox, scope *fakeMailboxScope, fence *fakeFence, authorizer PeerAuthorizer, peerPolicy PeerPolicy) (*IPCService, store.RuntimeAssignment) {
 	t.Helper()
 	taskID, runID, attemptID := uuid.New(), uuid.New(), uuid.New()
 	assignment := store.RuntimeAssignment{
@@ -121,7 +164,7 @@ func ipcTestService(t *testing.T, mailbox *fakeMailbox, scope *fakeMailboxScope,
 	}
 	// A fixed tenant is the isolated-development wiring; the peer-bound "*" form
 	// needs a verified SPIFFE peer in the context, which a unit test has not got.
-	return NewIPCService(mailbox, scope, fence, ipcTestTenant), fence.assignment
+	return NewIPCService(mailbox, scope, fence, ipcTestTenant, authorizer, peerPolicy), fence.assignment
 }
 
 func ipcTestIdentity(assignment store.RuntimeAssignment) *ipcv1.AttemptIdentity {
@@ -508,13 +551,132 @@ func TestIPCAcknowledgeRejectsABatchItCannotApply(t *testing.T) {
 }
 
 func TestIPCGatewayIsNotConfiguredWithoutItsDependencies(t *testing.T) {
-	service := NewIPCService(nil, nil, nil, ipcTestTenant)
+	service := NewIPCService(nil, nil, nil, ipcTestTenant, nil, nil)
 	_, err := service.ReceiveMessages(context.Background(), &ipcv1.ReceiveMessagesRequest{
 		Identity:        &ipcv1.AttemptIdentity{TenantId: ipcTestTenant, AttemptId: uuid.New().String(), FencingToken: 1},
 		AgentVersionRef: "planner@1.0.0",
 	})
 	if got := ipcTestStatus(t, err); got != codes.PermissionDenied {
 		t.Fatalf("status = %s, want PermissionDenied", got)
+	}
+}
+
+// ipcSendRequest is a well-formed send, so a test that wants a denial cannot
+// be passing because of malformed input.
+func ipcSendRequest(assignment store.RuntimeAssignment, to string) *ipcv1.SendMessageRequest {
+	return &ipcv1.SendMessageRequest{
+		Identity: ipcTestIdentity(assignment), AgentVersionRef: assignment.Task.AgentVersionRef,
+		To:   &ipcv1.AgentAddress{AgentVersionRef: to, Instance: uuid.New().String()},
+		Kind: "handoff", IdempotencyKey: "key-1",
+	}
+}
+
+func TestIPCSendMessageRequiresThePeerGrant(t *testing.T) {
+	denied := &fakePeerAuthorizer{err: capability.ErrDenied}
+	policyFake := &fakePeerPolicy{allow: true}
+	mailbox := &fakeMailbox{}
+	service, assignment := ipcTestServiceWith(t, mailbox, &fakeMailboxScope{}, &fakeFence{}, denied, policyFake)
+
+	_, err := service.SendMessage(context.Background(), ipcSendRequest(assignment, "worker@1.0.0"))
+	if got := ipcTestStatus(t, err); got != codes.PermissionDenied {
+		t.Fatalf("status = %s, want PermissionDenied", got)
+	}
+	if len(mailbox.appended) != 0 {
+		t.Fatalf("%d denied sends reached the store", len(mailbox.appended))
+	}
+	if policyFake.calls != 0 {
+		t.Fatal("tenant policy ran even though the capability denied")
+	}
+	if len(denied.tenants) != 1 || len(denied.peers) != 1 {
+		t.Fatalf("authorizer calls = %d tenants / %d peers, want 1 each", len(denied.tenants), len(denied.peers))
+	}
+	if denied.tenants[0] != ipcTestTenant || denied.peers[0] != "worker@1.0.0" {
+		t.Fatalf("authorizer asked about %v in %v", denied.peers, denied.tenants)
+	}
+}
+
+func TestIPCSendMessageRequiresTheTenantToAllowThePeer(t *testing.T) {
+	policyFake := &fakePeerPolicy{reason: "PEER_NOT_ALLOWED"}
+	mailbox := &fakeMailbox{}
+	service, assignment := ipcTestServiceWith(t, mailbox, &fakeMailboxScope{}, &fakeFence{},
+		&fakePeerAuthorizer{}, policyFake)
+
+	_, err := service.SendMessage(context.Background(), ipcSendRequest(assignment, "worker@1.0.0"))
+	if got := ipcTestStatus(t, err); got != codes.PermissionDenied {
+		t.Fatalf("status = %s, want PermissionDenied", got)
+	}
+	if !strings.Contains(err.Error(), "PEER_NOT_ALLOWED") {
+		t.Fatalf("denial does not name the policy reason: %v", err)
+	}
+	if len(mailbox.appended) != 0 {
+		t.Fatalf("%d denied sends reached the store", len(mailbox.appended))
+	}
+}
+
+func TestIPCSendMessageDeniesWhenAuthorizationIsUnconfigured(t *testing.T) {
+	// A gateway started without an authorizer must not become an open relay,
+	// even though the fence alone would accept the call.
+	mailbox := &fakeMailbox{}
+	scope := &fakeMailboxScope{}
+	service, assignment := ipcTestServiceWith(t, mailbox, scope, &fakeFence{}, nil, nil)
+
+	_, err := service.SendMessage(context.Background(), ipcSendRequest(assignment, "worker@1.0.0"))
+	if got := ipcTestStatus(t, err); got != codes.PermissionDenied {
+		t.Fatalf("status = %s, want PermissionDenied", got)
+	}
+	// The denial must come from the missing authorizer, not from an earlier
+	// check that happens to return the same code.
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("denial did not come from the unconfigured authorizer: %v", err)
+	}
+	if len(mailbox.appended) != 0 {
+		t.Fatalf("%d unconfigured sends reached the store", len(mailbox.appended))
+	}
+	if len(scope.requestedAt) != 0 {
+		t.Fatal("the mailbox was resolved before authorization decided")
+	}
+}
+
+func TestIPCSendMessageAuthorizesBeforeResolvingTheMailbox(t *testing.T) {
+	// The order is part of the contract, not an implementation detail: probing
+	// which run ids exist is only possible if the mailbox is resolved first.
+	scope := &fakeMailboxScope{err: store.ErrNotFound}
+	denied := &fakePeerAuthorizer{err: capability.ErrDenied}
+	service, assignment := ipcTestServiceWith(t, &fakeMailbox{}, scope, &fakeFence{},
+		denied, &fakePeerPolicy{allow: true})
+
+	_, err := service.SendMessage(context.Background(), ipcSendRequest(assignment, "worker@1.0.0"))
+	if got := ipcTestStatus(t, err); got != codes.PermissionDenied {
+		t.Fatalf("status = %s, want PermissionDenied for an unauthorized sender", got)
+	}
+	if denied.calls != 1 {
+		t.Fatalf("authorizer calls = %d, want 1: the denial came from somewhere else", denied.calls)
+	}
+	if len(scope.requestedAt) != 0 {
+		t.Fatal("an unauthorized sender learned whether the run exists")
+	}
+}
+
+func TestIPCReceiveAndAcknowledgeNeedNoPeerGrant(t *testing.T) {
+	// Both RPCs can only ever reach the caller's own fenced run, so a grant
+	// would be an empty action. They must keep working with no authorizer.
+	mailbox := &fakeMailbox{drainReplies: [][]store.IPCMessage{{{
+		ID: uuid.New(), TenantID: ipcTestTenant, FromAgentVersionRef: "worker@1.0.0",
+		To: store.AgentAddress{AgentVersionRef: "planner@1.0.0"}, Kind: "handoff",
+		Payload: json.RawMessage(`{}`), SentAt: time.Now().UTC(),
+	}}}}
+	service, assignment := ipcTestServiceWith(t, mailbox, &fakeMailboxScope{}, &fakeFence{}, nil, nil)
+
+	if _, err := service.ReceiveMessages(context.Background(), &ipcv1.ReceiveMessagesRequest{
+		Identity: ipcTestIdentity(assignment), AgentVersionRef: assignment.Task.AgentVersionRef,
+	}); err != nil {
+		t.Fatalf("receive needed a peer grant: %v", err)
+	}
+	if _, err := service.AcknowledgeMessage(context.Background(), &ipcv1.AcknowledgeMessageRequest{
+		Identity: ipcTestIdentity(assignment), AgentVersionRef: assignment.Task.AgentVersionRef,
+		MessageIds: []string{uuid.New().String()},
+	}); err != nil {
+		t.Fatalf("acknowledge needed a peer grant: %v", err)
 	}
 }
 

@@ -39,6 +39,9 @@ type CapabilityGrant struct {
 	Secrets             []string `json:"secrets"`
 	SpawnTasks          bool     `json:"spawnTasks,omitempty"`
 	ChildAgents         []string `json:"childAgents,omitempty"`
+	// Peers lists the AgentVersion references this agent may send IPC messages
+	// to. An absent or empty list denies every peer.
+	Peers []string `json:"peers,omitempty"`
 }
 
 type StartRequest struct {

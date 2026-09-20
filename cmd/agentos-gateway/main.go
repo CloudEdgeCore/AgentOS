@@ -314,10 +314,12 @@ func main() {
 	)
 	modelService := gateway.NewModelService(modelGateway, allowedTenant, capabilityAuthorizer)
 	modelInvocationService := gateway.NewModelInvocationService(modelInvoker, allowedTenant, capabilityAuthorizer)
-	// The IPC mailbox needs no capability authorizer yet: a fenced attempt is
-	// already confined to its own tenant, its own version reference and its own
-	// run, so grants add nothing until cross-agent addresses exist.
-	ipcService := gateway.NewIPCService(repository, repository, repository, allowedTenant)
+	// SendMessage is gated twice: the sending AgentVersion's immutable peer
+	// grant, then the tenant's allowed_peers. Receive and acknowledge are not
+	// gated: they can only ever reach the caller's own fenced run's mailbox.
+	ipcService := gateway.NewIPCService(
+		repository, repository, repository, allowedTenant, capabilityAuthorizer, policyEngine,
+	)
 	gatewayv1.RegisterToolGatewayServiceServer(server, toolService)
 	gatewayv1.RegisterMemoryGatewayServiceServer(server, memoryService)
 	modelv1.RegisterModelGatewayServiceServer(server, modelService)

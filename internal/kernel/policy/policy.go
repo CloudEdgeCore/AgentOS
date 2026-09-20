@@ -16,7 +16,7 @@ import (
 
 // Revision identifies the embedded policy module set. It is recorded with
 // every decision so outcomes remain auditable across policy updates.
-const Revision = "2026-08-15/v1"
+const Revision = "2026-09-19/v1"
 
 //go:embed agentos.rego
 var moduleSource string
@@ -33,6 +33,11 @@ type TenantPolicy struct {
 	// ApprovalRequiredRisk is the tool risk level that requires human
 	// approval, for example "high".
 	ApprovalRequiredRisk string `json:"approval_required_risk"`
+	// AllowedPeers lists the AgentVersion references this tenant's agents may
+	// send IPC messages to. Matching is exact. Empty means every send is
+	// denied (default deny), so a tenant that has not opted in cannot message
+	// anyone even if its AgentVersions declare peer grants.
+	AllowedPeers []string `json:"allowed_peers"`
 }
 
 // TenantPolicies maps tenant IDs to their policy data. A tenant without an
@@ -61,6 +66,17 @@ type ModelContext struct {
 	Name string `json:"name"`
 }
 
+// PeerContext is the typed document the peer rules evaluate. To is the
+// receiving AgentVersion reference taken from the fenced send, never from raw
+// request JSON.
+//
+// The message kind is deliberately absent rather than passed along unused: a
+// field no rule reads would suggest kinds are policy-checked when they are
+// not. Kinds have no vocabulary yet.
+type PeerContext struct {
+	To string `json:"to"`
+}
+
 // Decision is the machine-readable policy outcome.
 type Decision struct {
 	Allow bool
@@ -76,6 +92,7 @@ type Engine struct {
 	admission preparedQuery
 	tool      preparedQuery
 	model     preparedQuery
+	peer      preparedQuery
 	tenants   TenantPolicies
 }
 
@@ -100,7 +117,11 @@ func newWithModule(source string, tenants TenantPolicies) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prepare model policy: %w", err)
 	}
-	return &Engine{admission: admission, tool: tool, model: model, tenants: tenants}, nil
+	peer, err := prepare(source, "data.agentos.policy.peer")
+	if err != nil {
+		return nil, fmt.Errorf("prepare peer policy: %w", err)
+	}
+	return &Engine{admission: admission, tool: tool, model: model, peer: peer, tenants: tenants}, nil
 }
 
 func prepare(source, query string) (preparedQuery, error) {
@@ -154,10 +175,26 @@ func (e *Engine) EvaluateModel(ctx context.Context, tenantID string, model Model
 	})
 }
 
+// EvaluatePeer decides whether the tenant may send an IPC message to a
+// receiving AgentVersion reference. It answers the tenant-wide question only;
+// whether the sending AgentVersion was granted that peer is a capability
+// decision, enforced separately and first.
+func (e *Engine) EvaluatePeer(ctx context.Context, tenantID string, peer PeerContext) Decision {
+	tenant, ok := e.tenants[tenantID]
+	if !ok {
+		return Decision{DenyReasons: []string{"TENANT_POLICY_NOT_FOUND"}}
+	}
+	return evaluate(ctx, e.peer, map[string]any{
+		"peer":   map[string]any{"to": peer.To},
+		"tenant": tenantDocument(tenant),
+	})
+}
+
 func tenantDocument(tenant TenantPolicy) map[string]any {
 	return map[string]any{
 		"max_priority": tenant.MaxPriority, "allowed_tools": tenant.AllowedTools,
 		"allowed_models":         tenant.AllowedModels,
+		"allowed_peers":          tenant.AllowedPeers,
 		"approval_required_risk": tenant.ApprovalRequiredRisk,
 	}
 }

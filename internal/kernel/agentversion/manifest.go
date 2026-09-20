@@ -66,6 +66,11 @@ type Capabilities struct {
 	Secrets             []string `json:"secrets"`
 	SpawnTasks          bool     `json:"spawnTasks,omitempty"`
 	ChildAgents         []string `json:"childAgents,omitempty"`
+	// Peers lists the AgentVersion references this version may send IPC
+	// messages to, in agentversion.FormatRef form. Empty denies every peer.
+	// It constrains only the sender: the receiving run does not have to
+	// declare who may write to it, so knowing a run id is enough to reach it.
+	Peers []string `json:"peers,omitempty"`
 }
 
 type ResourceLimits struct {
@@ -242,6 +247,14 @@ func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error 
 		if spec.Capabilities.ChildAgents != nil {
 			if err := validateCapabilitySet(spec.Capabilities.ChildAgents); err != nil {
 				return fmt.Errorf("capabilities.childAgents: %w", err)
+			}
+		}
+		// Peers is optional like ChildAgents, so it is validated only when
+		// present: validateCapabilitySet rejects a nil slice, and putting it in
+		// the list above would therefore reject every manifest that predates it.
+		if spec.Capabilities.Peers != nil {
+			if err := validateCapabilitySet(spec.Capabilities.Peers); err != nil {
+				return fmt.Errorf("capabilities.peers: %w", err)
 			}
 		}
 		if len(spec.Capabilities.MemorySensitivities) == 0 {
