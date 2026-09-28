@@ -113,11 +113,9 @@ jobs:
             case "$ARCH" in x86_64) GV_ARCH=x86_64 ;; aarch64) GV_ARCH=aarch64 ;; *) echo "unsupported arch $ARCH"; exit 1 ;; esac
             RUNSC_VERSION=$(curl -fsSL https://api.github.com/repos/google/gvisor/releases/latest | grep tag_name | cut -d'"' -f4)
             curl -fsSL -o gvisor.tar.bz2 "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/gvisor-${GV_ARCH}.tar.bz2"
-            tar -xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1
-            chmod 555 runsc containerd-shim-runsc-v1
-            sudo mv runsc /usr/local/bin/runsc
-            sudo mv containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
-            sudo mkdir -p /etc/containerd
+            sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
+            sudo chmod 555 /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
+            sudo mkdir -p /etc/containerd /run/containerd/runsc/agentos /run/agentos-runsc-direct
             sudo cp deploy/ci/containerd-config.toml /etc/containerd/config.toml
             # Configure agentos-runsc wrapper and runsc.toml with systrap platform.
             # The gVisor shim captures `runsc create` output with an os/exec pipe;
@@ -171,7 +169,7 @@ jobs:
 
       - name: Smoke-test gVisor container execution
         run: |
-          sudo runsc --platform=systrap --network=none --ignore-cgroups=true do /bin/true </dev/null
+          sudo runsc --root=/run/agentos-runsc-direct --platform=systrap --network=none --ignore-cgroups=true do /bin/true
           echo "gVisor sandbox verified: runsc executed and exited"
 
       - name: Run OCI/gVisor isolation and takeover drills
