@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   group: runtime-isolation-drills
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   wasmtime-drill:
@@ -68,7 +68,7 @@ jobs:
 
   oci-drill:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     services:
       postgres:
         image: pgvector/pgvector:pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
@@ -176,4 +176,4 @@ jobs:
 
       - name: Run OCI/gVisor isolation and takeover drills
         run: |
-          go test -tags=integration -count=1 -timeout 30m -v -run 'TestOCIIsolation|TestOCICrossClassPlacement|TestOCIRealTakeover' ./examples/devops-workflow/tests/e2e/
+          go test -tags=integration -count=1 -timeout 15m -v -run 'TestOCIIsolation|TestOCICrossClassPlacement|TestOCIRealTakeover' ./examples/devops-workflow/tests/e2e/

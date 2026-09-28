@@ -35,15 +35,6 @@ func ociWorkerCommand(bin string, args ...string) (string, []string) {
 	return bin, args
 }
 
-// TestMain ensures all spawned OCI workers are thoroughly cleaned up when the test binary exits.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if _, err := exec.LookPath("sudo"); err == nil {
-		_ = exec.Command("sudo", "-n", "pkill", "-9", "-f", "agentos-runtime-oci").Run()
-	}
-	os.Exit(code)
-}
-
 // killOCIWorker terminates a worker subprocess, using sudo when available so
 // that both the sudo wrapper and the root-owned worker child process are reaped.
 func killOCIWorker(cmd *exec.Cmd) {
@@ -52,38 +43,46 @@ func killOCIWorker(cmd *exec.Cmd) {
 	}
 	pid := cmd.Process.Pid
 	if _, err := exec.LookPath("sudo"); err == nil {
-		_ = exec.Command("sudo", "-n", "kill", "-9", fmt.Sprintf("-%d", pid)).Run()
-		_ = exec.Command("sudo", "-n", "kill", "-9", fmt.Sprintf("%d", pid)).Run()
-		_ = exec.Command("sudo", "-n", "pkill", "-9", "-f", "agentos-runtime-oci").Run()
+		_ = exec.Command("sudo", "-n", "kill", "-TERM", "--", fmt.Sprintf("-%d", pid)).Run()
+		_ = exec.Command("sudo", "-n", "kill", "-TERM", fmt.Sprintf("%d", pid)).Run()
+		time.Sleep(100 * time.Millisecond)
+		_ = exec.Command("sudo", "-n", "kill", "-KILL", "--", fmt.Sprintf("-%d", pid)).Run()
+		_ = exec.Command("sudo", "-n", "kill", "-KILL", fmt.Sprintf("%d", pid)).Run()
 	} else {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_ = cmd.Process.Kill()
 	}
-	done := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
 }
 
 // startOCIWorker starts an OCI worker process in its own process group and
-// registers cleanup so no background processes or open I/O pipes leak.
+// redirects its output to a private log file so no test runner pipes leak.
 func startOCIWorker(t *testing.T, bin string, args ...string) *exec.Cmd {
 	t.Helper()
 	workerBin, workerArgs := ociWorkerCommand(bin, args...)
 	workerArgs = append(workerArgs, directRunscArgs()...)
 	cmd := exec.Command(workerBin, workerArgs...)
-	cmd.Stderr = os.Stderr
+
+	logFile, err := os.CreateTemp("", "oci-worker-*.log")
+	if err != nil {
+		t.Fatalf("create worker log: %v", err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		_ = os.Remove(logFile.Name())
 		t.Fatalf("start oci worker: %v", err)
 	}
 	t.Cleanup(func() {
 		killOCIWorker(cmd)
+		if t.Failed() {
+			if data, err := os.ReadFile(logFile.Name()); err == nil && len(data) > 0 {
+				t.Logf("--- OCI worker output ---\n%s", string(data))
+			}
+		}
+		_ = logFile.Close()
+		_ = os.Remove(logFile.Name())
 	})
 	return cmd
 }
