@@ -42,29 +42,29 @@ type ResourceQuota struct {
 
 // ResourceUsage tracks the current live and settled resource consumption in a namespace.
 type ResourceUsage struct {
-	TenantID              string    `json:"tenant_id"`
-	Namespace             string    `json:"namespace"`
-	ActiveServices        int       `json:"active_services"`
-	ActiveInstances       int       `json:"active_instances"`
-	ActiveTasks           int       `json:"active_tasks"`
-	MailboxMessages       int       `json:"mailbox_messages"`
-	ConsumedTokens        int64     `json:"consumed_tokens"`
-	ConsumedCostMicroUSD  int64     `json:"consumed_cost_micro_usd"`
-	ConsumedToolCalls     int64     `json:"consumed_tool_calls"`
-	ConsumedWallSeconds   int64     `json:"consumed_wall_seconds"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	TenantID             string    `json:"tenant_id"`
+	Namespace            string    `json:"namespace"`
+	ActiveServices       int       `json:"active_services"`
+	ActiveInstances      int       `json:"active_instances"`
+	ActiveTasks          int       `json:"active_tasks"`
+	MailboxMessages      int       `json:"mailbox_messages"`
+	ConsumedTokens       int64     `json:"consumed_tokens"`
+	ConsumedCostMicroUSD int64     `json:"consumed_cost_micro_usd"`
+	ConsumedToolCalls    int64     `json:"consumed_tool_calls"`
+	ConsumedWallSeconds  int64     `json:"consumed_wall_seconds"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // ResourceUsageDelta represents incremental changes to resource usage counters.
 type ResourceUsageDelta struct {
-	ActiveServicesDelta      int
-	ActiveInstancesDelta     int
-	ActiveTasksDelta         int
-	MailboxMessagesDelta     int
-	ConsumedTokensDelta      int64
+	ActiveServicesDelta       int
+	ActiveInstancesDelta      int
+	ActiveTasksDelta          int
+	MailboxMessagesDelta      int
+	ConsumedTokensDelta       int64
 	ConsumedCostMicroUSDDelta int64
-	ConsumedToolCallsDelta   int64
-	ConsumedWallSecondsDelta int64
+	ConsumedToolCallsDelta    int64
+	ConsumedWallSecondsDelta  int64
 }
 
 // Namespace is a first-class isolation and resource management boundary in AgentOS.

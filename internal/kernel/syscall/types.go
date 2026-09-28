@@ -383,4 +383,3 @@ type ResourceUsagePayload struct {
 type ResourceUsageInfo struct {
 	Usage namespace.ResourceUsage `json:"usage"`
 }
-

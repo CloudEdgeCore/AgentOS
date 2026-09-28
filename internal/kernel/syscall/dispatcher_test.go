@@ -345,4 +345,3 @@ func TestDispatcherNamespaceEnforcer(t *testing.T) {
 		t.Fatalf("expected SyscallEPERM with terminating namespace, got %v: %s", resp.ErrorCode, resp.ErrorMessage)
 	}
 }
-

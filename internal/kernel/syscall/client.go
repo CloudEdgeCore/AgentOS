@@ -326,4 +326,3 @@ func (c *SyscallClient) GetResourceUsage(ctx context.Context, id AttemptIdentity
 	}
 	return res, nil
 }
-
