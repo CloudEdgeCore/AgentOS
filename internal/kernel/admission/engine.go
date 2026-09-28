@@ -14,6 +14,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/namespace"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/workload"
@@ -134,6 +135,8 @@ type Controller struct {
 	// quotas is the optional tenant aggregate consumption quota store
 	// (v0.6). When nil, tenant quotas are not enforced by this controller.
 	quotas store.TenantQuotaStore
+	// namespaceEnforcer evaluates namespace lifecycle and per-namespace quotas.
+	namespaceEnforcer *namespace.Enforcer
 	// shardIndex / shardCount are the tenant-consistent claim shard
 	// (ADR-016); zero count disables sharding.
 	shardIndex int
@@ -161,6 +164,11 @@ func WithParallelism(workers int) func(*Controller) {
 // settlements cannot slip past the read-only check here.
 func WithTenantQuotas(quotaStore store.TenantQuotaStore) func(*Controller) {
 	return func(c *Controller) { c.quotas = quotaStore }
+}
+
+// WithNamespaceEnforcer installs the namespace and per-namespace resource quota gate.
+func WithNamespaceEnforcer(enforcer *namespace.Enforcer) func(*Controller) {
+	return func(c *Controller) { c.namespaceEnforcer = enforcer }
 }
 
 // WithShard confines this instance to one tenant-consistent claim shard
@@ -358,6 +366,32 @@ func (c *Controller) decide(ctx context.Context, claim store.TaskClaim) (Decisio
 					reason("TENANT_QUOTA_EXCEEDED", "tenant", "tenant aggregate consumption quota would be exceeded"),
 				}}, &version.ID, budget, nil
 			}
+		}
+	}
+	// Namespace lifecycle and per-namespace resource quota (Stage ⑤):
+	if c.namespaceEnforcer != nil {
+		targetNS := claim.Task.Namespace
+		if targetNS == "" {
+			targetNS = namespace.DefaultNamespace
+		}
+		var ceiling store.TaskBudget
+		if budget != nil {
+			ceiling = *budget
+		}
+		if err := c.namespaceEnforcer.CheckTaskAdmission(ctx, claim.Task.TenantID, targetNS, ceiling); err != nil {
+			if errors.Is(err, namespace.ErrNamespaceTerminating) {
+				return Decision{ReasonCode: "NAMESPACE_TERMINATING", Reasons: []store.AdmissionReason{
+					reason("NAMESPACE_TERMINATING", "namespace", err.Error()),
+				}}, &version.ID, budget, nil
+			}
+			if errors.Is(err, namespace.ErrQuotaExceeded) {
+				return Decision{ReasonCode: "NAMESPACE_QUOTA_EXCEEDED", Reasons: []store.AdmissionReason{
+					reason("NAMESPACE_QUOTA_EXCEEDED", "quota", err.Error()),
+				}}, &version.ID, budget, nil
+			}
+			return Decision{ReasonCode: "NAMESPACE_DENIED", Reasons: []store.AdmissionReason{
+				reason("NAMESPACE_DENIED", "namespace", err.Error()),
+			}}, &version.ID, budget, nil
 		}
 	}
 	return decision, &version.ID, budget, nil

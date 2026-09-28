@@ -40,6 +40,11 @@ const (
 	// Service / Supervisor Subsystem (600 - 699)
 	SysServiceHeartbeat SyscallNumber = 601
 	SysServiceQuery     SyscallNumber = 602
+
+	// Resource / Namespace Subsystem (700 - 799)
+	SysNamespaceGet     SyscallNumber = 701
+	SysResourceQuotaGet SyscallNumber = 702
+	SysResourceUsageGet SyscallNumber = 703
 )
 
 // SyscallDescriptor describes metadata and execution properties of a system call.
@@ -164,6 +169,27 @@ var syscallTable = map[SyscallNumber]SyscallDescriptor{
 		IsReadOnly:  true,
 		Description: "Queries registered agent services and their instance topology",
 	},
+	SysNamespaceGet: {
+		Number:      SysNamespaceGet,
+		Name:        "sys_namespace_get",
+		Category:    "namespace",
+		IsReadOnly:  true,
+		Description: "Retrieves metadata, lifecycle phase, and status of a namespace",
+	},
+	SysResourceQuotaGet: {
+		Number:      SysResourceQuotaGet,
+		Name:        "sys_resource_quota_get",
+		Category:    "resource",
+		IsReadOnly:  true,
+		Description: "Retrieves configured resource quotas and limits for a namespace",
+	},
+	SysResourceUsageGet: {
+		Number:      SysResourceUsageGet,
+		Name:        "sys_resource_usage_get",
+		Category:    "resource",
+		IsReadOnly:  true,
+		Description: "Retrieves active and settled resource usage for a namespace",
+	},
 }
 
 // String returns the uppercase symbolic name of the syscall.
@@ -201,6 +227,12 @@ func (s SyscallNumber) String() string {
 		return "SYS_SERVICE_HEARTBEAT"
 	case SysServiceQuery:
 		return "SYS_SERVICE_QUERY"
+	case SysNamespaceGet:
+		return "SYS_NAMESPACE_GET"
+	case SysResourceQuotaGet:
+		return "SYS_RESOURCE_QUOTA_GET"
+	case SysResourceUsageGet:
+		return "SYS_RESOURCE_USAGE_GET"
 	default:
 		return fmt.Sprintf("SYS_UNKNOWN(%d)", uint32(s))
 	}

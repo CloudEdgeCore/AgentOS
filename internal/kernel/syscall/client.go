@@ -283,3 +283,47 @@ func (c *SyscallClient) QueryServices(ctx context.Context, id AttemptIdentity, p
 	}
 	return res, nil
 }
+
+// ==========================================
+// Resource / Namespace Subsystem Helpers
+// ==========================================
+
+// GetNamespace calls SYS_NAMESPACE_GET.
+func (c *SyscallClient) GetNamespace(ctx context.Context, id AttemptIdentity, payload NamespaceGetPayload) (NamespaceInfo, error) {
+	raw, _, err := c.Call(ctx, SysNamespaceGet, id, payload)
+	if err != nil {
+		return NamespaceInfo{}, err
+	}
+	var res NamespaceInfo
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return NamespaceInfo{}, fmt.Errorf("decode namespace info result: %w", err)
+	}
+	return res, nil
+}
+
+// GetResourceQuota calls SYS_RESOURCE_QUOTA_GET.
+func (c *SyscallClient) GetResourceQuota(ctx context.Context, id AttemptIdentity, payload ResourceQuotaPayload) (ResourceQuotaInfo, error) {
+	raw, _, err := c.Call(ctx, SysResourceQuotaGet, id, payload)
+	if err != nil {
+		return ResourceQuotaInfo{}, err
+	}
+	var res ResourceQuotaInfo
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return ResourceQuotaInfo{}, fmt.Errorf("decode resource quota result: %w", err)
+	}
+	return res, nil
+}
+
+// GetResourceUsage calls SYS_RESOURCE_USAGE_GET.
+func (c *SyscallClient) GetResourceUsage(ctx context.Context, id AttemptIdentity, payload ResourceUsagePayload) (ResourceUsageInfo, error) {
+	raw, _, err := c.Call(ctx, SysResourceUsageGet, id, payload)
+	if err != nil {
+		return ResourceUsageInfo{}, err
+	}
+	var res ResourceUsageInfo
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return ResourceUsageInfo{}, fmt.Errorf("decode resource usage result: %w", err)
+	}
+	return res, nil
+}
+

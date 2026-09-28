@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/namespace"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
@@ -42,6 +43,7 @@ type SyscallDispatcher struct {
 	mu            sync.RWMutex
 	handlers      map[SyscallNumber]SyscallHandler
 	fences        RuntimeFence
+	enforcer      *namespace.Enforcer
 	allowedTenant string
 	metrics       Metrics
 	tracer        trace.Tracer
@@ -54,6 +56,13 @@ type DispatcherOption func(*SyscallDispatcher)
 func WithRuntimeFence(fences RuntimeFence) DispatcherOption {
 	return func(d *SyscallDispatcher) {
 		d.fences = fences
+	}
+}
+
+// WithNamespaceEnforcer attaches a namespace and quota enforcer to the dispatcher.
+func WithNamespaceEnforcer(enforcer *namespace.Enforcer) DispatcherOption {
+	return func(d *SyscallDispatcher) {
+		d.enforcer = enforcer
 	}
 }
 
@@ -179,7 +188,23 @@ func (d *SyscallDispatcher) Dispatch(ctx context.Context, req SyscallRequest) Sy
 		}
 	}
 
-	// 5. Execute handler
+	// 5. Namespace verification if enforcer is configured and assignment is present
+	if d.enforcer != nil && assignment.Task.Namespace != "" {
+		if _, err := d.enforcer.CheckNamespaceActive(ctx, req.Identity.TenantID, assignment.Task.Namespace); err != nil {
+			dur := time.Since(start)
+			code := SyscallEPERM
+			errMsg := fmt.Sprintf("namespace %q access violation: %v", assignment.Task.Namespace, err)
+			d.metrics.RecordSyscall(ctx, req.Syscall, code, dur)
+			return SyscallResponse{
+				Syscall:      req.Syscall,
+				ErrorCode:    code,
+				ErrorMessage: errMsg,
+				DurationUS:   dur.Microseconds(),
+			}
+		}
+	}
+
+	// 6. Execute handler
 	sCtx := &SyscallContext{
 		Context:    ctx,
 		Request:    req,

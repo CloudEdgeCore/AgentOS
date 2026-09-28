@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/namespace"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 )
@@ -282,3 +283,66 @@ func TestDispatcherConcurrency(t *testing.T) {
 		t.Fatalf("expected success calls %d, got %d", numGoroutines*callsPerGoroutine, metrics.SuccessCount())
 	}
 }
+
+func TestDispatcherNamespaceEnforcer(t *testing.T) {
+	ctx := context.Background()
+	nsStore := namespace.NewMemoryStore()
+	enforcer := namespace.NewEnforcer(nsStore)
+
+	tenant := "tenant-ns-disp"
+	activeNS := "active-ns"
+	termNS := "terminating-ns"
+
+	_ = nsStore.CreateNamespace(ctx, &namespace.Namespace{
+		TenantID: tenant,
+		Name:     activeNS,
+		Phase:    namespace.NamespacePhaseActive,
+	})
+	_ = nsStore.CreateNamespace(ctx, &namespace.Namespace{
+		TenantID: tenant,
+		Name:     termNS,
+		Phase:    namespace.NamespacePhaseTerminating,
+	})
+
+	fence := &mockFence{
+		validToken: 1,
+		assignment: store.RuntimeAssignment{
+			Task: store.Task{
+				TenantID:  tenant,
+				Namespace: activeNS,
+			},
+		},
+	}
+
+	dispatcher := NewDispatcher(
+		WithAllowedTenant(tenant),
+		WithRuntimeFence(fence),
+		WithNamespaceEnforcer(enforcer),
+	)
+
+	dispatcher.RegisterFunc(SysToolInvoke, func(ctx *SyscallContext) (json.RawMessage, int64, error) {
+		return json.RawMessage(`{"res":"ok"}`), 1, nil
+	})
+
+	// 1. Dispatch with active namespace succeeds
+	req := SyscallRequest{
+		Syscall: SysToolInvoke,
+		Identity: AttemptIdentity{
+			TenantID:     tenant,
+			AttemptID:    uuid.New(),
+			FencingToken: 1,
+		},
+	}
+	resp := dispatcher.Dispatch(ctx, req)
+	if resp.ErrorCode != SyscallOK {
+		t.Fatalf("expected OK with active namespace, got %v: %s", resp.ErrorCode, resp.ErrorMessage)
+	}
+
+	// 2. Dispatch with terminating namespace returns SyscallEPERM
+	fence.assignment.Task.Namespace = termNS
+	resp = dispatcher.Dispatch(ctx, req)
+	if resp.ErrorCode != SyscallEPERM {
+		t.Fatalf("expected SyscallEPERM with terminating namespace, got %v: %s", resp.ErrorCode, resp.ErrorMessage)
+	}
+}
+

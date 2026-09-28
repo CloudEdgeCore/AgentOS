@@ -25,6 +25,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/namespace"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/observability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
@@ -139,6 +140,8 @@ type Handler struct {
 	// supervisor and serviceStore provide long-running Agent Service management.
 	supervisor   *supervisor.Supervisor
 	serviceStore supervisor.Store
+	// namespaces provides first-class namespace and resource quota management.
+	namespaces namespace.Store
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
@@ -196,6 +199,13 @@ func WithSupervisor(sup *supervisor.Supervisor, store supervisor.Store) Option {
 	return func(h *Handler) {
 		h.supervisor = sup
 		h.serviceStore = store
+	}
+}
+
+// WithNamespaceStore installs the namespace store; without it namespace endpoints answer 404.
+func WithNamespaceStore(store namespace.Store) Option {
+	return func(h *Handler) {
+		h.namespaces = store
 	}
 }
 
@@ -280,9 +290,18 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("POST /v1/services/{serviceID}/restart", handler.restartService)
 	mux.HandleFunc("GET /v1/services/{serviceID}/instances", handler.listServiceInstances)
 	mux.HandleFunc("POST /v1/services/{serviceID}/instances/{instanceID}/heartbeat", handler.heartbeatServiceInstance)
+	mux.HandleFunc("POST /v1/namespaces", handler.createNamespace)
+	mux.HandleFunc("GET /v1/namespaces", handler.listNamespaces)
+	mux.HandleFunc("GET /v1/namespaces/{name}", handler.getNamespace)
+	mux.HandleFunc("PUT /v1/namespaces/{name}", handler.updateNamespace)
+	mux.HandleFunc("DELETE /v1/namespaces/{name}", handler.deleteNamespace)
+	mux.HandleFunc("GET /v1/namespaces/{name}/usage", handler.getNamespaceUsage)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /readyz", handler.ready)
 	mux.HandleFunc("GET /versionz", handler.version)
+	mux.HandleFunc("/v1/namespaces", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/namespaces/{name}", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/namespaces/{name}/usage", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/services", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/services/{serviceID}", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/services/{serviceID}/scale", handler.methodNotAllowed)

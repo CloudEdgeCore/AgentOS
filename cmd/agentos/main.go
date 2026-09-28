@@ -39,7 +39,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs|workflow|research|metrics|runtime|conformance> [flags]")
+		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs|workflow|service|namespace|research|metrics|runtime|conformance> [flags]")
 	}
 	switch args[0] {
 	case "version":
@@ -64,6 +64,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runWorkflow(args[1:], stdout, stderr)
 	case "service":
 		return runService(args[1:], stdout, stderr)
+	case "namespace":
+		return runNamespace(args[1:], stdout, stderr)
 	case "research":
 		return runResearch(args[1:], stdout, stderr)
 	case "metrics":

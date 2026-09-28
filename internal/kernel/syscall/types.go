@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/ipc"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/namespace"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
 	"github.com/google/uuid"
@@ -338,3 +339,48 @@ type ServiceQueryPayload struct {
 type ServiceQueryResult struct {
 	Services []*supervisor.Service `json:"services"`
 }
+
+// ==========================================
+// Resource / Namespace Subsystem Types (700 - 799)
+// ==========================================
+
+// NamespaceGetPayload arguments for SYS_NAMESPACE_GET.
+type NamespaceGetPayload struct {
+	Namespace string `json:"namespace"`
+}
+
+// NamespaceInfo returned by SYS_NAMESPACE_GET.
+type NamespaceInfo struct {
+	TenantID    string                   `json:"tenant_id"`
+	Name        string                   `json:"name"`
+	DisplayName string                   `json:"display_name,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Phase       namespace.NamespacePhase `json:"phase"`
+	Labels      map[string]string        `json:"labels,omitempty"`
+	Quota       namespace.ResourceQuota  `json:"quota"`
+	CreatedAt   time.Time                `json:"created_at"`
+	UpdatedAt   time.Time                `json:"updated_at"`
+}
+
+// ResourceQuotaPayload arguments for SYS_RESOURCE_QUOTA_GET.
+type ResourceQuotaPayload struct {
+	Namespace string `json:"namespace"`
+}
+
+// ResourceQuotaInfo returned by SYS_RESOURCE_QUOTA_GET.
+type ResourceQuotaInfo struct {
+	TenantID  string                  `json:"tenant_id"`
+	Namespace string                  `json:"namespace"`
+	Quota     namespace.ResourceQuota `json:"quota"`
+}
+
+// ResourceUsagePayload arguments for SYS_RESOURCE_USAGE_GET.
+type ResourceUsagePayload struct {
+	Namespace string `json:"namespace"`
+}
+
+// ResourceUsageInfo returned by SYS_RESOURCE_USAGE_GET.
+type ResourceUsageInfo struct {
+	Usage namespace.ResourceUsage `json:"usage"`
+}
+

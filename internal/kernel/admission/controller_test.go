@@ -11,6 +11,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/domain"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/namespace"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
@@ -366,6 +367,60 @@ func TestControllerAdmitsWithoutConfiguredQuota(t *testing.T) {
 	}
 	if decision := repository.lastDecision(); !decision.Admit || decision.ReasonCode != "ADMISSION_PASSED" {
 		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
+func TestControllerNamespaceEnforcer(t *testing.T) {
+	repository := newFakeWithVersion("tenant-a", "agent@1", `{"runtimeClassPolicy":{"allowed":["oci","wasm"]}}`)
+	nsStore := namespace.NewMemoryStore()
+	enforcer := namespace.NewEnforcer(nsStore)
+
+	_ = nsStore.CreateNamespace(context.Background(), &namespace.Namespace{
+		TenantID: "tenant-a",
+		Name:     "term-ns",
+		Phase:    namespace.NamespacePhaseTerminating,
+	})
+	_ = nsStore.CreateNamespace(context.Background(), &namespace.Namespace{
+		TenantID: "tenant-a",
+		Name:     "quota-ns",
+		Phase:    namespace.NamespacePhaseActive,
+		Quota: namespace.ResourceQuota{
+			MaxTasks: 1,
+		},
+	})
+
+	controller := NewController(repository, New(testLimits()), newTestPolicy(t, 100), "admission-1", 10, time.Minute)
+	WithNamespaceEnforcer(enforcer)(controller)
+
+	// 1. Terminating namespace is rejected
+	termTask := taskClaim("agent@1", `{
+		"priority":1,"deadline":"2099-08-14T12:00:00Z",
+		"budget":{"tokens":100,"costUsd":1,"toolCalls":1,"wallSeconds":1},
+		"placement":{"runtimeClasses":["oci"],"region":"cn-east","cpuMillis":100,"memoryMiB":128,"llmConcurrency":1}
+	}`)
+	termTask.Namespace = "term-ns"
+	repository.claims = []store.TaskClaim{{Task: termTask}}
+
+	_, err := controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() err = %v", err)
+	}
+	if decision := repository.lastDecision(); decision.Admit || decision.ReasonCode != "NAMESPACE_TERMINATING" {
+		t.Fatalf("expected NAMESPACE_TERMINATING, got %+v", decision)
+	}
+
+	// 2. Namespace with exhausted quota is rejected
+	_ = nsStore.RecordUsageDelta(context.Background(), "tenant-a", "quota-ns", namespace.ResourceUsageDelta{ActiveTasksDelta: 1})
+	quotaTask := termTask
+	quotaTask.Namespace = "quota-ns"
+	repository.claims = []store.TaskClaim{{Task: quotaTask}}
+
+	_, err = controller.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile() err = %v", err)
+	}
+	if decision := repository.lastDecision(); decision.Admit || decision.ReasonCode != "NAMESPACE_QUOTA_EXCEEDED" {
+		t.Fatalf("expected NAMESPACE_QUOTA_EXCEEDED, got %+v", decision)
 	}
 }
 
