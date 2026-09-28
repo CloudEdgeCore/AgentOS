@@ -110,7 +110,7 @@ func (e *directExecutor) Prepare(ctx context.Context, spec ExecutionSpec) (Execu
 		e.unregister(containerID)
 		return nil, fmt.Errorf("prepare workload rootfs for %s: %w", spec.ImageRef, err)
 	}
-	if err := writeRunscSpec(filepath.Join(bundleDir, "config.json"), spec, inputPath); err != nil {
+	if err := writeRunscSpec(filepath.Join(bundleDir, "config.json"), rootfsDir, spec, inputPath); err != nil {
 		_ = os.RemoveAll(bundleDir)
 		_ = os.RemoveAll(inputDir)
 		e.unregister(containerID)
@@ -315,7 +315,7 @@ func directEnvironment(spec ExecutionSpec, inputPath string) []string {
 // bind-mounted read-only, a size-bounded tmpfs workspace, and explicit CPU and
 // memory resources. The structure mirrors the spec containerd generates for the
 // runsc runtime so the gVisor sandbox boots without the containerd shim.
-func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
+func writeRunscSpec(path, rootfsDir string, spec ExecutionSpec, inputPath string) error {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -353,7 +353,15 @@ func writeRunscSpec(path string, spec ExecutionSpec, inputPath string) error {
 	}
 	args := spec.Command
 	if len(args) == 0 {
-		args = []string{"/bin/sh"}
+		for _, candidate := range []string{"/agent-runtime", "/bin/sh", "/bin/bash", "/entrypoint.sh"} {
+			if _, err := os.Stat(filepath.Join(rootfsDir, strings.TrimPrefix(candidate, "/"))); err == nil {
+				args = []string{candidate}
+				break
+			}
+		}
+		if len(args) == 0 {
+			args = []string{"/agent-runtime"}
+		}
 	}
 	emptyCaps := []string{}
 	document := map[string]any{
