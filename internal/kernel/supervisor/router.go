@@ -3,7 +3,6 @@ package supervisor
 import (
 	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/ipc"
@@ -14,7 +13,6 @@ type Router struct {
 	supervisor *Supervisor
 	store      Store
 	roundRobin uint64
-	mu         sync.RWMutex
 }
 
 // NewRouter creates a new service-level IPC router.
