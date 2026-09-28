@@ -164,3 +164,15 @@ func (s *Service) SendReply(ctx context.Context, reply *AgentMessage) error {
 	}
 	return s.Send(ctx, reply)
 }
+
+// SendSignal dispatches a lifecycle or control signal to a target agent or instance.
+func (s *Service) SendSignal(ctx context.Context, sender, receiver AgentAddress, sigType SignalType, reason string, metadata map[string]string) (*AgentMessage, error) {
+	msg, err := NewSignal(sender, receiver, sigType, reason, metadata, 5*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Send(ctx, msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
