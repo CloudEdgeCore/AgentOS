@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -682,7 +683,9 @@ func TestMailboxCrashRecoverySimulation(t *testing.T) {
 // Test 11: High-concurrency race test.
 func TestConcurrencyRace(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	service, _, checker, _, _, _ := setupTestService()
 
 	sender := NewAddress("tenant-race", "default", "sender")
@@ -714,11 +717,9 @@ func TestConcurrencyRace(t *testing.T) {
 		}(w)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
 	// Concurrent receivers and ackers
 	receivedTotal := sync.Map{}
+	var receivedCount atomic.Int64
 	for r := 0; r < 5; r++ {
 		wg.Add(1)
 		go func() {
@@ -736,20 +737,16 @@ func TestConcurrencyRace(t *testing.T) {
 					ids := make([]string, 0, len(msgs))
 					for _, m := range msgs {
 						ids = append(ids, m.ID)
-						receivedTotal.Store(m.ID, true)
+						if _, loaded := receivedTotal.LoadOrStore(m.ID, true); !loaded {
+							receivedCount.Add(1)
+						}
 					}
 					_ = service.Ack(ctx, receiver, ids)
 				} else {
 					time.Sleep(2 * time.Millisecond)
 				}
 
-				// Count total received
-				count := 0
-				receivedTotal.Range(func(_, _ any) bool {
-					count++
-					return true
-				})
-				if count >= workers*messagesPerWorker {
+				if receivedCount.Load() >= workers*messagesPerWorker {
 					return
 				}
 			}
