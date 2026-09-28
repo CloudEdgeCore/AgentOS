@@ -6,6 +6,10 @@ name: runtime-isolation-drills
 
 on:
   workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - fix/oci-isolation-systrap
   schedule:
     - cron: "23 3 * * 1" # weekly, Monday 03:23 UTC
 
@@ -118,29 +122,27 @@ jobs:
             # the long-lived gofer and sandbox inherit that pipe, so Cmd.Wait hangs
             # unless create output is redirected. systrap platform runs without KVM.
             sudo mkdir -p /var/log/agentos-runsc
-            cat << 'EOF' | sudo tee /usr/local/bin/agentos-runsc
-#!/bin/sh
-case " $* " in
-  *" create "*) exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1 ;;
-  *) exec /usr/local/bin/runsc "$@" ;;
-esac
-EOF
+            printf '%s\n' \
+              '#!/bin/sh' \
+              'case " $* " in' \
+              '  *" create "*) exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1 ;;' \
+              '  *) exec /usr/local/bin/runsc "$@" ;;' \
+              'esac' | sudo tee /usr/local/bin/agentos-runsc
             sudo chmod 0755 /usr/local/bin/agentos-runsc
 
-            cat << 'EOF' | sudo tee /etc/containerd/runsc.toml
-binary_name = "/usr/local/bin/agentos-runsc"
-log_path = "/var/log/agentos-runsc/shim.log"
-log_level = "debug"
-
-[runsc_config]
-  platform = "systrap"
-  network = "none"
-  systemd-cgroup = "false"
-  ignore-cgroups = "false"
-  oci-seccomp = "true"
-  debug = "true"
-  debug-log = "/var/log/agentos-runsc/gvisor.%COMMAND%.log"
-EOF
+            printf '%s\n' \
+              'binary_name = "/usr/local/bin/agentos-runsc"' \
+              'log_path = "/var/log/agentos-runsc/shim.log"' \
+              'log_level = "debug"' \
+              '' \
+              '[runsc_config]' \
+              '  platform = "systrap"' \
+              '  network = "none"' \
+              '  systemd-cgroup = "false"' \
+              '  ignore-cgroups = "false"' \
+              '  oci-seccomp = "true"' \
+              '  debug = "true"' \
+              '  debug-log = "/var/log/agentos-runsc/gvisor.%COMMAND%.log"' | sudo tee /etc/containerd/runsc.toml
             sudo systemctl enable containerd 2>/dev/null || true
             sudo systemctl restart containerd
           )
