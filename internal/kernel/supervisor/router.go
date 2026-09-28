@@ -3,6 +3,8 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/ipc"
@@ -106,6 +108,11 @@ func (r *Router) ResolveAddress(ctx context.Context, target ipc.AgentAddress) (i
 	if len(healthy) == 0 {
 		return ipc.AgentAddress{}, fmt.Errorf("%w: for service %s (agent %s)", ErrNoHealthyInstance, matchedService.Name, matchedService.AgentID)
 	}
+
+	// Sort healthy instances deterministically to ensure stable round-robin distribution
+	slices.SortFunc(healthy, func(a, b *Instance) int {
+		return strings.Compare(a.ID, b.ID)
+	})
 
 	// 5. Select instance via round-robin distribution
 	idx := atomic.AddUint64(&r.roundRobin, 1) % uint64(len(healthy))
