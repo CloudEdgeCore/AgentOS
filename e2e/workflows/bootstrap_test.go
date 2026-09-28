@@ -374,7 +374,7 @@ func newE2EEnv(t *testing.T, schema string, providerLatency time.Duration, lease
 		t.Fatalf("listen for gateway: %v", err)
 	}
 	gatewayServer := grpc.NewServer(grpc.MaxRecvMsgSize(4<<20), grpc.MaxSendMsgSize(4<<20))
-	gatewayv1.RegisterToolGatewayServiceServer(gatewayServer, gateway.NewService(toolGateway, e2eTenant, authorizer))
+	gatewayv1.RegisterToolGatewayServiceServer(gatewayServer, gateway.NewService(toolGateway, e2eTenant, authorizer).WithRuntimeFence(repository))
 	gatewayv1.RegisterMemoryGatewayServiceServer(gatewayServer, gateway.NewMemoryService(
 		kernelmemory.NewGateway(kernelmemory.DevEmbedder{}, repository), repository, e2eTenant, authorizer))
 	modelv1.RegisterModelGatewayServiceServer(gatewayServer, gateway.NewModelService(modelGateway, e2eTenant, authorizer))

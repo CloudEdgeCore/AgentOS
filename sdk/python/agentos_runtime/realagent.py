@@ -62,7 +62,8 @@ class RealAgent:
         tool_names = self._discover_tools(mcp)
         emit("tools.discovered", {"tools": tool_names})
 
-        state = self._restored.pop(execution_id, None)
+        with self._lock:
+            state = self._restored.pop(execution_id, None)
         resumed = state is not None and state.get("messages")
         messages: list[dict[str, Any]] = (
             list(state["messages"]) if resumed else [{"role": "system", "content": _system_prompt()}]
@@ -153,7 +154,8 @@ class RealAgent:
     def restore(self, execution_id: str, checkpoint: dict[str, Any]) -> None:
         if checkpoint.get("schemaVersion") != SCHEMA_VERSION:
             raise ValueError("incompatible checkpoint schema")
-        self._restored[execution_id] = dict(checkpoint.get("state") or {})
+        with self._lock:
+            self._restored[execution_id] = dict(checkpoint.get("state") or {})
 
     # -- internals ---------------------------------------------------------------
 

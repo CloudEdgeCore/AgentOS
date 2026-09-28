@@ -308,7 +308,7 @@ func main() {
 		}
 	}
 	server := grpc.NewServer(serverOptions...)
-	toolService := gateway.NewService(decisionGateway, allowedTenant, capabilityAuthorizer)
+	toolService := gateway.NewService(decisionGateway, allowedTenant, capabilityAuthorizer).WithRuntimeFence(repository)
 	memoryService := gateway.NewMemoryService(
 		memory.NewGateway(embedder, repository), repository, allowedTenant, capabilityAuthorizer,
 	)

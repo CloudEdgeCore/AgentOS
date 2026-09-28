@@ -287,7 +287,7 @@ func newHarness(t *testing.T, name string, stubborn bool) *harness {
 		t.Fatalf("gateway listen: %v", err)
 	}
 	gatewayServer := grpc.NewServer(grpc.MaxRecvMsgSize(4<<20), grpc.MaxSendMsgSize(4<<20))
-	gatewayv1.RegisterToolGatewayServiceServer(gatewayServer, gateway.NewService(toolGateway, devopsTenant, authorizer))
+	gatewayv1.RegisterToolGatewayServiceServer(gatewayServer, gateway.NewService(toolGateway, devopsTenant, authorizer).WithRuntimeFence(store))
 	gatewayv1.RegisterMemoryGatewayServiceServer(gatewayServer, gateway.NewMemoryService(
 		kernelmemory.NewGateway(kernelmemory.DevEmbedder{}, store), store, devopsTenant, authorizer))
 	modelv1.RegisterModelGatewayServiceServer(gatewayServer, gateway.NewModelService(modelGateway, devopsTenant, authorizer))

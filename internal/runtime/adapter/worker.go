@@ -687,6 +687,13 @@ func (w *Worker) commitLogicalCheckpoint(
 		return version, fmt.Errorf("runtime checkpoint schema %q does not match manifest schema %q",
 			checkpoint.Checkpoint.SchemaVersion, policy.SchemaVersion)
 	}
+	trimmedState := bytes.TrimSpace(checkpoint.Checkpoint.State)
+	if len(trimmedState) == 0 || bytes.Equal(trimmedState, []byte("{}")) {
+		// An empty checkpoint state contains no recoverable progress. Do not
+		// commit an empty checkpoint that would clobber a previous confirmed
+		// checkpoint.
+		return version, nil
+	}
 	document, err := json.Marshal(checkpoint.Checkpoint)
 	if err != nil {
 		return version, err

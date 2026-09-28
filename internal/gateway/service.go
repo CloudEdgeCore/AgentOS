@@ -37,6 +37,7 @@ type ToolInvoker interface {
 type Service struct {
 	gatewayv1.UnimplementedToolGatewayServiceServer
 	invoker       ToolInvoker
+	fences        RuntimeFence
 	allowedTenant string
 	capabilities  *capability.Authorizer
 }
@@ -47,6 +48,12 @@ func NewService(invoker ToolInvoker, allowedTenant string, capabilities ...*capa
 		service.capabilities = capabilities[0]
 	}
 	return service
+}
+
+// WithRuntimeFence attaches a fence validator to the tool gateway service.
+func (s *Service) WithRuntimeFence(fences RuntimeFence) *Service {
+	s.fences = fences
+	return s
 }
 
 func (s *Service) ListTools(ctx context.Context, request *gatewayv1.ListToolsRequest) (*gatewayv1.ListToolsResponse, error) {
@@ -147,6 +154,18 @@ func (s *Service) InvokeTool(ctx context.Context, request *gatewayv1.InvokeToolR
 	attemptID, err := parseUUID(request.GetIdentity().GetAttemptId(), "attempt ID")
 	if err != nil {
 		return nil, err
+	}
+	if s.fences != nil {
+		assignment, err := s.fences.GetRuntimeAssignment(ctx, request.GetIdentity().GetTenantId(), attemptID, request.GetIdentity().GetFencingToken())
+		if err != nil {
+			if errors.Is(err, store.ErrFenced) || errors.Is(err, store.ErrNotFound) {
+				return nil, status.Error(codes.PermissionDenied, "attempt identity is stale or lease expired")
+			}
+			return nil, rpcError(err)
+		}
+		if assignment.Task.AgentVersionRef != request.GetAgentVersionRef() {
+			return nil, status.Error(codes.PermissionDenied, "agent version does not match the fenced Attempt")
+		}
 	}
 	input := tool.InvokeInput{
 		TenantID: request.GetIdentity().GetTenantId(),

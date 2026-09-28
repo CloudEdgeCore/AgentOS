@@ -181,10 +181,18 @@ func (f *fakeInvoker) GetToolDescriptor(_ context.Context, _, name, version stri
 }
 
 func newTestClient(t *testing.T, invoker ToolInvoker) gatewayv1.ToolGatewayServiceClient {
+	return newTestClientWithFence(t, invoker, nil)
+}
+
+func newTestClientWithFence(t *testing.T, invoker ToolInvoker, fences RuntimeFence) gatewayv1.ToolGatewayServiceClient {
 	t.Helper()
 	listener := bufconn.Listen(1 << 20)
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(1<<20), grpc.MaxSendMsgSize(1<<20))
-	gatewayv1.RegisterToolGatewayServiceServer(server, NewService(invoker, "tenant-a"))
+	service := NewService(invoker, "tenant-a")
+	if fences != nil {
+		service.WithRuntimeFence(fences)
+	}
+	gatewayv1.RegisterToolGatewayServiceServer(server, service)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	connection, err := grpc.NewClient("passthrough:///bufconn", grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -194,4 +202,36 @@ func newTestClient(t *testing.T, invoker ToolInvoker) gatewayv1.ToolGatewayServi
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	return gatewayv1.NewToolGatewayServiceClient(connection)
+}
+
+type fakeToolFence struct {
+	assignment store.RuntimeAssignment
+	err        error
+}
+
+func (f *fakeToolFence) GetRuntimeAssignment(context.Context, string, uuid.UUID, int64) (store.RuntimeAssignment, error) {
+	if f.err != nil {
+		return store.RuntimeAssignment{}, f.err
+	}
+	return f.assignment, nil
+}
+
+func TestInvokeToolFencedAttemptRejected(t *testing.T) {
+	fence := &fakeToolFence{err: store.ErrFenced}
+	client := newTestClientWithFence(t, &fakeInvoker{}, fence)
+	_, err := client.InvokeTool(context.Background(), invokeRequest(t, ""))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("fenced attempt: %v, want PermissionDenied", err)
+	}
+}
+
+func TestInvokeToolStaleVersionRejected(t *testing.T) {
+	fence := &fakeToolFence{assignment: store.RuntimeAssignment{
+		Task: store.Task{AgentVersionRef: "different@2"},
+	}}
+	client := newTestClientWithFence(t, &fakeInvoker{}, fence)
+	_, err := client.InvokeTool(context.Background(), invokeRequest(t, ""))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("stale version: %v, want PermissionDenied", err)
+	}
 }
