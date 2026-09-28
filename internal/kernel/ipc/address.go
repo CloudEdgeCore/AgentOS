@@ -109,7 +109,8 @@ func (a AgentAddress) Matches(target AgentAddress) bool {
 }
 
 // String returns the canonical, stably serializable URI representation:
-//   agent://<tenant>/<namespace>/<agent>[/<instance>]
+//
+//	agent://<tenant>/<namespace>/<agent>[/<instance>]
 func (a AgentAddress) String() string {
 	ns := a.EffectiveNamespace()
 	if a.InstanceID != "" {
@@ -187,9 +188,12 @@ func (a *AgentAddress) UnmarshalJSON(data []byte) error {
 }
 
 // ParseAddress parses a canonical agent address string in either:
-//   agent://<tenant>/<namespace>/<agent>[/<instance>]
+//
+//	agent://<tenant>/<namespace>/<agent>[/<instance>]
+//
 // or slash-delimited format:
-//   <tenant>/<namespace>/<agent>[/<instance>]
+//
+//	<tenant>/<namespace>/<agent>[/<instance>]
 func ParseAddress(raw string) (AgentAddress, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

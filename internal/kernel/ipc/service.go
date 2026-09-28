@@ -320,7 +320,12 @@ func (s *Service) Send(ctx context.Context, msg *AgentMessage) error {
 	defer span.End()
 
 	if err := msg.Validate(); err != nil {
-		s.logAudit(ctx, msg, "send", "failed", err.Error())
+		if errors.Is(err, ErrCrossTenantDenied) {
+			s.metrics.RecordDenied(ctx, msg.TenantID, err.Error())
+			s.logAudit(ctx, msg, "send", "denied", err.Error())
+		} else {
+			s.logAudit(ctx, msg, "send", "failed", err.Error())
+		}
 		return err
 	}
 
