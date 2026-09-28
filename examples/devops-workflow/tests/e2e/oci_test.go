@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,59 @@ func ociWorkerCommand(bin string, args ...string) (string, []string) {
 		return "sudo", append([]string{"-n", bin}, args...)
 	}
 	return bin, args
+}
+
+// TestMain ensures all spawned OCI workers are thoroughly cleaned up when the test binary exits.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if _, err := exec.LookPath("sudo"); err == nil {
+		_ = exec.Command("sudo", "-n", "pkill", "-9", "-f", "agentos-runtime-oci").Run()
+	}
+	os.Exit(code)
+}
+
+// killOCIWorker terminates a worker subprocess, using sudo when available so
+// that both the sudo wrapper and the root-owned worker child process are reaped.
+func killOCIWorker(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if _, err := exec.LookPath("sudo"); err == nil {
+		_ = exec.Command("sudo", "-n", "kill", "-9", fmt.Sprintf("-%d", pid)).Run()
+		_ = exec.Command("sudo", "-n", "kill", "-9", fmt.Sprintf("%d", pid)).Run()
+		_ = exec.Command("sudo", "-n", "pkill", "-9", "-f", "agentos-runtime-oci").Run()
+	} else {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// startOCIWorker starts an OCI worker process in its own process group and
+// registers cleanup so no background processes or open I/O pipes leak.
+func startOCIWorker(t *testing.T, bin string, args ...string) *exec.Cmd {
+	t.Helper()
+	workerBin, workerArgs := ociWorkerCommand(bin, args...)
+	workerArgs = append(workerArgs, directRunscArgs()...)
+	cmd := exec.Command(workerBin, workerArgs...)
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start oci worker: %v", err)
+	}
+	t.Cleanup(func() {
+		killOCIWorker(cmd)
+	})
+	return cmd
 }
 
 // ociArtifactRoot creates a temporary directory for the OCI worker's artifact
@@ -136,7 +190,7 @@ func TestOCIIsolation(t *testing.T) {
 		t.Skipf("agentos-runtime-oci binary not found at %s (build with: go build ./cmd/agentos-runtime-oci)", ociWorkerBin)
 	}
 	artifactRoot := ociArtifactRoot(t)
-	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
+	workerCmd := startOCIWorker(t, ociWorkerBin,
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
 		"-runtime-instance-id", "oci-worker-1",
@@ -145,16 +199,6 @@ func TestOCIIsolation(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
-	// When the containerd shim path is unavailable (e.g. WSL2), the
-	// environment variable AGENTOS_RUNSC_DIRECT switches to the direct runsc
-	// executor which bypasses containerd.
-	workerArgs = append(workerArgs, directRunscArgs()...)
-	workerCmd := exec.Command(workerBin, workerArgs...)
-	workerCmd.Stderr = os.Stderr
-	if err := workerCmd.Start(); err != nil {
-		t.Fatalf("start oci worker: %v", err)
-	}
-	defer workerCmd.Process.Kill()
 	t.Logf("oci worker started (pid %d)", workerCmd.Process.Pid)
 
 	// Create a task targeting the oci pool.
@@ -255,7 +299,7 @@ func TestOCICrossClassPlacement(t *testing.T) {
 	if _, err := os.Stat(ociWorkerBin); err != nil {
 		t.Skipf("agentos-runtime-oci binary not found")
 	}
-	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
+	_ = startOCIWorker(t, ociWorkerBin,
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
 		"-runtime-instance-id", "oci-worker-1",
@@ -264,13 +308,6 @@ func TestOCICrossClassPlacement(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
-	workerArgs = append(workerArgs, directRunscArgs()...)
-	workerCmd := exec.Command(workerBin, workerArgs...)
-	workerCmd.Stderr = os.Stderr
-	if err := workerCmd.Start(); err != nil {
-		t.Fatalf("start oci worker: %v", err)
-	}
-	defer workerCmd.Process.Kill()
 
 	createDualTask := func(goal, idem string) uuid.UUID {
 		t.Helper()
@@ -387,7 +424,7 @@ func TestOCIRealTakeover(t *testing.T) {
 	// configured with the same alpine reference so the workload pin matches
 	// (worker.go rejects a workload image that differs from its own config).
 	const sleepImage = "docker.io/library/alpine:latest"
-	workerBin, workerArgs := ociWorkerCommand(ociWorkerBin,
+	workerCmd := startOCIWorker(t, ociWorkerBin,
 		"-control-address", h.listener.Addr().String(),
 		"-tenant", devopsTenant,
 		"-runtime-instance-id", "oci-worker-1",
@@ -396,14 +433,6 @@ func TestOCIRealTakeover(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
-	workerArgs = append(workerArgs, directRunscArgs()...)
-	workerCmd := exec.Command(workerBin, workerArgs...)
-	workerCmd.Stderr = os.Stderr
-	workerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := workerCmd.Start(); err != nil {
-		t.Fatalf("start oci worker: %v", err)
-	}
-	defer func() { _ = syscall.Kill(-workerCmd.Process.Pid, syscall.SIGKILL) }()
 
 	taskID := uuid.New()
 	spec := map[string]any{
@@ -458,7 +487,7 @@ func TestOCIRealTakeover(t *testing.T) {
 	// Cordon the oci pool and kill the worker mid-run via its process group
 	// (covers the sudo wrapper and the real worker child).
 	h.cordonPool("devops-pool-5")
-	_ = syscall.Kill(-workerCmd.Process.Pid, syscall.SIGKILL)
+	killOCIWorker(workerCmd)
 	killTime := time.Now()
 
 	// Expire the lease immediately so recovery reclaims the attempt.
