@@ -21,6 +21,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/recovery"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/scheduler"
 	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
 	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -141,6 +142,7 @@ func main() {
 		slog.Warn("controller instance is NOT sharded (claims every tenant; ADR-016)", "controllerID", *controllerID)
 	}
 	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
+	supervisorController := supervisor.NewSupervisor(repository)
 	nextAccountingAudit := time.Now().UTC()
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
@@ -169,6 +171,10 @@ func main() {
 		admitted, admissionErr := admissionController.Reconcile(ctx)
 		scheduled, schedulerErr := schedulerController.Reconcile(ctx)
 		recovered, recoveryErr := recoveryController.Reconcile(ctx)
+		supervisorErr := supervisorController.Reconcile(ctx, "")
+		if supervisorErr != nil && ctx.Err() == nil {
+			slog.Error("supervisor reconciliation", "error", supervisorErr)
+		}
 		if admissionErr != nil && ctx.Err() == nil {
 			slog.Error("admission reconciliation", "error", admissionErr)
 		}

@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runLogs(args[1:], stdout, stderr)
 	case "workflow":
 		return runWorkflow(args[1:], stdout, stderr)
+	case "service":
+		return runService(args[1:], stdout, stderr)
 	case "research":
 		return runResearch(args[1:], stdout, stderr)
 	case "metrics":

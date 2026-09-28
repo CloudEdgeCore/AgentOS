@@ -27,6 +27,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/money"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/observability"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
 	"github.com/CloudEdgeCore/AgentOS/internal/version"
 	"github.com/google/uuid"
 )
@@ -135,6 +136,9 @@ type Handler struct {
 	// metrics is the §Phase-7 aggregated observability surface; when nil
 	// the metrics endpoint answers 404.
 	metrics MetricsStore
+	// supervisor and serviceStore provide long-running Agent Service management.
+	supervisor   *supervisor.Supervisor
+	serviceStore supervisor.Store
 	// auditKeyID / auditSigningKey sign exported audit archives.
 	auditKeyID      string
 	auditSigningKey ed25519.PrivateKey
@@ -184,6 +188,15 @@ func WithTenantQuotaStore(quotas TenantQuotaStore) Option {
 // without it the metrics endpoint answers 404.
 func WithMetricsStore(metrics MetricsStore) Option {
 	return func(h *Handler) { h.metrics = metrics }
+}
+
+// WithSupervisor installs the Agent Service supervisor and store;
+// without it the service endpoints answer 404.
+func WithSupervisor(sup *supervisor.Supervisor, store supervisor.Store) Option {
+	return func(h *Handler) {
+		h.supervisor = sup
+		h.serviceStore = store
+	}
 }
 
 // WithAuditSigningKey configures the key that signs exported audit archives.
@@ -258,9 +271,24 @@ func NewHandler(taskStore TaskStore, agentVersions AgentVersionStore, approvals 
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/cancel", handler.cancelWorkflow)
 	mux.HandleFunc("POST /v1/workflows/{workflowID}/steps/{stepName}/approval", handler.decideWorkflowStepApproval)
 	mux.HandleFunc("PUT /v1/runtime-pools/{poolID}/status", handler.updateRuntimePoolStatus)
+	mux.HandleFunc("POST /v1/services", handler.createService)
+	mux.HandleFunc("GET /v1/services", handler.listServices)
+	mux.HandleFunc("GET /v1/services/{serviceID}", handler.getService)
+	mux.HandleFunc("PUT /v1/services/{serviceID}", handler.updateService)
+	mux.HandleFunc("DELETE /v1/services/{serviceID}", handler.deleteService)
+	mux.HandleFunc("POST /v1/services/{serviceID}/scale", handler.scaleService)
+	mux.HandleFunc("POST /v1/services/{serviceID}/restart", handler.restartService)
+	mux.HandleFunc("GET /v1/services/{serviceID}/instances", handler.listServiceInstances)
+	mux.HandleFunc("POST /v1/services/{serviceID}/instances/{instanceID}/heartbeat", handler.heartbeatServiceInstance)
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /readyz", handler.ready)
 	mux.HandleFunc("GET /versionz", handler.version)
+	mux.HandleFunc("/v1/services", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/services/{serviceID}", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/services/{serviceID}/scale", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/services/{serviceID}/restart", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/services/{serviceID}/instances", handler.methodNotAllowed)
+	mux.HandleFunc("/v1/services/{serviceID}/instances/{instanceID}/heartbeat", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/workflows", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/workflows/{workflowID}", handler.methodNotAllowed)
 	mux.HandleFunc("/v1/workflows/{workflowID}/cancel", handler.methodNotAllowed)

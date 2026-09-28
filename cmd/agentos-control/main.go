@@ -19,6 +19,7 @@ import (
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/memory"
 	postgresstore "github.com/CloudEdgeCore/AgentOS/internal/kernel/store/postgres"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
 	"github.com/CloudEdgeCore/AgentOS/internal/platform/otel"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -107,6 +108,8 @@ func main() {
 	options = append(options, controlapi.WithWorkflowStore(repository))
 	options = append(options, controlapi.WithMetricsStore(repository))
 	options = append(options, controlapi.WithRuntimePoolOperatorStore(repository))
+	supervisorEngine := supervisor.NewSupervisor(repository)
+	options = append(options, controlapi.WithSupervisor(supervisorEngine, repository))
 	options = append(options, controlapi.WithReadiness(pool.Ping))
 	if strings.TrimSpace(*auditSigningKey) != "" {
 		decoded, err := agentpkg.DecodePrivateKey(*auditSigningKey)
