@@ -113,10 +113,34 @@ jobs:
             sudo mv containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
             sudo mkdir -p /etc/containerd
             sudo cp deploy/ci/containerd-config.toml /etc/containerd/config.toml
-            # The executor passes --runtime-config-path unconditionally; an
-            # empty (valid) runsc config satisfies it. New gVisor releases no
-            # longer ship runsc.toml.
-            sudo touch /etc/containerd/runsc.toml
+            # Configure agentos-runsc wrapper and runsc.toml with systrap platform.
+            # The gVisor shim captures `runsc create` output with an os/exec pipe;
+            # the long-lived gofer and sandbox inherit that pipe, so Cmd.Wait hangs
+            # unless create output is redirected. systrap platform runs without KVM.
+            sudo mkdir -p /var/log/agentos-runsc
+            cat << 'EOF' | sudo tee /usr/local/bin/agentos-runsc
+#!/bin/sh
+case " $* " in
+  *" create "*) exec /usr/local/bin/runsc "$@" >>/var/log/agentos-runsc/runsc.create.log 2>&1 ;;
+  *) exec /usr/local/bin/runsc "$@" ;;
+esac
+EOF
+            sudo chmod 0755 /usr/local/bin/agentos-runsc
+
+            cat << 'EOF' | sudo tee /etc/containerd/runsc.toml
+binary_name = "/usr/local/bin/agentos-runsc"
+log_path = "/var/log/agentos-runsc/shim.log"
+log_level = "debug"
+
+[runsc_config]
+  platform = "systrap"
+  network = "none"
+  systemd-cgroup = "false"
+  ignore-cgroups = "false"
+  oci-seccomp = "true"
+  debug = "true"
+  debug-log = "/var/log/agentos-runsc/gvisor.%COMMAND%.log"
+EOF
             sudo systemctl enable containerd 2>/dev/null || true
             sudo systemctl restart containerd
           )
@@ -143,8 +167,16 @@ jobs:
 
       - name: Smoke-test gVisor container execution
         run: |
-          sudo ctr -n agentos run --rm --runtime io.containerd.runsc.v1 \
-            docker.io/library/agentos-runtime:latest gvisor-smoke 2>&1
+          timeout 60s sudo ctr -n agentos run --rm \
+            --runtime io.containerd.runsc.v1 \
+            --runtime-config-path /etc/containerd/runsc.toml \
+            docker.io/library/agentos-runtime:latest gvisor-smoke 2>&1 || {
+              echo "Smoke test failed, dumping runsc logs:" >&2
+              sudo ls -la /var/log/agentos-runsc >&2 || true
+              sudo cat /var/log/agentos-runsc/shim.log >&2 || true
+              sudo cat /var/log/agentos-runsc/runsc.create.log >&2 || true
+              exit 1
+            }
           echo "gVisor sandbox verified: container executed and exited"
 
       - name: Run OCI/gVisor isolation and takeover drills

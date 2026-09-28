@@ -81,6 +81,24 @@ func requireOCIDrillEnvironment(t *testing.T) {
 	}
 }
 
+// directRunscArgs returns the worker arguments for running sandboxes directly
+// via runsc CLI instead of containerd. It selects kvm if available or explicitly
+// requested, defaulting to systrap when /dev/kvm is missing.
+func directRunscArgs() []string {
+	if os.Getenv("AGENTOS_RUNSC_DIRECT") != "1" {
+		return nil
+	}
+	platform := os.Getenv("AGENTOS_RUNSC_PLATFORM")
+	if platform == "" {
+		if _, err := os.Stat("/dev/kvm"); err == nil {
+			platform = "kvm"
+		} else {
+			platform = "systrap"
+		}
+	}
+	return []string{"-runsc-direct", "-runsc-platform", platform}
+}
+
 // TestOCIIsolation is the A-path isolation drill: a task whose spec targets
 // an OCI container is placed on the `oci` pool, executed by the real
 // agentos-runtime-oci worker inside a gVisor sandbox, and completes
@@ -126,9 +144,7 @@ func TestOCIIsolation(t *testing.T) {
 	// When the containerd shim path is unavailable (e.g. WSL2), the
 	// environment variable AGENTOS_RUNSC_DIRECT switches to the direct runsc
 	// executor which bypasses containerd.
-	if os.Getenv("AGENTOS_RUNSC_DIRECT") == "1" {
-		workerArgs = append(workerArgs, "-runsc-direct", "-runsc-platform", "kvm")
-	}
+	workerArgs = append(workerArgs, directRunscArgs()...)
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
@@ -244,9 +260,7 @@ func TestOCICrossClassPlacement(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
-	if os.Getenv("AGENTOS_RUNSC_DIRECT") == "1" {
-		workerArgs = append(workerArgs, "-runsc-direct", "-runsc-platform", "kvm")
-	}
+	workerArgs = append(workerArgs, directRunscArgs()...)
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	if err := workerCmd.Start(); err != nil {
@@ -378,9 +392,7 @@ func TestOCIRealTakeover(t *testing.T) {
 		"-skip-image-pull",
 		"-dev-mode",
 	)
-	if os.Getenv("AGENTOS_RUNSC_DIRECT") == "1" {
-		workerArgs = append(workerArgs, "-runsc-direct", "-runsc-platform", "kvm")
-	}
+	workerArgs = append(workerArgs, directRunscArgs()...)
 	workerCmd := exec.Command(workerBin, workerArgs...)
 	workerCmd.Stderr = os.Stderr
 	workerCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
