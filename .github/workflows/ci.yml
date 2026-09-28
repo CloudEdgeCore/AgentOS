@@ -65,9 +65,21 @@ jobs:
         run: |
           export GOBIN="$RUNNER_TEMP/bin"
           export PATH="$GOBIN:$PATH"
-          go install github.com/bufbuild/buf/cmd/buf@v1.72.0
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0
+          install_with_retry() {
+            local target="$1"
+            local max=3
+            for ((attempt=1; attempt<=max; attempt++)); do
+              if go install "$target"; then
+                return 0
+              fi
+              echo "Retrying go install $target (attempt $attempt/$max)..."
+              sleep 3
+            done
+            return 1
+          }
+          install_with_retry github.com/bufbuild/buf/cmd/buf@v1.72.0
+          install_with_retry google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          install_with_retry google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0
           buf lint
           buf generate
           git diff --exit-code -- gen/go
