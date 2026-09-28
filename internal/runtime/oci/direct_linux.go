@@ -38,13 +38,18 @@ func NewRunscDirectExecutor(options ...DirectRunscOption) (Executor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("containerd CLI (ctr) is required to mount workload images: %w", err)
 	}
+	rootDir := os.Getenv("AGENTOS_RUNSC_ROOT")
+	if rootDir == "" {
+		rootDir = "/run/containerd/runsc/agentos"
+	}
 	executor := &directExecutor{
 		ctrPath: ctrPath, namespace: "agentos", runscPath: runscPath, platform: "kvm",
-		rootDir: "/run/containerd/runsc/agentos", outputLimit: 1 << 20,
+		rootDir: rootDir, outputLimit: 1 << 20,
 	}
 	for _, option := range options {
 		option(executor)
 	}
+	_ = os.MkdirAll(executor.rootDir, 0o755)
 	return executor, nil
 }
 
@@ -151,7 +156,7 @@ func (e *directExecutor) Destroy(ctx context.Context, execution Execution) error
 	if !ok {
 		return fmt.Errorf("execution is not a direct runsc execution")
 	}
-	deleteErr := e.runscRun(ctx, "delete", "-force", direct.containerID)
+	deleteErr := e.runscRun(ctx, "delete", "--force", direct.containerID)
 	_ = os.RemoveAll(direct.bundleDir)
 	_ = os.RemoveAll(direct.inputDir)
 	e.unregister(direct.containerID)
@@ -225,15 +230,15 @@ func (e *directExecutor) run(ctx context.Context, args ...string) error {
 // a worker that crashed leaves agentos-* containers behind; the next Prepare
 // cleans them up.
 func (e *directExecutor) reapOrphans(ctx context.Context) error {
-	command := exec.CommandContext(ctx, e.runscPath, "--root", e.rootDir, "list", "-q")
+	command := exec.CommandContext(ctx, e.runscPath, "--root", e.rootDir, "list", "--quiet")
 	var output limitedBuffer
 	output.max = e.outputLimit
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("runsc list: %w", err)
+		return fmt.Errorf("runsc list: %w (output: %s)", err, strings.TrimSpace(output.String()))
 	}
 	for _, id := range reapTargets(strings.Fields(strings.TrimSpace(output.String())), e.activeSnapshot()) {
-		_ = e.runscRun(ctx, "delete", "-force", id)
+		_ = e.runscRun(ctx, "delete", "--force", id)
 	}
 	return nil
 }
@@ -283,7 +288,7 @@ func (e *directExecution) Wait(ctx context.Context) (RunResult, error) {
 	case <-ctx.Done():
 		killCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = e.executor.runscRun(killCtx, "delete", "-force", e.containerID)
+		_ = e.executor.runscRun(killCtx, "delete", "--force", e.containerID)
 		select {
 		case outcome := <-e.done:
 			return outcome.result, outcome.err

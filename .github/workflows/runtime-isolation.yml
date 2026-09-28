@@ -88,6 +88,7 @@ jobs:
       AGENTOS_RUN_OCI_DRILL: "1"
       AGENTOS_RUNSC_DIRECT: "1"
       AGENTOS_RUNSC_PLATFORM: "systrap"
+      AGENTOS_RUNSC_ROOT: "/run/containerd/runsc/agentos"
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -116,6 +117,7 @@ jobs:
             sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
             sudo chmod 555 /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
             sudo mkdir -p /etc/containerd /run/containerd/runsc/agentos /run/agentos-runsc-direct
+            sudo chmod 777 /run/containerd/runsc/agentos /run/agentos-runsc-direct
             sudo cp deploy/ci/containerd-config.toml /etc/containerd/config.toml
             # Configure agentos-runsc wrapper and runsc.toml with systrap platform.
             # The gVisor shim captures `runsc create` output with an os/exec pipe;

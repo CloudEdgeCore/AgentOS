@@ -38,6 +38,7 @@ func main() {
 	skipImagePull := flag.Bool("skip-image-pull", false, "assume the image is already loaded into containerd")
 	directMode := flag.Bool("runsc-direct", false, "run sandboxes directly via the runsc CLI instead of the containerd shim (for hosts where the shim is unavailable, e.g. WSL2)")
 	runscPlatform := flag.String("runsc-platform", "kvm", "gVisor platform when running sandboxes directly (kvm, systrap or ptrace)")
+	runscRoot := flag.String("runsc-root", "", "gVisor state root directory when running sandboxes directly (default /run/containerd/runsc/agentos or AGENTOS_RUNSC_ROOT)")
 	cpuQuotaMillis := flag.Int64("cpu-quota-millis", 0, "cgroup CPU quota in milliseconds (0 = Admission decides)")
 	memoryLimitMiB := flag.Int64("memory-limit-mib", 0, "cgroup memory limit in MiB (0 = Admission decides)")
 	workspaceBytes := flag.Int64("workspace-bytes", 0, "tmpfs workspace size in bytes (0 = Admission decides)")
@@ -78,7 +79,11 @@ func main() {
 	}
 	var executor oci.Executor
 	if *directMode {
-		executor, err = oci.NewRunscDirectExecutor(oci.WithRunscPlatform(*runscPlatform))
+		directOptions := []oci.DirectRunscOption{oci.WithRunscPlatform(*runscPlatform)}
+		if *runscRoot != "" {
+			directOptions = append(directOptions, oci.WithRunscRoot(*runscRoot))
+		}
+		executor, err = oci.NewRunscDirectExecutor(directOptions...)
 	} else {
 		executor, err = oci.NewRunscExecutor(options...)
 	}

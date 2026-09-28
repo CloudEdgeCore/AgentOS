@@ -96,7 +96,11 @@ func directRunscArgs() []string {
 			platform = "systrap"
 		}
 	}
-	return []string{"-runsc-direct", "-runsc-platform", platform}
+	args := []string{"-runsc-direct", "-runsc-platform", platform}
+	if root := os.Getenv("AGENTOS_RUNSC_ROOT"); root != "" {
+		args = append(args, "-runsc-root", root)
+	}
+	return args
 }
 
 // TestOCIIsolation is the A-path isolation drill: a task whose spec targets
