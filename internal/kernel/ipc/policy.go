@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -34,6 +35,7 @@ func NewMemoryCapabilityChecker() *MemoryCapabilityChecker {
 }
 
 // Grant assigns a capability to an agent address.
+// If addr has no instance, the capability is granted to the logical agent (all instances).
 func (c *MemoryCapabilityChecker) Grant(addr AgentAddress, capability string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -44,6 +46,7 @@ func (c *MemoryCapabilityChecker) Grant(addr AgentAddress, capability string) {
 	}
 	c.grants[key][capability] = true
 
+	// Also record for logical address if an instance address was provided
 	if addr.IsInstance() {
 		logicalKey := addr.Logical().String()
 		if c.grants[logicalKey] == nil {
@@ -75,14 +78,62 @@ func (c *MemoryCapabilityChecker) CheckCapability(ctx context.Context, tenantID 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	// Check exact address (with instance if present)
 	if caps, ok := c.grants[addr.String()]; ok && caps[capability] {
 		return nil
 	}
+	// Check logical address
 	if caps, ok := c.grants[addr.Logical().String()]; ok && caps[capability] {
 		return nil
 	}
 
 	return fmt.Errorf("%w: agent %s lacks %s", ErrCapabilityDenied, addr.String(), capability)
+}
+
+// Fencer validates whether an agent instance is active or has been fenced.
+type Fencer interface {
+	ValidateInstance(ctx context.Context, addr AgentAddress) error
+}
+
+// MemoryFencer provides an in-memory fencer registry for testing.
+type MemoryFencer struct {
+	mu     sync.RWMutex
+	fenced map[string]bool
+}
+
+// NewMemoryFencer creates a new MemoryFencer.
+func NewMemoryFencer() *MemoryFencer {
+	return &MemoryFencer{
+		fenced: make(map[string]bool),
+	}
+}
+
+// FenceInstance marks an agent instance as fenced.
+func (f *MemoryFencer) FenceInstance(addr AgentAddress) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fenced[addr.String()] = true
+}
+
+// UnfenceInstance removes the fenced flag from an instance.
+func (f *MemoryFencer) UnfenceInstance(addr AgentAddress) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.fenced, addr.String())
+}
+
+// ValidateInstance returns ErrFenced if the instance address has been fenced.
+func (f *MemoryFencer) ValidateInstance(ctx context.Context, addr AgentAddress) error {
+	if !addr.IsInstance() {
+		return nil
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.fenced[addr.String()] {
+		return ErrFenced
+	}
+	return nil
 }
 
 // Policy enforces tenant isolation, cross-namespace rules, and capabilities for IPC operations.
@@ -96,13 +147,15 @@ type DefaultPolicy struct {
 	mu                  sync.RWMutex
 	crossNamespaceRules map[string]bool // "<tenant>:<from>-><to>" => allowed
 	capabilities        CapabilityChecker
+	fencer              Fencer
 }
 
-// NewDefaultPolicy constructs a DefaultPolicy with optional capability checker.
-func NewDefaultPolicy(checker CapabilityChecker) *DefaultPolicy {
+// NewDefaultPolicy constructs a DefaultPolicy with optional capability checker and fencer.
+func NewDefaultPolicy(checker CapabilityChecker, fencer Fencer) *DefaultPolicy {
 	return &DefaultPolicy{
 		crossNamespaceRules: make(map[string]bool),
 		capabilities:        checker,
+		fencer:              fencer,
 	}
 }
 
@@ -124,18 +177,18 @@ func (p *DefaultPolicy) DisallowCrossNamespace(tenantID, fromNS, toNS string) {
 	delete(p.crossNamespaceRules, ruleKey(tenantID, fromNS, toNS))
 }
 
-// AuthorizeSend checks tenant isolation, cross-namespace permissions, and capabilities.
+// AuthorizeSend checks tenant isolation, cross-namespace permissions, fencing, and capabilities.
 func (p *DefaultPolicy) AuthorizeSend(ctx context.Context, msg *AgentMessage) error {
 	if msg == nil {
 		return fmt.Errorf("%w: nil message", ErrInvalidMessage)
 	}
 
-	// 1. Strict Tenant Isolation
+	// 1. Strict Tenant Isolation: Cross-tenant is unconditionally forbidden
 	if msg.Sender.TenantID != msg.Receiver.TenantID {
 		return fmt.Errorf("%w: sender tenant %s != receiver tenant %s", ErrCrossTenantDenied, msg.Sender.TenantID, msg.Receiver.TenantID)
 	}
 
-	// 2. Namespace Boundary
+	// 2. Namespace Boundary: Cross-namespace is default-deny unless explicitly allowed
 	fromNS := msg.Sender.EffectiveNamespace()
 	toNS := msg.Receiver.EffectiveNamespace()
 	if fromNS != toNS {
@@ -147,16 +200,33 @@ func (p *DefaultPolicy) AuthorizeSend(ctx context.Context, msg *AgentMessage) er
 		}
 	}
 
-	// 3. Capability Authorization
+	// 3. Fencing Verification
+	if p.fencer != nil {
+		if msg.Sender.IsInstance() {
+			if err := p.fencer.ValidateInstance(ctx, msg.Sender); err != nil {
+				return err
+			}
+		}
+		if msg.Receiver.IsInstance() {
+			if err := p.fencer.ValidateInstance(ctx, msg.Receiver); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 4. Capability Authorization
 	if p.capabilities != nil {
+		// Sender must have ipc.send
 		if err := p.capabilities.CheckCapability(ctx, msg.Sender.TenantID, msg.Sender, CapabilitySend); err != nil {
 			return fmt.Errorf("%w: sender: %v", ErrCapabilityDenied, err)
 		}
+		// Sender of signal must have ipc.signal
 		if msg.Type == MessageTypeSignal {
 			if err := p.capabilities.CheckCapability(ctx, msg.Sender.TenantID, msg.Sender, CapabilitySignal); err != nil {
 				return fmt.Errorf("%w: signal sender: %v", ErrCapabilityDenied, err)
 			}
 		}
+		// Receiver must have ipc.receive
 		if err := p.capabilities.CheckCapability(ctx, msg.Receiver.TenantID, msg.Receiver, CapabilityReceive); err != nil {
 			return fmt.Errorf("%w: receiver: %v", ErrCapabilityDenied, err)
 		}
@@ -165,8 +235,14 @@ func (p *DefaultPolicy) AuthorizeSend(ctx context.Context, msg *AgentMessage) er
 	return nil
 }
 
-// AuthorizeReceive verifies receiver capabilities.
+// AuthorizeReceive verifies fencing and ipc.receive capability for a receiving agent.
 func (p *DefaultPolicy) AuthorizeReceive(ctx context.Context, receiver AgentAddress) error {
+	if p.fencer != nil && receiver.IsInstance() {
+		if err := p.fencer.ValidateInstance(ctx, receiver); err != nil {
+			return err
+		}
+	}
+
 	if p.capabilities != nil {
 		if err := p.capabilities.CheckCapability(ctx, receiver.TenantID, receiver, CapabilityReceive); err != nil {
 			return fmt.Errorf("%w: receiver: %v", ErrCapabilityDenied, err)
