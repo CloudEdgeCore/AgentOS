@@ -28,7 +28,7 @@ func NewService(cfg ServiceConfig) *Service {
 		cfg.Mailbox = NewDurableMemoryMailbox()
 	}
 	if cfg.Policy == nil {
-		cfg.Policy = NewDefaultPolicy()
+		cfg.Policy = NewDefaultPolicy(nil)
 	}
 
 	return &Service{
