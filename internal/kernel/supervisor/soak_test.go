@@ -180,7 +180,7 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 					}
 					for _, inst := range instances {
 						if inst.Phase == supervisor.InstanceRunning || inst.Phase == supervisor.InstanceDraining {
-							_ = store.RecordHeartbeat(heartbeatCtx, tenantID, svc.ID, inst.ID)
+							_ = sup.RecordHeartbeat(heartbeatCtx, tenantID, svc.ID, inst.ID)
 						}
 					}
 				}
