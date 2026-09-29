@@ -2,6 +2,7 @@ package supervisor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -18,11 +19,21 @@ import (
 	"github.com/google/uuid"
 )
 
+type mockEffectProvider struct {
+	name string
+	exec func(ctx context.Context, req *effect.EffectRequest) ([]byte, error)
+}
+
+func (m *mockEffectProvider) Name() string { return m.name }
+func (m *mockEffectProvider) Execute(ctx context.Context, req *effect.EffectRequest) ([]byte, error) {
+	return m.exec(ctx, req)
+}
+
 // TestProcessSystemSoakValidation exercises the integrated Agent Process System:
 // - Multi-service fleet lifecycle (scaling, rolling upgrades, draining, crash recovery)
 // - IPC message routing and delivery via ServiceRouter to instance mailboxes
 // - External side-effect idempotency, monotonic fencing, and non-replayable UNKNOWN semantics
-// - Fault injection (instance crash, supervisor restart, scale jitter)
+// - Fault injection (instance crash, scale jitter, rolling rollout)
 // - 72h / 7d production invariants (Lost Tasks=0, Lost IPC=0, Duplicate Delivery=0, Deadlock=0, Panic=0)
 func TestProcessSystemSoakValidation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -52,12 +63,7 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 		store,
 		supervisor.WithSpawner(spawner),
 		supervisor.WithMailbox(mailbox),
-		supervisor.WithReconcileInterval(50*time.Millisecond),
 	)
-	if err := sup.Start(ctx); err != nil {
-		t.Fatalf("failed to start supervisor: %v", err)
-	}
-	defer sup.Stop()
 
 	router := supervisor.NewRouter(sup, store)
 
@@ -65,19 +71,17 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 	effectStore := effect.NewMemoryStore()
 	effectFencer := effect.NewMemoryFencer()
 	var externalCallCount int64
-	mockProvider := effect.ProviderFunc(func(ctx context.Context, req effect.EffectRequest) (effect.EffectReceipt, error) {
-		atomic.AddInt64(&externalCallCount, 1)
-		return effect.EffectReceipt{
-			EffectID:       req.EffectID,
-			AttemptID:      req.AttemptID,
-			FencingToken:   req.FencingToken,
-			Status:         effect.StatusCommitted,
-			ProviderRef:    fmt.Sprintf("ext-ref-%s", req.IdempotencyKey),
-			ExecutionCount: 1,
-			CompletedAt:    time.Now().UTC(),
-		}, nil
-	})
-	effectSvc := effect.NewEffectService(effectStore, effectFencer, mockProvider)
+	mockP := &mockEffectProvider{
+		name: "stripe",
+		exec: func(ctx context.Context, req *effect.EffectRequest) ([]byte, error) {
+			atomic.AddInt64(&externalCallCount, 1)
+			return []byte(fmt.Sprintf("ext-ref-%s", req.IdempotencyKey)), nil
+		},
+	}
+	effectSvc := effect.NewService(effectStore, effectFencer, nil)
+	if err := effectSvc.RegisterProvider(mockP); err != nil {
+		t.Fatalf("failed to register provider: %v", err)
+	}
 
 	// Invariant trackers
 	var (
@@ -151,31 +155,32 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 	}
 
 	for _, svc := range services {
-		if err := store.CreateService(ctx, svc); err != nil {
+		if _, err := sup.CreateService(ctx, svc); err != nil {
 			t.Fatalf("failed to create service %s: %v", svc.Name, err)
-		}
-		if err := sup.ReconcileService(ctx, svc); err != nil {
-			t.Fatalf("initial reconcile failed for %s: %v", svc.Name, err)
 		}
 	}
 
 	// Helper to send heartbeats for all running instances
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	heartbeatTicker := time.NewTicker(40 * time.Millisecond)
-	defer heartbeatTicker.Stop()
+	var heartbeatWg sync.WaitGroup
+	heartbeatWg.Add(1)
 	go func() {
+		defer heartbeatWg.Done()
+		defer heartbeatTicker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-heartbeatCtx.Done():
 				return
 			case <-heartbeatTicker.C:
 				for _, svc := range services {
-					instances, err := store.ListInstances(ctx, tenantID, svc.ID)
+					instances, err := store.ListInstances(heartbeatCtx, tenantID, svc.ID)
 					if err != nil {
 						continue
 					}
 					for _, inst := range instances {
 						if inst.Phase == supervisor.InstanceRunning || inst.Phase == supervisor.InstanceDraining {
-							_ = store.RecordHeartbeat(ctx, tenantID, svc.ID, inst.ID)
+							_ = store.RecordHeartbeat(heartbeatCtx, tenantID, svc.ID, inst.ID)
 						}
 					}
 				}
@@ -244,18 +249,19 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID*2000)))
 
 			for time.Now().Before(soakDeadline) {
-				attemptID := uuid.New()
+				attemptID := uuid.New().String()
 				fencingToken := int64(100 + workerID)
 
 				// Register current fencing token with monotonic fencer
-				effectFencer.UpdateAttempt(tenantID, attemptID, fencingToken)
+				effectFencer.SetActiveToken(tenantID, "payment-agent", "run-soak", fencingToken)
 
 				// Test normal idempotent execution
 				idemKey := fmt.Sprintf("idem-key-%d-%d", workerID, rng.Intn(50))
-				req := effect.EffectRequest{
-					EffectID:       uuid.New(),
+				req := &effect.EffectRequest{
+					ID:             uuid.New().String(),
 					TenantID:       tenantID,
 					AgentID:        "payment-agent",
+					RunID:          "run-soak",
 					AttemptID:      attemptID,
 					FencingToken:   fencingToken,
 					Provider:       "stripe",
@@ -265,24 +271,24 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 				}
 
 				receipt, err := effectSvc.ExecuteEffect(ctx, req)
-				if err == nil && receipt.Status == effect.StatusCommitted {
+				if err == nil && receipt != nil && receipt.Status == effect.EffectStatusCommitted {
 					atomic.AddInt64(&effectsExecuted, 1)
 				}
 
 				// Concurrent replay of same idempotency key must not trigger duplicate external execution
 				replayedReceipt, replayErr := effectSvc.ExecuteEffect(ctx, req)
-				if replayErr != nil || replayedReceipt.Status != effect.StatusCommitted {
+				if replayErr != nil || replayedReceipt == nil || replayedReceipt.Status != effect.EffectStatusCommitted {
 					t.Errorf("expected successful replay of committed effect, got err=%v", replayErr)
 				}
 
 				// Test stale attempt fencing: attempt with stale fencing token MUST be rejected
-				staleReq := req
-				staleReq.EffectID = uuid.New()
-				staleReq.IdempotencyKey = fmt.Sprintf("stale-%s", uuid.New())
+				staleReq := *req
+				staleReq.ID = uuid.New().String()
+				staleReq.IdempotencyKey = fmt.Sprintf("stale-%s", uuid.New().String())
 				staleReq.FencingToken = fencingToken - 1
 
-				_, staleErr := effectSvc.ExecuteEffect(ctx, staleReq)
-				if staleErr == effect.ErrEffectFenced {
+				_, staleErr := effectSvc.ExecuteEffect(ctx, &staleReq)
+				if errors.Is(staleErr, effect.ErrEffectFenced) {
 					atomic.AddInt64(&fencedAttempts, 1)
 				}
 
@@ -315,10 +321,7 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 					if err == nil && len(instances) > 0 {
 						victim := instances[rng.Intn(len(instances))]
 						if victim.Phase == supervisor.InstanceRunning {
-							victim.Phase = supervisor.InstanceFailed
-							victim.FailedAt = timePtr(time.Now().UTC())
-							victim.RestartCount++
-							_ = store.UpdateInstance(ctx, victim)
+							_ = sup.ReportInstanceExit(ctx, tenantID, targetSvc.ID, victim.ID, 1, "simulated crash")
 							atomic.AddInt64(&instancesCrashed, 1)
 						}
 					}
@@ -335,19 +338,12 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 					}
 				case 2:
 					// Scale Jitter: scale replicas up or down
-					svc, err := store.GetService(ctx, tenantID, targetSvc.ID)
-					if err == nil {
-						newReplicas := 2 + rng.Intn(4) // 2 to 5
-						svc.Spec.Replicas = newReplicas
-						_ = store.UpdateService(ctx, svc)
-					}
+					newReplicas := 2 + rng.Intn(4) // 2 to 5
+					_, _ = sup.ScaleService(ctx, tenantID, targetSvc.ID, newReplicas)
 				case 3:
 					// Rolling upgrade rollout
-					svc, err := store.GetService(ctx, tenantID, targetSvc.ID)
-					if err == nil {
-						newVersion := fmt.Sprintf("%s-v%d", strings.Split(svc.AgentID, "-v")[0], rng.Intn(100)+1)
-						_ = sup.RolloutUpgrade(ctx, tenantID, svc.ID, newVersion, supervisor.DefaultRolloutConfig())
-					}
+					newVersion := fmt.Sprintf("%s-v%d", strings.Split(targetSvc.AgentID, "-v")[0], rng.Intn(100)+1)
+					_, _ = sup.RolloutUpgrade(ctx, tenantID, targetSvc.ID, newVersion)
 				}
 			}
 		}
@@ -356,8 +352,16 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 	// Wait for all workers and chaos injector to finish
 	wg.Wait()
 
-	// Quiesce: stop supervisor and let running instances drain
-	sup.Stop()
+	// Stop heartbeats
+	cancelHeartbeat()
+	heartbeatWg.Wait()
+
+	// Quiesce: stop services
+	for _, svc := range services {
+		_ = sup.StopService(ctx, tenantID, svc.ID)
+	}
+
+	time.Sleep(50 * time.Millisecond)
 
 	// Assertions & Production Invariants Validation
 	t.Logf("=== Soak Validation Execution Summary ===")
@@ -393,8 +397,4 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 
 	t.Logf("Allocated bytes: initial=%d, final=%d", initialMem.Alloc, finalMem.Alloc)
 	t.Logf("=== Soak Validation PASSED (All Invariants Preserved) ===")
-}
-
-func timePtr(t time.Time) *time.Time {
-	return &t
 }
