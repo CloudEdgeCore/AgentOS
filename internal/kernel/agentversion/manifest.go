@@ -59,13 +59,20 @@ type RuntimeTarget struct {
 // Capabilities contains symbolic permission identifiers. Empty arrays are an
 // explicit default-deny declaration and are different from an omitted block.
 type Capabilities struct {
-	Tools               []string `json:"tools"`
-	Models              []string `json:"models"`
-	Memory              []string `json:"memory"`
-	MemorySensitivities []string `json:"memorySensitivities,omitempty"`
-	Secrets             []string `json:"secrets"`
-	SpawnTasks          bool     `json:"spawnTasks,omitempty"`
-	ChildAgents         []string `json:"childAgents,omitempty"`
+	Tools               []string   `json:"tools"`
+	Models              []string   `json:"models"`
+	Memory              []string   `json:"memory"`
+	MemorySensitivities []string   `json:"memorySensitivities,omitempty"`
+	Secrets             []string   `json:"secrets"`
+	SpawnTasks          bool       `json:"spawnTasks,omitempty"`
+	ChildAgents         []string   `json:"childAgents,omitempty"`
+	Peers               []PeerRule `json:"peers,omitempty"`
+}
+
+// PeerRule declares an allowed communication target for IPC peer authorization.
+type PeerRule struct {
+	Namespace string `json:"namespace,omitempty"`
+	Agent     string `json:"agent"`
 }
 
 type ResourceLimits struct {
@@ -256,6 +263,13 @@ func validatePlatformSpecForInterface(spec Spec, runtimeInterface string) error 
 		}
 		if spec.Capabilities.SpawnTasks && len(spec.Capabilities.ChildAgents) == 0 {
 			return fmt.Errorf("capabilities.childAgents requires at least one entry when spawnTasks is enabled")
+		}
+		if spec.Capabilities.Peers != nil {
+			for _, peer := range spec.Capabilities.Peers {
+				if strings.TrimSpace(peer.Agent) == "" {
+					return fmt.Errorf("capabilities.peers contains entry with empty agent")
+				}
+			}
 		}
 	}
 	if spec.Resources != nil {

@@ -35,4 +35,13 @@ var (
 
 	// ErrInvalidReply is returned when a reply is sent without a matching request or correlation ID.
 	ErrInvalidReply = errors.New("ipc: invalid reply or missing correlation id")
+
+	// ErrPeerDenied is returned when sender is not authorized to communicate with receiver by peer policy.
+	ErrPeerDenied = errors.New("ipc: peer communication denied by policy")
+
+	// ErrReceiverDenied is returned when receiver policy rejects the sender.
+	ErrReceiverDenied = errors.New("ipc: receiver policy denied communication from sender")
+
+	// ErrUnauthorizedSignal is returned when an agent is not authorized to send signals to the target.
+	ErrUnauthorizedSignal = errors.New("ipc: unauthorized signal dispatch denied")
 )

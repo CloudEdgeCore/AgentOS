@@ -25,7 +25,9 @@ type AuditRecord struct {
 	MessageType MessageType `json:"message_type"`
 	Action      string      `json:"action"` // "send", "receive", "ack", "request", "reply", "signal"
 	Result      string      `json:"result"` // "success", "denied", "expired", "failed"
+	ReasonCode  string      `json:"reason_code,omitempty"`
 	Reason      string      `json:"reason,omitempty"`
+	TraceID     string      `json:"trace_id,omitempty"`
 }
 
 // Auditor defines the sink for IPC audit logging.
@@ -335,7 +337,20 @@ func (s *Service) Send(ctx context.Context, msg *AgentMessage) error {
 	}
 
 	// Policy authorization
-	if err := s.policy.AuthorizeSend(ctx, msg); err != nil {
+	if decisionPolicy, ok := s.policy.(interface {
+		AuthorizeSendWithDecision(ctx context.Context, msg *AgentMessage) (*AuthorizationDecision, error)
+	}); ok {
+		decision, err := decisionPolicy.AuthorizeSendWithDecision(ctx, msg)
+		if err != nil {
+			reasonCode := "DENIED"
+			if decision != nil && decision.ReasonCode != "" {
+				reasonCode = decision.ReasonCode
+			}
+			s.metrics.RecordDenied(ctx, msg.TenantID, reasonCode)
+			s.logAuditWithDecision(ctx, msg, "send", "denied", decision)
+			return err
+		}
+	} else if err := s.policy.AuthorizeSend(ctx, msg); err != nil {
 		s.metrics.RecordDenied(ctx, msg.TenantID, err.Error())
 		s.logAudit(ctx, msg, "send", "denied", err.Error())
 		return err
@@ -525,6 +540,38 @@ func (s *Service) logAudit(ctx context.Context, msg *AgentMessage, action, resul
 		Action:      action,
 		Result:      result,
 		Reason:      reason,
+		TraceID:     msg.TraceID,
+		// Explicit: NO PAYLOAD IS LOGGED.
+	})
+}
+
+func (s *Service) logAuditWithDecision(ctx context.Context, msg *AgentMessage, action, result string, dec *AuthorizationDecision) {
+	if s.auditor == nil || msg == nil {
+		return
+	}
+	reasonCode := ""
+	reason := ""
+	traceID := msg.TraceID
+	if dec != nil {
+		reasonCode = dec.ReasonCode
+		reason = dec.Reason
+		if traceID == "" {
+			traceID = dec.TraceID
+		}
+	}
+	s.auditor.LogAudit(ctx, AuditRecord{
+		Timestamp:   time.Now().UTC(),
+		MessageID:   msg.ID,
+		TenantID:    msg.TenantID,
+		Namespace:   msg.Namespace,
+		Sender:      msg.Sender.String(),
+		Receiver:    msg.Receiver.String(),
+		MessageType: msg.Type,
+		Action:      action,
+		Result:      result,
+		ReasonCode:  reasonCode,
+		Reason:      reason,
+		TraceID:     traceID,
 		// Explicit: NO PAYLOAD IS LOGGED.
 	})
 }

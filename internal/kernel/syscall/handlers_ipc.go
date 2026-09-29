@@ -3,6 +3,7 @@ package syscall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -88,6 +89,12 @@ func (h *IPCSyscallHandler) handleSend(ctx *SyscallContext) (json.RawMessage, in
 	}
 
 	if err := h.service.Send(ctx, msg); err != nil {
+		if errors.Is(err, ipc.ErrPeerDenied) || errors.Is(err, ipc.ErrReceiverDenied) || errors.Is(err, ipc.ErrUnauthorizedSignal) || errors.Is(err, ipc.ErrCrossTenantDenied) || errors.Is(err, ipc.ErrCrossNamespaceDenied) || errors.Is(err, ipc.ErrCapabilityDenied) {
+			return nil, 0, WrapError(SyscallEPERM, "ipc send authorization failed", err)
+		}
+		if errors.Is(err, ipc.ErrFenced) {
+			return nil, 0, WrapError(SyscallEFENCE, "ipc send fenced", err)
+		}
 		return nil, 0, err
 	}
 
