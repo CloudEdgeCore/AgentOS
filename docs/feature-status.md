@@ -1,0 +1,81 @@
+# AgentOS Feature Status & Capability Matrix
+
+This matrix provides the verified implementation status for all subsystems, protocols, and APIs in AgentOS as of **v1.2 (Process System Upgrade)**.
+
+---
+
+## 1. Process System & Workload Management
+
+| Feature / Capability | Status | Since | Protocol / Contract | Description |
+| :--- | :---: | :---: | :--- | :--- |
+| **Task State Machine** | **GA** | v1.0 | `agentos.dev/v1` | `Task → Run → Attempt` lifecycle with non-preemptible execution semantics. |
+| **Cooperative Cancellation** | **GA** | v1.0 | `proto/agentos/runtime/v1` | Heartbeat-driven cancellation signaling with verified TLA+ liveness convergence. |
+| **Lease & Fencing Token** | **GA** | v1.0 | Kernel Store | Monotonically increasing fencing tokens preventing split-brain zombie writes. |
+| **AgentService Daemon** | **GA** | v1.2 | `proto/agentos/service/v1` | Long-running supervised agent services with configurable replica topology. |
+| **Process Supervisor** | **GA** | v1.2 | `proto/agentos/service/v1` | Process lifecycle supervisor with auto-restart, backoff, and health tracking. |
+| **Heartbeat Auto-Reap** | **GA** | v1.2 | `proto/agentos/service/v1` | Detects unresponsive instances exceeding TTL and automatically fences & provisions replacements. |
+| **Rolling Upgrade & Drain** | **GA** | v1.2 | `proto/agentos/service/v1` | Zero-downtime rolling upgrades enforcing `max_surge`, `max_unavailable`, and graceful draining. |
+| **Automatic Rollback** | **GA** | v1.2 | `proto/agentos/service/v1` | Reverts fleet to last stable version if new instances fail health checks within `min_ready_seconds`. |
+
+---
+
+## 2. Kernel Syscall ABI 1.0.0
+
+| Subsystem | Syscall Range | Status | Syscalls | Description |
+| :--- | :---: | :---: | :--- | :--- |
+| **Tool Subsystem** | 100–199 | **GA** | `101`, `102` | Capability checking, tool execution, and cryptographic audit receipts. |
+| **Model Subsystem** | 200–299 | **GA** | `201`–`204` | LLM invocation, streaming sessions, budget reservation, and incremental settlement. |
+| **Memory Subsystem** | 300–399 | **GA** | `301`, `302` | Persistent key-value storage and pgvector semantic memory search. |
+| **IPC Subsystem** | 400–499 | **GA** | `401`–`403` | Mailbox send, poll/drain, and acknowledgement across agent boundaries. |
+| **Runtime Subsystem** | 500–599 | **GA** | `501`–`503` | Durable state checkpointing, attempt completion, and cooperative timeslice yield. |
+| **Service Subsystem** | 600–699 | **GA** | `601`, `602` | Supervisor heartbeat submission and service instance discovery. |
+| **Resource Subsystem** | 700–799 | **GA** | `701`–`703` | Namespace metadata inspection, quota verification, and real-time usage querying. |
+| **Effect Subsystem** | 800–899 | **GA** | `801`, `802` | Fenced external mutation execution and idempotent receipt retrieval. |
+
+---
+
+## 3. Communication & Durable Messaging
+
+| Feature | Status | Protocol | Guarantee |
+| :--- | :---: | :--- | :--- |
+| **Durable Mailbox** | **GA** | `proto/agentos/ipc/v1` | Messages persist across instance and attempt crashes. |
+| **At-Least-Once Delivery** | **GA** | `proto/agentos/ipc/v1` | Network/crash resilience with unconsumed message replay. |
+| **Deduplication Engine** | **GA** | `proto/agentos/ipc/v1` | Receiver mailbox receipts guarantee exactly-once application. |
+| **Correlation & Reply-To** | **GA** | `proto/agentos/ipc/v1` | End-to-end distributed tracing and asynchronous RPC-style conversations. |
+| **Tenant Boundary Routing** | **GA** | Kernel Router | Cross-tenant isolation with strict default-deny delivery rules. |
+
+---
+
+## 4. External Side-Effect Management
+
+| Feature | Status | Protocol | Guarantee |
+| :--- | :---: | :--- | :--- |
+| **Monotonic Fencing** | **GA** | `proto/agentos/effect/v1` | Stale attempts cannot mutate external state (`SYSCALL_EFENCE`). |
+| **Idempotency Deduplication** | **GA** | `proto/agentos/effect/v1` | Existing keys return cached `EffectReceipt` without duplicate external dispatch. |
+| **Payload Integrity** | **GA** | `proto/agentos/effect/v1` | SHA-256 payload verification against duplicate keys (`SYSCALL_EINVAL`). |
+| **UNKNOWN Isolation** | **GA** | `proto/agentos/effect/v1` | Ambiguous timeouts transition to `UNKNOWN` (`SYSCALL_EUNKNOWN`); auto-replay strictly forbidden. |
+
+---
+
+## 5. Runtimes, Isolation & Framework Ecosystem
+
+| Runtime / Framework | Status | Supported Isolations | Conformance Certified |
+| :--- | :---: | :--- | :---: |
+| **Wasmtime** | **GA** | WebAssembly sandboxing, memory caps, fuel metering | Yes |
+| **OCI / Container** | **GA** | runsc (gVisor), Linux cgroups v2, network namespaces | Yes |
+| **LangGraph** | **GA** | Co-located adapter, Runtime Interface v1, Syscall ABI | Yes |
+| **AutoGen** | **GA** | Co-located adapter, Runtime Interface v1, Syscall ABI | Yes |
+| **CrewAI** | **GA** | Co-located adapter, Runtime Interface v1, Syscall ABI | Yes |
+| **OpenAI Agents SDK**| **GA** | Co-located adapter, Runtime Interface v1, Syscall ABI | Yes |
+| **Custom / In-House**| **GA** | Pure Python/Go/Rust adapter via standard Runtime Protocol | Yes |
+
+---
+
+## 6. Reliability & Soak Testing
+
+| Quality Gate | Frequency / Duration | Invariant Enforced | Status |
+| :--- | :--- | :--- | :---: |
+| **72-Hour Soak Engine** | Continuous Soak Run | Zero lost tasks, zero lost IPC messages, monotonic fencing | **PASS** |
+| **7-Day Extended Soak** | Pre-Release Gate | Memory/goroutine leak-free, connection pool stability | **PASS** |
+| **Chaos Fault Injector**| Integrated in soak suite | Worker kills, lease expirations, database reconnects | **PASS** |
+| **TLA+ Liveness Proofs**| Model-checked | Guaranteed convergence to terminal phase without deadlocks | **PASS** |

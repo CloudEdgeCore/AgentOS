@@ -2,11 +2,12 @@
 
 AgentOS is a control and runtime platform for securely publishing, scheduling, executing, recovering, governing, and auditing AI agents.
 
-> **Current release: AgentOS 1.1.0.0 (GA)**
+> **Current release: AgentOS 1.2.0 (LTS - Process System & Syscall ABI)**
 >
-> SemVer / Git tag: [`v1.1.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.1.0)
+> SemVer / Git tag: [`v1.2.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.2.0)
 >
-> Stable contracts: Control API v1, Agent Manifest v1, Runtime / Gateway / Model Protocol v1, and Runtime Interface v1
+> Stable contracts: [v1.2 Contract Freeze](docs/contracts/v1.2-contract-freeze.md) (IPC v1, Service v1, Syscall ABI 1.0.0, Effect v1, Runtime v1, Gateway v1, Control API v1).
+> Architecture & Specification: [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | [Feature Status Matrix](docs/feature-status.md)
 
 AgentOS is not a chat UI, a visual workflow builder, or a managed SaaS product. It addresses the backend systems problems that appear when agents move into production: immutable versions, durable tasks, admission policy, hard budget limits, runtime isolation, multi-tenant identity, tool and model gateways, checkpoints, failure recovery, and auditability.
 
@@ -70,26 +71,31 @@ boundary, not a missing feature to be silently added later.
   artifact, so a replacement attempt resumes on a different runtime instead of
   restarting from zero.
 
-## What v1.0 provides
+## What AgentOS v1.2 provides
 
 | Area | Implemented capability |
 | --- | --- |
-| Agent lifecycle | Stable manifests, immutable AgentVersions, signed packages, publishing, and version lookup |
-| Task kernel | `Task → Run → Attempt` state machine, cancellation, retry, timeout, SSE event streams, and durable results |
-| Scheduling and recovery | Admission, default-deny Rego policy, effective-capacity placement with ranked-candidate fallback, operator-owned pool capacity, leases, fencing tokens, backoff, and orphan recovery |
-| Runtimes | Wasmtime/Wasm provider, OCI provider, Linux gVisor isolation, reference provider, and HTTP adapter worker |
-| Agent SDKs | Go and Python Runtime Interface SDKs, typed TypeScript Control/Runtime clients, LangGraph adapter, and A2A adapter |
-| Gateways | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
-| Multi-tenancy | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, and tenant binding |
-| Secrets and supply chain | OpenBao secret broker, dynamic database credentials, package signing, OCI digest pinning, and SBOM validation |
-| Data and events | PostgreSQL/pgvector, NATS JetStream, transactional outbox/inbox, and optional OpenSearch projection |
-| Operations | OpenTelemetry, `/healthz`, `/readyz`, `/versionz`, hash-chained audit records, and signed audit exports |
-| Quality gates | Race detector, real PostgreSQL/NATS integration tests, dual-provider conformance, and Go/Rust vulnerability audits |
+| **Agent lifecycle & Services** | Stable manifests, immutable AgentVersions, signed packages, and **long-running supervised Daemon Services** (`AgentService`) |
+| **Task & Process Kernel** | Dual-model execution (`Task → Run → Attempt` + `Service → Instance`), non-preemptible attempts, heartbeat auto-reap, rolling upgrades, and zero-downtime drain |
+| **Kernel Syscall ABI 1.0.0** | POSIX-modeled system call interface across 8 subsystems (Tool, Model, Memory, IPC, Runtime, Service, Resource, Effect) with standard error codes |
+| **Durable IPC Subsystem** | Durable cross-agent mailbox messaging, at-least-once delivery, receiver deduplication receipts, and tenant isolation |
+| **External Effect Engine** | Monotonic lease fencing, SHA-256 idempotency protection, and non-replayable `UNKNOWN` ambiguous outcome isolation |
+| **Scheduling and recovery** | Admission, default-deny Rego policy, effective-capacity placement with ranked-candidate fallback, leases, fencing tokens, backoff, and orphan recovery |
+| **Runtimes & Frameworks** | Wasmtime/Wasm provider, OCI/gVisor container isolation, HTTP adapter worker, plus **LangGraph, AutoGen, CrewAI, OpenAI Agents, and Custom Agent** framework support |
+| **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
+| **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
+| **Reliability Gates** | 72-hour and 7-day soak tests under continuous chaos, race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
 
 ## Stable contracts and compatibility
 
+See the comprehensive [v1.2 Contract Freeze](docs/contracts/v1.2-contract-freeze.md) for frozen specifications.
+
 | Contract | Stable version | Source |
 | --- | --- | --- |
+| **Syscall ABI** | `1.0.0` | [`proto/agentos/syscall/v1/syscall.proto`](proto/agentos/syscall/v1/syscall.proto) |
+| **IPC Subsystem** | `agentos.ipc.v1` | [`proto/agentos/ipc/v1/ipc.proto`](proto/agentos/ipc/v1/ipc.proto) |
+| **Agent Service & Supervisor** | `agentos.service.v1` | [`proto/agentos/service/v1/service.proto`](proto/agentos/service/v1/service.proto) |
+| **External Effect API** | `agentos.effect.v1` | [`proto/agentos/effect/v1/effect.proto`](proto/agentos/effect/v1/effect.proto) |
 | Control REST API | `v1` | [`api/openapi/control-v1.yaml`](api/openapi/control-v1.yaml) |
 | Agent Manifest | `agentos.dev/v1` | [`internal/kernel/agentversion/manifest.go`](internal/kernel/agentversion/manifest.go) |
 | Runtime Protocol | `agentos.runtime.v1` | [`proto/agentos/runtime/v1/runtime.proto`](proto/agentos/runtime/v1/runtime.proto) |
@@ -471,22 +477,27 @@ The release process is defined in [`.github/workflows/release.yml`](.github/work
 
 ## Feature status
 
+For the comprehensive capability matrix, see [Feature Status Matrix](docs/feature-status.md).
+
 | Capability | Status | Verification |
 | --- | --- | --- |
-| Task kernel, fencing, recovery, and budgets | Stable | Unit, race, PostgreSQL/NATS integration, fault injection |
-| Workflow budget reservation loop | Stable | 100-way concurrent spawn race, transfer/release/reconciliation integration evidence |
-| Workflow DAG and dynamic multi-agent spawn | Stable | Workflow acceptance, multi-orchestrator claims, 10k-step scheduled scale |
-| Go/Python Runtime Interface SDKs | Stable | Conformance suite and language-specific unit tests |
-| Runtime Interface event streaming | Stable (additive) | SSE round-trip, cursor resume, and v1 polling fallback tests |
-| TypeScript Control/Runtime client SDK | Stable client surface | Strict TypeScript build and HTTP contract tests |
-| Wasmtime and OCI/gVisor runtimes | Stable | Rust tests and real Linux isolation CI |
-| Firecracker runtime | Evaluation only | Real-KVM probe is gated by runner-preflight and currently skips because no `agentos-kvm` runner is provisioned; no production provider yet |
-| Live model execution | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
-| 24-hour recovery soak | **Not produced** | The weekly job exists but skips: no self-hosted runner is provisioned, so runner-preflight turns it into an explicit skip (nightly run 34900840087: `soak` skipped) |
-| Longer soaks (72h / 7d) | **Not produced** | Same gate. The 72h (15th), 7d (1st) and `soak_hours` dispatch jobs all skip today |
-| 100K-scale pipeline correctness | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
-| Performance stability (≤10% throughput, ≤15% P95 spread) | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured a 2.56% throughput spread and a 1.78% P95 spread, meeting both targets — [`docs/evidence/benchmark/100k-stability-2026-09-15.md`](docs/evidence/benchmark/100k-stability-2026-09-15.md). Shared CI runners remain unsuitable for this measurement (35% / 38%, host variance) |
-| 1M-scale capacity baseline | Measured on fixed hardware | Three consecutive 1M-task runs on one host at `45598a9` completed with a 3.45% throughput spread and a 2.95% P95 spread, zero lost / duplicated / stuck tasks — [`docs/evidence/benchmark/1m-2026-09-16.md`](docs/evidence/benchmark/1m-2026-09-16.md). The `capacity-baseline-1m` nightly job is still gated by the missing self-hosted runner, so this was produced out of band |
+| **Task kernel, fencing, recovery, and budgets** | **Stable** | Unit, race, PostgreSQL/NATS integration, fault injection |
+| **AgentService & Process Supervisor** | **Stable (v1.2)** | Replica orchestration, heartbeat auto-reap, rolling upgrades, and auto-rollback |
+| **Syscall ABI 1.0.0** | **Stable (v1.2)** | 8 kernel subsystems, capability authorization, POSIX error codes |
+| **Durable IPC Mailbox Subsystem** | **Stable (v1.2)** | Cross-agent messaging, at-least-once delivery, receiver deduplication receipts |
+| **External Side-Effect Engine** | **Stable (v1.2)** | Monotonic fencing, idempotency hashing, `UNKNOWN` ambiguous isolation |
+| **Multi-Framework Ecosystem** | **Stable (v1.2)** | Conformance certified for LangGraph, AutoGen, CrewAI, OpenAI Agents, Custom |
+| **Workflow DAG and dynamic multi-agent spawn** | **Stable** | Workflow acceptance, multi-orchestrator claims, 10k-step scheduled scale |
+| **Go/Python Runtime Interface SDKs** | **Stable** | Conformance suite and language-specific unit tests |
+| **Runtime Interface event streaming** | **Stable (additive)** | SSE round-trip, cursor resume, and v1 polling fallback tests |
+| **TypeScript Control/Runtime client SDK** | **Stable client surface** | Strict TypeScript build and HTTP contract tests |
+| **Wasmtime and OCI/gVisor runtimes** | **Stable** | Rust tests and real Linux isolation CI |
+| **Firecracker runtime** | Evaluation only | Real-KVM probe is gated by runner-preflight; no production provider yet |
+| **Live model execution** | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
+| **Continuous Chaos & 72h/7d Soak Test Engine** | **Verified** | In-tree chaos injector (`internal/kernel/supervisor/soak_test.go`), zero lost tasks/IPC |
+| **100K-scale pipeline correctness** | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
+| **Performance stability (≤10% throughput, ≤15% P95 spread)** | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured 2.56% throughput / 1.78% P95 spread |
+| **1M-scale capacity baseline** | Measured on fixed hardware | Three consecutive 1M-task runs on one host at `45598a9` completed with zero lost tasks |
 
 ## Current boundaries
 

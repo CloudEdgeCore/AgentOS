@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package agentos.syscall.v1;
+
+option go_package = "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/syscall/v1;syscallv1";
+
+// AgentOS Kernel System Call ABI Service.
+// v1.0.0 ABI numbers, calling conventions, and POSIX error semantics are FROZEN (v1.2 Contract Freeze).
+service SyscallService {
+  rpc Invoke(SyscallRequest) returns (SyscallResponse);
+  rpc Handshake(SyscallHandshakeRequest) returns (SyscallHandshakeResponse);
+}
+
+enum SyscallNumber {
+  SYS_NONE = 0;
+
+  // Tool Subsystem (100 - 199)
+  SYS_TOOL_INVOKE = 101;
+  SYS_TOOL_LIST   = 102;
+
+  // Model Subsystem (200 - 299)
+  SYS_MODEL_INVOKE = 201;
+  SYS_MODEL_BEGIN  = 202;
+  SYS_MODEL_SETTLE = 203;
+  SYS_MODEL_FINISH = 204;
+
+  // Memory Subsystem (300 - 399)
+  SYS_MEMORY_PUT    = 301;
+  SYS_MEMORY_SEARCH = 302;
+
+  // IPC Subsystem (400 - 499)
+  SYS_IPC_SEND    = 401;
+  SYS_IPC_RECEIVE = 402;
+  SYS_IPC_ACK     = 403;
+
+  // Runtime Subsystem (500 - 599)
+  SYS_RUNTIME_CHECKPOINT = 501;
+  SYS_RUNTIME_COMPLETE   = 502;
+  SYS_RUNTIME_YIELD      = 503;
+
+  // Service / Supervisor Subsystem (600 - 699)
+  SYS_SERVICE_HEARTBEAT = 601;
+  SYS_SERVICE_QUERY     = 602;
+
+  // Resource / Namespace Subsystem (700 - 799)
+  SYS_NAMESPACE_GET      = 701;
+  SYS_RESOURCE_QUOTA_GET = 702;
+  SYS_RESOURCE_USAGE_GET = 703;
+
+  // Effect Subsystem (800 - 899)
+  SYS_EFFECT_EXECUTE = 801;
+  SYS_EFFECT_GET     = 802;
+}
+
+enum SyscallErrorCode {
+  SYSCALL_OK        = 0;  // Success
+  SYSCALL_EPERM     = 1;  // Operation not permitted (capability denied, tenant mismatch)
+  SYSCALL_ENOENT    = 2;  // No such entity or tool
+  SYSCALL_EINVAL    = 3;  // Invalid argument or malformed payload
+  SYSCALL_EBUSY     = 4;  // Resource or attempt is currently locked or conflicting
+  SYSCALL_ETIMEDOUT = 5;  // Connection or operation deadline exceeded
+  SYSCALL_ENOMEM    = 6;  // Quota, token limit, or financial budget exceeded
+  SYSCALL_EFENCE    = 7;  // Stale fencing token or expired attempt lease
+  SYSCALL_ENOSYS    = 8;  // Function/syscall not implemented
+  SYSCALL_EINTERNAL = 9;  // Unexpected internal kernel error
+  SYSCALL_EUNKNOWN  = 10; // Ambiguous external effect outcome (auto-replay forbidden)
+}
+
+message AttemptIdentity {
+  string tenant_id = 1;
+  string attempt_id = 2;
+  int64 fencing_token = 3;
+}
+
+message SyscallRequest {
+  SyscallNumber syscall = 1;
+  AttemptIdentity identity = 2;
+  bytes payload_json = 3;
+  string idempotency_key = 4;
+  map<string, string> metadata = 5;
+}
+
+message SyscallResponse {
+  SyscallNumber syscall = 1;
+  SyscallErrorCode error_code = 2;
+  string error_message = 3;
+  bytes result_json = 4;
+  int64 duration_us = 5;
+  int64 resource_version = 6;
+}
+
+message SyscallHandshakeRequest {
+  string client_abi_version = 1;
+  string runtime_framework = 2; // e.g. "langgraph", "autogen", "crewai", "openai-agents", "custom"
+  string runtime_version = 3;
+  repeated SyscallNumber supported_syscalls = 4;
+}
+
+message SyscallHandshakeResponse {
+  string kernel_abi_version = 1; // "1.0.0"
+  bool compatible = 2;
+  repeated SyscallNumber enabled_syscalls = 3;
+  string rejection_reason = 4;
+}

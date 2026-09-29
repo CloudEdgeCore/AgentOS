@@ -53,11 +53,28 @@ func TestRunEmitsMachineReadableCertification(t *testing.T) {
 	server := httptest.NewServer(host)
 	defer server.Close()
 	var output bytes.Buffer
-	if err := run([]string{"-endpoint", server.URL}, &output, io.Discard); err != nil {
+	if err := run([]string{"-endpoint", server.URL, "-json"}, &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	var result certification
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil || !result.Passed || result.Schema != "agentos.conformance/v1" || result.Report.Adapter != "certified" {
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || !result.Passed || result.Schema != "agentos.conformance/v1" || result.Report.Adapter != "certified" || result.Compatible != "PASS" {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestRunEmitsHumanReadablePass(t *testing.T) {
+	host, err := agent.NewHost(&conformantRuntime{states: map[string]json.RawMessage{}}, agent.HostOptions{Adapter: "certified"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(host)
+	defer server.Close()
+	var output bytes.Buffer
+	if err := run([]string{"-endpoint", server.URL}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	outputStr := output.String()
+	if !strings.Contains(outputStr, "AgentOS Compatible = PASS") {
+		t.Fatalf("expected output to contain 'AgentOS Compatible = PASS', got:\n%s", outputStr)
 	}
 }

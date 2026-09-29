@@ -28,6 +28,10 @@ func TestRemoteAdaptersPassTheUnifiedSuite(t *testing.T) {
 		"python-remote": filepath.Join(root, "examples", "agents", "python_remote", "server.py"),
 		"langgraph":     filepath.Join(root, "examples", "agents", "langgraph", "server.py"),
 		"a2a":           filepath.Join(root, "examples", "agents", "a2a", "server.py"),
+		"autogen":       filepath.Join(root, "examples", "agents", "autogen", "server.py"),
+		"crewai":        filepath.Join(root, "examples", "agents", "crewai", "server.py"),
+		"openai-agents": filepath.Join(root, "examples", "agents", "openai_agents", "server.py"),
+		"custom-agent":  filepath.Join(root, "examples", "agents", "custom", "server.py"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			endpoint := startPythonAdapter(t, python, root, script)

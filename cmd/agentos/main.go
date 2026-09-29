@@ -85,6 +85,7 @@ func runConformance(args []string, stdout, stderr io.Writer) error {
 	endpoint := flags.String("endpoint", "http://127.0.0.1:8088", "Runtime Interface endpoint")
 	timeout := flags.Duration("timeout", 2*time.Minute, "conformance timeout (maximum 10m)")
 	legacy := flags.Bool("legacy-v1alpha1", false, "test the deprecated N-1 Runtime Interface")
+	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON certification report")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -101,16 +102,38 @@ func runConformance(args []string, stdout, stderr io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	report, err := conformance.Run(ctx, client)
-	result := map[string]any{
-		"schema": "agentos.conformance/v1", "endpoint": *endpoint,
-		"passed": err == nil, "report": report,
+	passed := err == nil
+	compatStatus := "FAIL"
+	if passed {
+		compatStatus = "PASS"
 	}
-	encoded, encodeErr := json.Marshal(result)
-	if encodeErr != nil {
-		return encodeErr
-	}
-	if _, encodeErr = fmt.Fprintln(stdout, string(encoded)); encodeErr != nil {
-		return encodeErr
+	if *jsonOutput {
+		result := map[string]any{
+			"schema":     "agentos.conformance/v1",
+			"endpoint":   *endpoint,
+			"passed":     passed,
+			"compatible": compatStatus,
+			"report":     report,
+		}
+		encoded, encodeErr := json.Marshal(result)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if _, encodeErr = fmt.Fprintln(stdout, string(encoded)); encodeErr != nil {
+			return encodeErr
+		}
+	} else {
+		fmt.Fprintf(stdout, "\n=== AgentOS Runtime Interface Conformance Suite ===\n")
+		fmt.Fprintf(stdout, "Adapter:  %s\n", report.Adapter)
+		fmt.Fprintf(stdout, "Protocol: %s\n", report.Protocol)
+		fmt.Fprintf(stdout, "Endpoint: %s\n\n", *endpoint)
+		fmt.Fprintf(stdout, "Checks executed:\n")
+		for _, check := range report.Checks {
+			fmt.Fprintf(stdout, "  [PASS] %s\n", check)
+		}
+		fmt.Fprintf(stdout, "--------------------------------------------------\n")
+		fmt.Fprintf(stdout, "AgentOS Compatible = %s\n", compatStatus)
+		fmt.Fprintf(stdout, "--------------------------------------------------\n\n")
 	}
 	if err != nil {
 		return fmt.Errorf("conformance failed: %w", err)
