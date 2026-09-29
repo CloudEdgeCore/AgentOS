@@ -5,8 +5,8 @@ package version
 
 const (
 	Product             = "AgentOS"
-	ProductVersion      = "1.1.0.0"
-	SemVer              = "1.1.0"
+	ProductVersion      = "1.2.0.0"
+	SemVer              = "1.2.0"
 	ReleaseStage        = "GA"
 	Manifest            = "agentos.dev/v1"
 	RuntimeProtocol     = "agentos.runtime.v1"
@@ -14,6 +14,10 @@ const (
 	GatewayProtocol     = "agentos.gateway.v1"
 	ModelProtocol       = "agentos.model.v1"
 	ControlAPI          = "v1"
+	SyscallABI          = "1.0.0"
+	IPCProtocol         = "agentos.ipc.v1"
+	ServiceProtocol     = "agentos.service.v1"
+	EffectProtocol      = "agentos.effect.v1"
 	LegacyRemovalBefore = "2027-02-17"
 )
 
@@ -35,6 +39,10 @@ type Info struct {
 	GatewayProtocol     string `json:"gatewayProtocol"`
 	ModelProtocol       string `json:"modelProtocol"`
 	ControlAPI          string `json:"controlApi"`
+	SyscallABI          string `json:"syscallAbi"`
+	IPCProtocol         string `json:"ipcProtocol"`
+	ServiceProtocol     string `json:"serviceProtocol"`
+	EffectProtocol      string `json:"effectProtocol"`
 	LegacyRemovalBefore string `json:"legacyRemovalBefore"`
 }
 
@@ -45,6 +53,8 @@ func Current() Info {
 		Manifest: Manifest, RuntimeProtocol: RuntimeProtocol,
 		RuntimeInterface: RuntimeInterface, GatewayProtocol: GatewayProtocol,
 		ModelProtocol: ModelProtocol, ControlAPI: ControlAPI,
+		SyscallABI: SyscallABI, IPCProtocol: IPCProtocol,
+		ServiceProtocol: ServiceProtocol, EffectProtocol: EffectProtocol,
 		LegacyRemovalBefore: LegacyRemovalBefore,
 	}
 }

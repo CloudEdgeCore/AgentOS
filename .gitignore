@@ -28,6 +28,10 @@ __pycache__/
 !/docs/architecture/**
 !/docs/contracts/
 !/docs/contracts/**
+!/docs/ecosystem/
+!/docs/ecosystem/**
+!/docs/releases/
+!/docs/releases/**
 !/docs/feature-status.md
 
 # Local-only model endpoints and tenant policy overrides (private infra)

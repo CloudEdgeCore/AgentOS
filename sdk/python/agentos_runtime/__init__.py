@@ -8,4 +8,4 @@ __all__ = [
     "AgentRuntime", "RuntimeHost", "serve", "PROTOCOL_VERSION", "LEGACY_PROTOCOL_VERSION",
     "MCPClient", "MCPError", "MCPToolError", "RealAgent",
 ]
-__version__ = "1.1.0"
+__version__ = "1.2.0"

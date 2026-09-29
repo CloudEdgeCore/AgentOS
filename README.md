@@ -136,25 +136,59 @@ Build every Go command:
 go build ./cmd/...
 ```
 
-The official [`v1.1.0` release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.1.0) contains complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64, plus a Python wheel.
+The official [`v1.2.0` release](docs/releases/v1.2.0.md) (Git tag [`v1.2.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.2.0)) provides stable binary packages, Protobuf stubs, Python wheels, and npm SDK packages.
 
-### Create and certify a Python agent runtime
+### Conformance certification suite
 
-The following workflow starts a local Runtime Interface and certifies its public behavior without starting the control plane:
-
-```shell
-python -m pip install -e ./sdk/python
-go run ./cmd/agentos init -dir ./tmp/hello-agent -name hello-agent -adapter python
-python ./tmp/hello-agent/server.py
-```
-
-In another terminal, run:
+Any third-party agent framework or runtime adapter (LangGraph, AutoGen, CrewAI, OpenAI Agents SDK, custom in-house runtimes) can certify compatibility with AgentOS in a single command:
 
 ```shell
-go run ./cmd/agentos-conformance -endpoint http://127.0.0.1:8088
+# Certify an already running adapter endpoint:
+go run ./cmd/agentos conformance -endpoint http://127.0.0.1:8088
+
+# Or auto-spawn, test, and terminate candidate adapter process:
+go run ./cmd/agentos-conformance -cmd "python examples/agents/langgraph/server.py --port 0"
 ```
 
-A successful run emits an `agentos.conformance/v1` JSON report with `passed` set to `true`. `agentos init` also supports `go`, `langgraph`, and `a2a` adapters.
+A compliant runtime outputs the standard certification signature:
+
+```text
+=== AgentOS Runtime Interface Conformance Suite ===
+Adapter:  langgraph
+Protocol: agentos.runtime.interface/v1
+Endpoint: http://127.0.0.1:8089
+
+Checks executed:
+  [PASS] health
+  [PASS] protocol-negotiation
+  [PASS] start
+  [PASS] idempotency
+  [PASS] conflict
+  [PASS] event
+  [PASS] event-cursor
+  [PASS] result
+  [PASS] checkpoint
+  [PASS] restore
+  [PASS] stop
+  [PASS] default-deny-capabilities
+--------------------------------------------------
+AgentOS Compatible = PASS
+--------------------------------------------------
+```
+
+See [Conformance Suite Guide](conformance/README.md) for complete options and JSON reporting.
+
+### Multi-Framework Ecosystem Integration
+
+AgentOS supports running heterogeneous frameworks side-by-side on the same kernel:
+
+- **LangGraph**: [`adapters/langgraph`](adapters/langgraph) & [`examples/agents/langgraph`](examples/agents/langgraph)
+- **AutoGen**: [`adapters/autogen`](adapters/autogen) & [`examples/agents/autogen`](examples/agents/autogen)
+- **CrewAI**: [`adapters/crewai`](adapters/crewai) & [`examples/agents/crewai`](examples/agents/crewai)
+- **OpenAI Agents SDK**: [`adapters/openai_agents`](adapters/openai_agents) & [`examples/agents/openai_agents`](examples/agents/openai_agents)
+- **Custom Enterprise Agent**: [`adapters/custom_agent`](adapters/custom_agent) & [`examples/agents/custom`](examples/agents/custom)
+
+See the comprehensive [Multi-Framework Ecosystem Guide](docs/ecosystem/README.md) for architectural patterns, durable IPC mailbox communication, and external side-effect fencing across frameworks.
 
 ### Start local control-plane infrastructure
 
