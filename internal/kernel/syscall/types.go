@@ -383,3 +383,26 @@ type ResourceUsagePayload struct {
 type ResourceUsageInfo struct {
 	Usage namespace.ResourceUsage `json:"usage"`
 }
+
+// ==========================================
+// Effect Subsystem Types (800 - 899)
+// ==========================================
+
+// EffectExecutePayload arguments for SYS_EFFECT_EXECUTE.
+type EffectExecutePayload struct {
+	AgentID        string          `json:"agent_id"`
+	RunID          string          `json:"run_id,omitempty"`
+	Provider       string          `json:"provider"`
+	Operation      string          `json:"operation"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	Deadline       *time.Time      `json:"deadline,omitempty"`
+	TraceID        string          `json:"trace_id,omitempty"`
+}
+
+// EffectGetPayload arguments for SYS_EFFECT_GET.
+type EffectGetPayload struct {
+	EffectID       string `json:"effect_id,omitempty"`
+	AgentID        string `json:"agent_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}

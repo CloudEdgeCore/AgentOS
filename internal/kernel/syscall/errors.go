@@ -43,6 +43,9 @@ const (
 
 	// SyscallEINTERNAL indicates an unexpected internal kernel error.
 	SyscallEINTERNAL SyscallErrorCode = 9
+
+	// SyscallEUNKNOWN indicates an ambiguous external side-effect outcome; auto-replay forbidden.
+	SyscallEUNKNOWN SyscallErrorCode = 10
 )
 
 // String returns a human-readable representation of the error code.
@@ -68,6 +71,8 @@ func (c SyscallErrorCode) String() string {
 		return "ENOSYS (Function not implemented)"
 	case SyscallEINTERNAL:
 		return "EINTERNAL (Internal error)"
+	case SyscallEUNKNOWN:
+		return "EUNKNOWN (Ambiguous external effect outcome)"
 	default:
 		return fmt.Sprintf("UNKNOWN_ERR(%d)", int32(c))
 	}
@@ -96,6 +101,8 @@ func (c SyscallErrorCode) StandardName() string {
 		return "ENOSYS"
 	case SyscallEINTERNAL:
 		return "EINTERNAL"
+	case SyscallEUNKNOWN:
+		return "EUNKNOWN"
 	default:
 		return "EUNKNOWN"
 	}

@@ -45,6 +45,10 @@ const (
 	SysNamespaceGet     SyscallNumber = 701
 	SysResourceQuotaGet SyscallNumber = 702
 	SysResourceUsageGet SyscallNumber = 703
+
+	// Effect Subsystem (800 - 899)
+	SysEffectExecute SyscallNumber = 801
+	SysEffectGet     SyscallNumber = 802
 )
 
 // SyscallDescriptor describes metadata and execution properties of a system call.
@@ -190,6 +194,20 @@ var syscallTable = map[SyscallNumber]SyscallDescriptor{
 		IsReadOnly:  true,
 		Description: "Retrieves active and settled resource usage for a namespace",
 	},
+	SysEffectExecute: {
+		Number:      SysEffectExecute,
+		Name:        "sys_effect_execute",
+		Category:    "effect",
+		IsReadOnly:  false,
+		Description: "Executes an external side effect with idempotent receipt and fencing enforcement",
+	},
+	SysEffectGet: {
+		Number:      SysEffectGet,
+		Name:        "sys_effect_get",
+		Category:    "effect",
+		IsReadOnly:  true,
+		Description: "Retrieves an existing effect record and receipt by ID or idempotency key",
+	},
 }
 
 // String returns the uppercase symbolic name of the syscall.
@@ -233,6 +251,10 @@ func (s SyscallNumber) String() string {
 		return "SYS_RESOURCE_QUOTA_GET"
 	case SysResourceUsageGet:
 		return "SYS_RESOURCE_USAGE_GET"
+	case SysEffectExecute:
+		return "SYS_EFFECT_EXECUTE"
+	case SysEffectGet:
+		return "SYS_EFFECT_GET"
 	default:
 		return fmt.Sprintf("SYS_UNKNOWN(%d)", uint32(s))
 	}
