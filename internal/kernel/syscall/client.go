@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/effect"
 )
 
 // SyscallInvoker executes a system call request and returns the system call response.
@@ -21,6 +23,11 @@ func NewClient(invoker SyscallInvoker) *SyscallClient {
 	return &SyscallClient{
 		invoker: invoker,
 	}
+}
+
+// ABIVersion returns the Syscall ABI semantic version supported by this client.
+func (c *SyscallClient) ABIVersion() string {
+	return SyscallABIVersion
 }
 
 // Call executes an arbitrary system call with payload and returns the raw result and resource version.
@@ -325,4 +332,34 @@ func (c *SyscallClient) GetResourceUsage(ctx context.Context, id AttemptIdentity
 		return ResourceUsageInfo{}, fmt.Errorf("decode resource usage result: %w", err)
 	}
 	return res, nil
+}
+
+// ==========================================
+// Effect Subsystem Helpers
+// ==========================================
+
+// ExecuteEffect calls SYS_EFFECT_EXECUTE.
+func (c *SyscallClient) ExecuteEffect(ctx context.Context, id AttemptIdentity, payload EffectExecutePayload) (effect.EffectReceipt, int64, error) {
+	raw, ver, err := c.Call(ctx, SysEffectExecute, id, payload)
+	if err != nil {
+		return effect.EffectReceipt{}, 0, err
+	}
+	var res effect.EffectReceipt
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return effect.EffectReceipt{}, 0, fmt.Errorf("decode effect receipt: %w", err)
+	}
+	return res, ver, nil
+}
+
+// GetEffect calls SYS_EFFECT_GET.
+func (c *SyscallClient) GetEffect(ctx context.Context, id AttemptIdentity, payload EffectGetPayload) (effect.EffectRecord, int64, error) {
+	raw, ver, err := c.Call(ctx, SysEffectGet, id, payload)
+	if err != nil {
+		return effect.EffectRecord{}, 0, err
+	}
+	var res effect.EffectRecord
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return effect.EffectRecord{}, 0, fmt.Errorf("decode effect record: %w", err)
+	}
+	return res, ver, nil
 }

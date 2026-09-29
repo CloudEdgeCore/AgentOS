@@ -534,3 +534,34 @@ func TestServiceSyscalls(t *testing.T) {
 		t.Fatalf("unexpected query result: %+v", qRes)
 	}
 }
+
+func TestSyscallABIVersion(t *testing.T) {
+	if SyscallABIVersion != "1.0.0" {
+		t.Fatalf("expected ABI version 1.0.0, got %s", SyscallABIVersion)
+	}
+	if SyscallABIMajor != 1 || SyscallABIMinor != 0 || SyscallABIPatch != 0 {
+		t.Fatalf("unexpected semver components: %d.%d.%d", SyscallABIMajor, SyscallABIMinor, SyscallABIPatch)
+	}
+
+	client := NewClient(nil)
+	if client.ABIVersion() != SyscallABIVersion {
+		t.Fatalf("client.ABIVersion() = %s, expected %s", client.ABIVersion(), SyscallABIVersion)
+	}
+
+	descriptors := AllDescriptors()
+	if len(descriptors) == 0 {
+		t.Fatal("expected at least one descriptor")
+	}
+
+	for _, d := range descriptors {
+		if d.SinceVersion == "" {
+			t.Errorf("descriptor %s missing SinceVersion", d.Name)
+		}
+		if d.Name == "" {
+			t.Errorf("descriptor %d missing Name", d.Number)
+		}
+		if d.Category == "" {
+			t.Errorf("descriptor %s missing Category", d.Name)
+		}
+	}
+}
