@@ -242,8 +242,8 @@ func TestFiveFrameworksEcosystemCoLocation(t *testing.T) {
 
 	// Step C: AutoGen consensus triggers CrewAI role-playing task delegation
 	_, crAddr := sendIPC("autogen-groupchat", "crewai-analyst", "svc-crewai", "delegate_crew_tasks", map[string]any{
-		"role":  "security_analyst",
-		"task":  "verify_external_side_effect_idempotency",
+		"role": "security_analyst",
+		"task": "verify_external_side_effect_idempotency",
 	})
 	receiveAndAck(crAddr)
 

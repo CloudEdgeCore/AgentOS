@@ -10,17 +10,17 @@ option go_package = "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/service/v1;
 // AgentService manages the lifecycle of long-running, supervised Daemon Agent Services.
 // v1 field numbers, RPC signatures, and wire formats are FROZEN (v1.2 Contract Freeze).
 service ServiceManagementService {
-  rpc CreateService(CreateServiceRequest) returns (ServiceResponse);
-  rpc GetService(GetServiceRequest) returns (ServiceResponse);
+  rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
+  rpc GetService(GetServiceRequest) returns (GetServiceResponse);
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
-  rpc UpdateService(UpdateServiceRequest) returns (ServiceResponse);
-  rpc ScaleService(ScaleServiceRequest) returns (ServiceResponse);
-  rpc RestartService(RestartServiceRequest) returns (ServiceResponse);
-  rpc StopService(StopServiceRequest) returns (ServiceResponse);
+  rpc UpdateService(UpdateServiceRequest) returns (UpdateServiceResponse);
+  rpc ScaleService(ScaleServiceRequest) returns (ScaleServiceResponse);
+  rpc RestartService(RestartServiceRequest) returns (RestartServiceResponse);
+  rpc StopService(StopServiceRequest) returns (StopServiceResponse);
   rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
   rpc DrainInstance(DrainInstanceRequest) returns (DrainInstanceResponse);
-  rpc RolloutUpgrade(RolloutUpgradeRequest) returns (ServiceResponse);
-  rpc RollbackService(RollbackServiceRequest) returns (ServiceResponse);
+  rpc RolloutUpgrade(RolloutUpgradeRequest) returns (RolloutUpgradeResponse);
+  rpc RollbackService(RollbackServiceRequest) returns (RollbackServiceResponse);
 }
 
 enum ServicePhase {
@@ -123,11 +123,21 @@ message CreateServiceRequest {
   ServiceSpec spec = 5;
 }
 
+message CreateServiceResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
+}
+
 message GetServiceRequest {
   string tenant_id = 1;
   string service_id = 2;
   string namespace = 3;
   string name = 4;
+}
+
+message GetServiceResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
 }
 
 message ListServicesRequest {
@@ -145,10 +155,20 @@ message UpdateServiceRequest {
   ServiceSpec spec = 3;
 }
 
+message UpdateServiceResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
+}
+
 message ScaleServiceRequest {
   string tenant_id = 1;
   string service_id = 2;
   int32 replicas = 3;
+}
+
+message ScaleServiceResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
 }
 
 message RestartServiceRequest {
@@ -156,9 +176,19 @@ message RestartServiceRequest {
   string service_id = 2;
 }
 
+message RestartServiceResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
+}
+
 message StopServiceRequest {
   string tenant_id = 1;
   string service_id = 2;
+}
+
+message StopServiceResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
 }
 
 message DeleteServiceRequest {
@@ -188,12 +218,17 @@ message RolloutUpgradeRequest {
   RolloutConfig config = 4;
 }
 
+message RolloutUpgradeResponse {
+  AgentService service = 1;
+  repeated ServiceInstance instances = 2;
+}
+
 message RollbackServiceRequest {
   string tenant_id = 1;
   string service_id = 2;
 }
 
-message ServiceResponse {
+message RollbackServiceResponse {
   AgentService service = 1;
   repeated ServiceInstance instances = 2;
 }

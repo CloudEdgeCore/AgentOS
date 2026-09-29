@@ -12,7 +12,7 @@ option go_package = "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/effect/v1;e
 service EffectService {
   rpc ExecuteEffect(ExecuteEffectRequest) returns (ExecuteEffectResponse);
   rpc GetEffect(GetEffectRequest) returns (GetEffectResponse);
-  rpc GetEffectByIdempotencyKey(GetEffectByIdempotencyKeyRequest) returns (GetEffectResponse);
+  rpc GetEffectByIdempotencyKey(GetEffectByIdempotencyKeyRequest) returns (GetEffectByIdempotencyKeyResponse);
 }
 
 enum EffectStatus {
@@ -80,12 +80,16 @@ message GetEffectRequest {
   string effect_id = 2;
 }
 
+message GetEffectResponse {
+  EffectRecord record = 1;
+}
+
 message GetEffectByIdempotencyKeyRequest {
   string tenant_id = 1;
   string agent_id = 2;
   string idempotency_key = 3;
 }
 
-message GetEffectResponse {
+message GetEffectByIdempotencyKeyResponse {
   EffectRecord record = 1;
 }
