@@ -248,20 +248,23 @@ func TestProcessSystemSoakValidation(t *testing.T) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID*2000)))
 
+			agentID := fmt.Sprintf("payment-agent-%d", workerID)
+			runID := fmt.Sprintf("run-soak-%d", workerID)
+			fencingToken := int64(100 + workerID*10)
+
+			// Register current fencing token with monotonic fencer
+			effectFencer.SetActiveToken(tenantID, agentID, runID, fencingToken)
+
 			for time.Now().Before(soakDeadline) {
 				attemptID := uuid.New().String()
-				fencingToken := int64(100 + workerID)
-
-				// Register current fencing token with monotonic fencer
-				effectFencer.SetActiveToken(tenantID, "payment-agent", "run-soak", fencingToken)
 
 				// Test normal idempotent execution
 				idemKey := fmt.Sprintf("idem-key-%d-%d", workerID, rng.Intn(50))
 				req := &effect.EffectRequest{
 					ID:             uuid.New().String(),
 					TenantID:       tenantID,
-					AgentID:        "payment-agent",
-					RunID:          "run-soak",
+					AgentID:        agentID,
+					RunID:          runID,
 					AttemptID:      attemptID,
 					FencingToken:   fencingToken,
 					Provider:       "stripe",
