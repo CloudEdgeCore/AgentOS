@@ -169,3 +169,74 @@ func TestModelDeniedByDefault(t *testing.T) {
 		t.Fatalf("missing deny reason: %+v", decision)
 	}
 }
+
+func TestPeerAllowedByTenantPolicy(t *testing.T) {
+	engine, err := New(TenantPolicies{"tenant-a": {AllowedPeers: []string{"worker@1"}}})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	decision := engine.EvaluatePeer(context.Background(), "tenant-a", PeerContext{To: "worker@1"})
+	if !decision.Allow {
+		t.Fatalf("allowed peer was denied: %+v", decision)
+	}
+}
+
+func TestPeerDeniedByDefault(t *testing.T) {
+	engine, err := New(TenantPolicies{"tenant-a": {AllowedPeers: []string{"worker@1"}}})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	decision := engine.EvaluatePeer(context.Background(), "tenant-a", PeerContext{To: "stranger@1"})
+	if decision.Allow {
+		t.Fatal("unlisted peer was allowed")
+	}
+	if !slices.Contains(decision.DenyReasons, "PEER_NOT_ALLOWED") {
+		t.Fatalf("missing deny reason: %+v", decision)
+	}
+}
+
+func TestPeerDeniedWhenTenantDeclaresNoPeers(t *testing.T) {
+	// A tenant policy that predates peers has an empty allowlist, and empty
+	// means default deny: enabling IPC for a tenant is an explicit act.
+	engine, err := New(TenantPolicies{"tenant-a": {AllowedTools: []string{"github.read"}}})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	decision := engine.EvaluatePeer(context.Background(), "tenant-a", PeerContext{To: "worker@1"})
+	if decision.Allow {
+		t.Fatal("tenant without allowed_peers was allowed to message")
+	}
+	if !slices.Contains(decision.DenyReasons, "PEER_NOT_ALLOWED") {
+		t.Fatalf("missing deny reason: %+v", decision)
+	}
+}
+
+func TestPeerDeniedForUnknownTenant(t *testing.T) {
+	engine, err := New(TenantPolicies{"tenant-a": {AllowedPeers: []string{"worker@1"}}})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	decision := engine.EvaluatePeer(context.Background(), "tenant-unknown", PeerContext{To: "worker@1"})
+	if decision.Allow {
+		t.Fatal("unknown tenant was allowed a peer")
+	}
+	if !slices.Contains(decision.DenyReasons, "TENANT_POLICY_NOT_FOUND") {
+		t.Fatalf("missing deny reason: %+v", decision)
+	}
+}
+
+func TestPeerMatchingIsExactNotWildcarded(t *testing.T) {
+	// Wildcards are the capability layer's contract (capability.MatchGrant).
+	// The tenant allowlist is exact, like allowed_tools and allowed_models, so
+	// a grant written with a wildcard must not act as one here.
+	engine, err := New(TenantPolicies{"tenant-a": {AllowedPeers: []string{"team/*"}}})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if decision := engine.EvaluatePeer(context.Background(), "tenant-a", PeerContext{To: "team/analyst@1"}); decision.Allow {
+		t.Fatal("tenant peer allowlist matched a wildcard")
+	}
+	if decision := engine.EvaluatePeer(context.Background(), "tenant-a", PeerContext{To: "team/*"}); !decision.Allow {
+		t.Fatalf("exact literal peer was denied: %+v", decision)
+	}
+}

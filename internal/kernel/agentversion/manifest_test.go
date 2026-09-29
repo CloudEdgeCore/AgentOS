@@ -128,6 +128,15 @@ func TestManifestRuntimeAndCapabilityValidation(t *testing.T) {
 			manifest.Spec.Capabilities.SpawnTasks = true
 			manifest.Spec.Capabilities.ChildAgents = []string{"worker@1", "worker@1"}
 		},
+		"duplicate peer grant": func(manifest *Manifest) {
+			manifest.Spec.Capabilities.Peers = []string{"worker@1", "worker@1"}
+		},
+		"empty peer grant": func(manifest *Manifest) {
+			manifest.Spec.Capabilities.Peers = []string{""}
+		},
+		"embedded peer wildcard": func(manifest *Manifest) {
+			manifest.Spec.Capabilities.Peers = []string{"wo*rker@1"}
+		},
 		"zero container workspace": func(manifest *Manifest) {
 			manifest.Spec.Resources.WorkspaceBytes = 0
 		},
@@ -142,6 +151,27 @@ func TestManifestRuntimeAndCapabilityValidation(t *testing.T) {
 				t.Fatalf("invalid manifest %q was accepted", name)
 			}
 		})
+	}
+}
+
+func TestManifestAcceptsAbsentAndPresentPeerGrants(t *testing.T) {
+	// Absent peers must stay valid. validateCapabilitySet rejects a nil slice
+	// ("use [] for default deny"), so an optional grant cannot go through the
+	// required-class list the way tools/models/memory/secrets do: doing that
+	// would reject every manifest written before peers existed.
+	if err := validManifest().Validate(); err != nil {
+		t.Fatalf("manifest without peers rejected: %v", err)
+	}
+	manifest := validManifest()
+	manifest.Spec.Capabilities.Peers = []string{"worker@1", "team/*", "reporter@*"}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("valid peer grants rejected: %v", err)
+	}
+	// An explicit empty list is the opt-out form and must also be accepted.
+	manifest = validManifest()
+	manifest.Spec.Capabilities.Peers = []string{}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("explicitly empty peers rejected: %v", err)
 	}
 }
 

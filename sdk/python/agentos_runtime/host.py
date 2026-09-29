@@ -535,7 +535,7 @@ class RuntimeHost:
             raise ValueError("all capability classes must be explicit")
         if any(not isinstance(capabilities[name], list) for name in classes):
             raise ValueError("capability classes must be arrays")
-        for name in classes | {"childAgents", "memorySensitivities"}:
+        for name in classes | {"childAgents", "peers", "memorySensitivities"}:
             values = capabilities.get(name, [])
             if not isinstance(values, list) or len(values) > 256:
                 raise ValueError(f"capabilities.{name} must be a bounded array")

@@ -829,6 +829,10 @@ components:
               allOf:
                 - { $ref: '#/components/schemas/CapabilitySet' }
               description: AgentVersion references this version may dynamically spawn; empty denies all children.
+            peers:
+              allOf:
+                - { $ref: '#/components/schemas/CapabilitySet' }
+              description: AgentVersion references this version may send IPC messages to; an absent list denies every peer, as does an empty one.
         resources:
           type: object
           additionalProperties: false

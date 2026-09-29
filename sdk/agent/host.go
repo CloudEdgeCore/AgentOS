@@ -531,23 +531,38 @@ func validateStart(request StartRequest) error {
 			return fmt.Errorf("capabilities.memorySensitivities contains invalid tier %q", sensitivity)
 		}
 	}
-	if request.Capabilities.ChildAgents != nil {
-		if len(request.Capabilities.ChildAgents) > 256 {
-			return fmt.Errorf("capabilities.childAgents exceeds 256 grants")
-		}
-		seen := map[string]struct{}{}
-		for _, value := range request.Capabilities.ChildAgents {
-			if strings.TrimSpace(value) == "" || len(value) > 256 {
-				return fmt.Errorf("capabilities.childAgents contains an invalid grant")
-			}
-			if _, exists := seen[value]; exists {
-				return fmt.Errorf("capabilities.childAgents contains duplicate grant %q", value)
-			}
-			seen[value] = struct{}{}
-		}
+	if err := validateOptionalGrantSet("childAgents", request.Capabilities.ChildAgents); err != nil {
+		return err
+	}
+	if err := validateOptionalGrantSet("peers", request.Capabilities.Peers); err != nil {
+		return err
 	}
 	if request.Capabilities.SpawnTasks && len(request.Capabilities.ChildAgents) == 0 {
 		return errors.New("capabilities.childAgents requires at least one entry when spawnTasks is enabled")
+	}
+	return nil
+}
+
+// validateOptionalGrantSet checks a capability list that a manifest may omit.
+// Unlike tools/models/memory/secrets, an absent list is valid here: absence has
+// to keep meaning "this manifest predates the grant", not "malformed manifest".
+// An empty list is the explicit form and denies everything.
+func validateOptionalGrantSet(name string, values []string) error {
+	if values == nil {
+		return nil
+	}
+	if len(values) > 256 {
+		return fmt.Errorf("capabilities.%s exceeds 256 grants", name)
+	}
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" || len(value) > 256 {
+			return fmt.Errorf("capabilities.%s contains an invalid grant", name)
+		}
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("capabilities.%s contains duplicate grant %q", name, value)
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }

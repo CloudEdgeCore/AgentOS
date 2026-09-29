@@ -8,6 +8,8 @@ import (
 	"time"
 
 	ipcv1 "github.com/CloudEdgeCore/AgentOS/gen/go/agentos/ipc/v1"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/capability"
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/policy"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
@@ -46,29 +48,67 @@ type MailboxScope interface {
 	GetRunMailboxScope(context.Context, string, uuid.UUID) (store.RunMailboxScope, error)
 }
 
+// PeerAuthorizer decides whether the sending AgentVersion holds an immutable
+// grant for the receiving one. *capability.Authorizer satisfies it.
+type PeerAuthorizer interface {
+	Authorize(context.Context, string, string, capability.Kind, ...string) error
+}
+
+// PeerPolicy is the tenant-wide half of the same decision: whether this tenant
+// may message that AgentVersion at all. *policy.Engine satisfies it.
+//
+// It is a narrow consumer-side interface for the same reason tool and model
+// gateways declare their own: the service depends on one method, not on the
+// policy engine's shape.
+type PeerPolicy interface {
+	EvaluatePeer(context.Context, string, policy.PeerContext) policy.Decision
+}
+
 // IPCService is the fenced agent-to-agent mailbox boundary. Agents reach their
 // mailbox through this service rather than through the Control API, so they
 // cannot choose a tenant, and can never address a mailbox outside their own run.
 //
-// What this service does not do, on purpose:
+// Authorization is two layers, checked in the order the tool and model path
+// uses (service-layer capability first, then Rego):
+//
+//   - capability: the sending AgentVersion must grant the receiving one in
+//     capabilities.peers. Grants are per immutable version, so republishing a
+//     version is what changes them.
+//   - tenant policy: the tenant must list the receiving AgentVersion in
+//     allowed_peers. This is per tenant and denies by default, so a tenant that
+//     has not opted in cannot message anyone regardless of its versions' grants.
+//
+// Two things it deliberately still does not do:
 //
 //   - It does not notify a receiver. The platform cannot push into a running
 //     agent: agentos.runtime.v1 exposes seven pull RPCs, its HeartbeatResponse
 //     carries no payload, and nothing in the repository resembles a wake path.
 //     A receiver drains its mailbox on its own schedule.
-//   - It does not authorize capabilities. That is the next stage; here the only
-//     enforced identity is the fenced attempt, which already confines a caller
-//     to its own tenant, its own version reference, and its own run.
+//   - It does not check the *receiver's* willingness. The grant answers "may I
+//     write to you", never "may you write to me", so a sender that knows a run
+//     id can reach it. A receiving-side allowlist is a separate design.
 type IPCService struct {
 	ipcv1.UnimplementedIPCGatewayServiceServer
 	mailbox       store.IPCStore
 	scopes        MailboxScope
 	fences        RuntimeFence
+	capabilities  PeerAuthorizer
+	peerPolicy    PeerPolicy
 	allowedTenant string
 }
 
-func NewIPCService(mailbox store.IPCStore, scopes MailboxScope, fences RuntimeFence, allowedTenant string) *IPCService {
-	return &IPCService{mailbox: mailbox, scopes: scopes, fences: fences, allowedTenant: allowedTenant}
+func NewIPCService(
+	mailbox store.IPCStore,
+	scopes MailboxScope,
+	fences RuntimeFence,
+	allowedTenant string,
+	capabilities PeerAuthorizer,
+	peerPolicy PeerPolicy,
+) *IPCService {
+	return &IPCService{
+		mailbox: mailbox, scopes: scopes, fences: fences,
+		capabilities: capabilities, peerPolicy: peerPolicy, allowedTenant: allowedTenant,
+	}
 }
 
 // SendMessage stores one message in the mailbox its address names.
@@ -94,6 +134,14 @@ func (s *IPCService) SendMessage(ctx context.Context, request *ipcv1.SendMessage
 	toRunID, parseErr := uuid.Parse(to.Instance)
 	if parseErr != nil {
 		return nil, status.Error(codes.InvalidArgument, "mailbox instance must be the receiving run id")
+	}
+	// Authorization runs before the mailbox is resolved, and the order is
+	// deliberate. Resolving the run distinguishes "no such run" from "that run
+	// belongs to a different version", which would let an unauthorized sender
+	// probe which run ids exist by reading the error code. Denying first makes
+	// every unauthorized address look the same.
+	if err := s.authorizePeer(ctx, assignment, to.AgentVersionRef); err != nil {
+		return nil, err
 	}
 	// A mailbox is addressed by (version reference, run id). Resolving the run
 	// is what turns a mistyped instance, or a run paired with a version
@@ -307,6 +355,34 @@ func (s *IPCService) fence(ctx context.Context, identity *ipcv1.AttemptIdentity,
 		return zero, status.Error(codes.PermissionDenied, "agent version does not match the fenced Attempt")
 	}
 	return assignment, nil
+}
+
+// authorizePeer enforces both halves of "may this send happen": the sending
+// version's immutable grant for that peer, then the tenant-wide allowlist.
+//
+// Both are required, and they fail differently on purpose. A missing grant is a
+// property of the published AgentVersion, so the fix is to republish it; a
+// missing tenant entry is an operator decision, so the fix is the tenant policy
+// file. Reporting them under one code would hide which of the two needs to
+// change.
+//
+// Unconfigured enforcement denies rather than passes, mirroring the memory
+// boundary: a gateway started without an authorizer must not become an open
+// relay.
+func (s *IPCService) authorizePeer(ctx context.Context, assignment store.RuntimeAssignment, peer string) error {
+	if s.capabilities == nil || s.peerPolicy == nil {
+		return status.Error(codes.PermissionDenied, "ipc authorization is not configured")
+	}
+	tenantID := assignment.Task.TenantID
+	if err := s.capabilities.Authorize(ctx, tenantID, assignment.Task.AgentVersionRef, capability.IPC, peer); err != nil {
+		return status.Error(codes.PermissionDenied, err.Error())
+	}
+	decision := s.peerPolicy.EvaluatePeer(ctx, tenantID, policy.PeerContext{To: peer})
+	if !decision.Allow {
+		return status.Error(codes.PermissionDenied,
+			"receiving agent is not allowed by tenant policy: "+strings.Join(decision.DenyReasons, ", "))
+	}
+	return nil
 }
 
 // ipcEffectiveWait bounds one drain's server-side wait.
