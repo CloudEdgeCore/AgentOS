@@ -29,4 +29,16 @@ var (
 
 	// ErrMaxRestartsExceeded is returned when an instance has reached the maximum allowed restart attempts.
 	ErrMaxRestartsExceeded = errors.New("maximum restart retries exceeded")
+
+	// ErrRolloutInProgress is returned when another rollout is already underway.
+	ErrRolloutInProgress = errors.New("rollout upgrade already in progress")
+
+	// ErrRolloutFailed is returned when an agent rollout fails health or stability checks.
+	ErrRolloutFailed = errors.New("rollout upgrade failed")
+
+	// ErrNoPreviousVersion is returned when attempting to rollback a service that has no prior version recorded.
+	ErrNoPreviousVersion = errors.New("no previous service version recorded for rollback")
+
+	// ErrInstanceDraining is returned when routing to an instance that is actively draining.
+	ErrInstanceDraining = errors.New("service instance is currently draining")
 )

@@ -69,6 +69,14 @@ func cloneInstance(inst *Instance) *Instance {
 		t := *inst.NextRestartAt
 		cp.NextRestartAt = &t
 	}
+	if inst.DrainingAt != nil {
+		t := *inst.DrainingAt
+		cp.DrainingAt = &t
+	}
+	if inst.DrainDeadline != nil {
+		t := *inst.DrainDeadline
+		cp.DrainDeadline = &t
+	}
 	if inst.TerminatedAt != nil {
 		t := *inst.TerminatedAt
 		cp.TerminatedAt = &t

@@ -88,7 +88,7 @@ func (r *Router) ResolveAddress(ctx context.Context, target ipc.AgentAddress) (i
 
 	var healthy []*Instance
 	for _, inst := range instances {
-		if inst.IsHealthy() {
+		if inst.IsHealthy() && !inst.IsDraining() {
 			healthy = append(healthy, inst)
 		}
 	}
@@ -99,7 +99,7 @@ func (r *Router) ResolveAddress(ctx context.Context, target ipc.AgentAddress) (i
 		// Check instances again after reconcile
 		instances, _ = r.store.ListInstances(ctx, target.TenantID, matchedService.ID)
 		for _, inst := range instances {
-			if inst.IsHealthy() {
+			if inst.IsHealthy() && !inst.IsDraining() {
 				healthy = append(healthy, inst)
 			}
 		}

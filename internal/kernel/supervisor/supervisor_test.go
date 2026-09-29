@@ -575,3 +575,254 @@ func TestConcurrentHeartbeatsAndReconciliation(t *testing.T) {
 		t.Fatalf("expected heartbeats to succeed concurrently")
 	}
 }
+
+func TestServiceDrainingAndGracefulScaleDown(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	spawner := NewMockSpawner()
+	curTime := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return curTime }
+
+	sup := NewSupervisor(store, WithSpawner(spawner), WithClock(clock))
+	router := NewRouter(sup, store)
+
+	svc := &Service{
+		ID:        "svc-drain-test",
+		TenantID:  "tenant-d",
+		Namespace: "default",
+		Name:      "drain-service",
+		AgentID:   "agent-drain",
+		Spec: ServiceSpec{
+			Replicas:      3,
+			RestartPolicy: RestartAlways,
+			DrainTimeout:  10 * time.Second,
+		},
+	}
+
+	created, err := sup.CreateService(ctx, svc)
+	if err != nil {
+		t.Fatalf("CreateService failed: %v", err)
+	}
+	if created.Status.ReadyReplicas != 3 {
+		t.Fatalf("expected 3 ready replicas, got %d", created.Status.ReadyReplicas)
+	}
+
+	instances, err := store.ListInstances(ctx, "tenant-d", "svc-drain-test")
+	if err != nil || len(instances) != 3 {
+		t.Fatalf("expected 3 instances in store, got %d (err: %v)", len(instances), err)
+	}
+
+	// Scale down to 1: 2 instances should enter Draining, not immediately stop
+	scaled, err := sup.ScaleService(ctx, "tenant-d", "svc-drain-test", 1)
+	if err != nil {
+		t.Fatalf("ScaleService failed: %v", err)
+	}
+	if scaled.Status.DesiredReplicas != 1 {
+		t.Fatalf("expected desired replicas 1, got %d", scaled.Status.DesiredReplicas)
+	}
+
+	instances, _ = store.ListInstances(ctx, "tenant-d", "svc-drain-test")
+	var drainingCount, runningCount int
+	var runningInst *Instance
+	for _, inst := range instances {
+		if inst.Phase == InstanceDraining {
+			drainingCount++
+			if inst.DrainingAt == nil || inst.DrainDeadline == nil {
+				t.Fatalf("expected DrainingAt and DrainDeadline to be set on draining instance")
+			}
+		} else if inst.Phase == InstanceRunning {
+			runningCount++
+			runningInst = inst
+		}
+	}
+	if drainingCount != 2 || runningCount != 1 {
+		t.Fatalf("expected 2 draining and 1 running, got %d draining and %d running", drainingCount, runningCount)
+	}
+
+	// Spawner should NOT have stopped the instances yet!
+	if spawner.StopCount() != 0 {
+		t.Fatalf("expected 0 stopped instances during drain grace period, got %d", spawner.StopCount())
+	}
+
+	// Router should exclusively route to the single non-draining running instance
+	for i := 0; i < 5; i++ {
+		resolved, err := router.ResolveAddress(ctx, svc.LogicalAddress())
+		if err != nil {
+			t.Fatalf("router.ResolveAddress failed: %v", err)
+		}
+		if resolved.InstanceID != runningInst.ID {
+			t.Fatalf("expected routed to running instance %s, got %s", runningInst.ID, resolved.InstanceID)
+		}
+	}
+
+	// Advance clock past drain deadline (10s)
+	curTime = curTime.Add(11 * time.Second)
+
+	// Reconcile service: draining instances should now complete shutdown
+	svcObj, _ := store.GetService(ctx, "tenant-d", "svc-drain-test")
+	if err := sup.ReconcileService(ctx, svcObj); err != nil {
+		t.Fatalf("ReconcileService failed: %v", err)
+	}
+
+	if spawner.StopCount() != 2 {
+		t.Fatalf("expected 2 stopped instances after drain deadline, got %d", spawner.StopCount())
+	}
+
+	instances, _ = store.ListInstances(ctx, "tenant-d", "svc-drain-test")
+	var stoppedCount int
+	for _, inst := range instances {
+		if inst.Phase == InstanceStopped {
+			stoppedCount++
+			if inst.ExitReason != "drained" {
+				t.Fatalf("expected exit reason 'drained', got %q", inst.ExitReason)
+			}
+		}
+	}
+	if stoppedCount != 2 {
+		t.Fatalf("expected 2 stopped instances in store, got %d", stoppedCount)
+	}
+}
+
+func TestManualDrainInstance(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	spawner := NewMockSpawner()
+	curTime := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return curTime }
+
+	sup := NewSupervisor(store, WithSpawner(spawner), WithClock(clock))
+
+	svc := &Service{
+		ID:        "svc-manual-drain",
+		TenantID:  "tenant-d",
+		Namespace: "default",
+		Name:      "manual-drain-service",
+		AgentID:   "agent-manual-drain",
+		Spec: ServiceSpec{
+			Replicas:      2,
+			RestartPolicy: RestartAlways,
+		},
+	}
+
+	_, err := sup.CreateService(ctx, svc)
+	if err != nil {
+		t.Fatalf("CreateService failed: %v", err)
+	}
+
+	instances, _ := store.ListInstances(ctx, "tenant-d", "svc-manual-drain")
+	targetID := instances[0].ID
+
+	// Manually drain target instance with 5s timeout
+	if err := sup.DrainInstance(ctx, "tenant-d", "svc-manual-drain", targetID, 5*time.Second); err != nil {
+		t.Fatalf("DrainInstance failed: %v", err)
+	}
+
+	inst, _ := store.GetInstance(ctx, "tenant-d", "svc-manual-drain", targetID)
+	if inst.Phase != InstanceDraining {
+		t.Fatalf("expected phase Draining, got %s", inst.Phase)
+	}
+
+	// Advance clock past 5s
+	curTime = curTime.Add(6 * time.Second)
+	svcObj, _ := store.GetService(ctx, "tenant-d", "svc-manual-drain")
+	_ = sup.ReconcileService(ctx, svcObj)
+
+	inst, _ = store.GetInstance(ctx, "tenant-d", "svc-manual-drain", targetID)
+	if inst.Phase != InstanceStopped {
+		t.Fatalf("expected phase Stopped after drain, got %s", inst.Phase)
+	}
+}
+
+func TestServiceRollingUpgradeAndRollback(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	spawner := NewMockSpawner()
+	curTime := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return curTime }
+
+	sup := NewSupervisor(store, WithSpawner(spawner), WithClock(clock))
+
+	svc := &Service{
+		ID:        "svc-rollout",
+		TenantID:  "tenant-r",
+		Namespace: "default",
+		Name:      "rollout-service",
+		AgentID:   "agent-rollout",
+		Spec: ServiceSpec{
+			Replicas:      3,
+			AgentVersion:  "v1",
+			RestartPolicy: RestartAlways,
+			DrainTimeout:  5 * time.Second,
+			Rollout: RolloutConfig{
+				MaxSurge:       1,
+				MaxUnavailable: 1,
+			},
+		},
+	}
+
+	created, err := sup.CreateService(ctx, svc)
+	if err != nil {
+		t.Fatalf("CreateService failed: %v", err)
+	}
+	if created.Status.ActiveVersion != "v1" || created.Status.ReadyReplicas != 3 {
+		t.Fatalf("unexpected created status: %+v", created.Status)
+	}
+
+	// 1. Trigger Rollout Upgrade to "v2"
+	upgraded, err := sup.RolloutUpgrade(ctx, "tenant-r", "svc-rollout", "v2")
+	if err != nil {
+		t.Fatalf("RolloutUpgrade failed: %v", err)
+	}
+	if upgraded.Spec.AgentVersion != "v2" || upgraded.Status.PreviousVersion != "v1" {
+		t.Fatalf("expected target v2 and previous v1, got: %+v", upgraded)
+	}
+
+	// Step-by-step rolling progression
+	for step := 0; step < 10; step++ {
+		curTime = curTime.Add(6 * time.Second)
+		svcObj, _ := store.GetService(ctx, "tenant-r", "svc-rollout")
+		_ = sup.ReconcileService(ctx, svcObj)
+
+		current, _ := store.GetService(ctx, "tenant-r", "svc-rollout")
+		if current.Status.UpdatedReplicas == 3 && current.Status.ReadyReplicas == 3 && current.Status.Phase == ServiceActive {
+			break
+		}
+	}
+
+	finalSvc, _ := store.GetService(ctx, "tenant-r", "svc-rollout")
+	if finalSvc.Status.Phase != ServiceActive {
+		t.Fatalf("expected final phase Active, got %s", finalSvc.Status.Phase)
+	}
+	if finalSvc.Status.UpdatedReplicas != 3 {
+		t.Fatalf("expected 3 updated replicas, got %d", finalSvc.Status.UpdatedReplicas)
+	}
+	if finalSvc.Status.ActiveVersion != "v2" {
+		t.Fatalf("expected active version v2, got %s", finalSvc.Status.ActiveVersion)
+	}
+
+	// 2. Trigger Rollback back to "v1"
+	rolledBack, err := sup.RollbackService(ctx, "tenant-r", "svc-rollout")
+	if err != nil {
+		t.Fatalf("RollbackService failed: %v", err)
+	}
+	if rolledBack.Spec.AgentVersion != "v1" {
+		t.Fatalf("expected rolled back version v1, got %s", rolledBack.Spec.AgentVersion)
+	}
+
+	// Advance clock and reconcile to converge back to v1
+	for step := 0; step < 10; step++ {
+		curTime = curTime.Add(6 * time.Second)
+		svcObj, _ := store.GetService(ctx, "tenant-r", "svc-rollout")
+		_ = sup.ReconcileService(ctx, svcObj)
+
+		current, _ := store.GetService(ctx, "tenant-r", "svc-rollout")
+		if current.Status.UpdatedReplicas == 3 && current.Status.ActiveVersion == "v1" && current.Status.Phase == ServiceActive {
+			break
+		}
+	}
+
+	restoredSvc, _ := store.GetService(ctx, "tenant-r", "svc-rollout")
+	if restoredSvc.Status.ActiveVersion != "v1" || restoredSvc.Status.UpdatedReplicas != 3 {
+		t.Fatalf("expected restored version v1 with 3 updated replicas, got: %+v", restoredSvc.Status)
+	}
+}

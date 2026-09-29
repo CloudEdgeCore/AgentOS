@@ -35,13 +35,38 @@ const (
 type InstancePhase string
 
 const (
-	InstanceStarting InstancePhase = "Starting"
-	InstanceRunning  InstancePhase = "Running"
-	InstanceDegraded InstancePhase = "Degraded"
-	InstanceStopping InstancePhase = "Stopping"
-	InstanceStopped  InstancePhase = "Stopped"
-	InstanceFailed   InstancePhase = "Failed"
+	InstanceCreated    InstancePhase = "Created"
+	InstanceStarting   InstancePhase = "Starting"
+	InstanceRunning    InstancePhase = "Running"
+	InstanceDegraded   InstancePhase = "Degraded"
+	InstanceDraining   InstancePhase = "Draining"
+	InstanceStopping   InstancePhase = "Stopping"
+	InstanceStopped    InstancePhase = "Stopped"
+	InstanceFailed     InstancePhase = "Failed"
+	InstanceRecovering InstancePhase = "Recovering"
 )
+
+// ResourceRequirements defines CPU, Memory, and LLM resource allocations.
+type ResourceRequirements struct {
+	CPU      string `json:"cpu,omitempty"`
+	Memory   string `json:"memory,omitempty"`
+	LLMSlots int    `json:"llmSlots,omitempty"`
+}
+
+// RolloutConfig controls progressive updates and rollouts.
+type RolloutConfig struct {
+	MaxUnavailable int           `json:"maxUnavailable"`
+	MaxSurge       int           `json:"maxSurge"`
+	MinReadyTime   time.Duration `json:"minReadyTime,omitempty"`
+}
+
+// DefaultRolloutConfig returns default rollout settings (maxUnavailable=1, maxSurge=1).
+func DefaultRolloutConfig() RolloutConfig {
+	return RolloutConfig{
+		MaxUnavailable: 1,
+		MaxSurge:       1,
+	}
+}
 
 // BackoffConfig defines exponential backoff settings for instance restarts.
 type BackoffConfig struct {
@@ -104,15 +129,20 @@ func DefaultHealthConfig() HealthConfig {
 
 // ServiceSpec declares the desired state and policy configuration for an AgentService.
 type ServiceSpec struct {
-	Replicas        int               `json:"replicas"`
-	AgentVersionRef string            `json:"agentVersionRef,omitempty"`
-	WorkloadSpec    json.RawMessage   `json:"workloadSpec,omitempty"`
-	RestartPolicy   RestartPolicy     `json:"restartPolicy"`
-	Backoff         BackoffConfig     `json:"backoff"`
-	Health          HealthConfig      `json:"health"`
-	AutoWake        bool              `json:"autoWake"`
-	ScaleToZeroTTL  time.Duration     `json:"scaleToZeroTtl,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
+	Replicas        int                  `json:"replicas"`
+	AgentVersion    string               `json:"agentVersion,omitempty"`
+	AgentVersionRef string               `json:"agentVersionRef,omitempty"`
+	RuntimeClass    string               `json:"runtimeClass,omitempty"`
+	RestartPolicy   RestartPolicy        `json:"restartPolicy"`
+	Resources       ResourceRequirements `json:"resources,omitempty"`
+	Backoff         BackoffConfig        `json:"backoff"`
+	Health          HealthConfig         `json:"health"`
+	Rollout         RolloutConfig        `json:"rollout"`
+	DrainTimeout    time.Duration        `json:"drainTimeout,omitempty"`
+	AutoWake        bool                 `json:"autoWake"`
+	ScaleToZeroTTL  time.Duration        `json:"scaleToZeroTtl,omitempty"`
+	Labels          map[string]string    `json:"labels,omitempty"`
+	WorkloadSpec    json.RawMessage      `json:"workloadSpec,omitempty"`
 }
 
 // Validate checks the service specification for correctness.
@@ -152,18 +182,32 @@ func (s *ServiceSpec) Validate() error {
 		s.Health.CheckInterval = 5 * time.Second
 	}
 
+	if s.Rollout.MaxUnavailable <= 0 {
+		s.Rollout.MaxUnavailable = 1
+	}
+	if s.Rollout.MaxSurge <= 0 {
+		s.Rollout.MaxSurge = 1
+	}
+	if s.DrainTimeout < 0 {
+		s.DrainTimeout = 0
+	}
+
 	return nil
 }
 
 // ServiceStatus tracks the observed state of an AgentService.
 type ServiceStatus struct {
-	Phase            ServicePhase `json:"phase"`
-	DesiredReplicas  int          `json:"desiredReplicas"`
-	CurrentReplicas  int          `json:"currentReplicas"`
-	ReadyReplicas    int          `json:"readyReplicas"`
-	RestartCount     int          `json:"restartCount"`
-	LastTransitionAt time.Time    `json:"lastTransitionAt"`
-	Message          string       `json:"message,omitempty"`
+	Phase             ServicePhase `json:"phase"`
+	DesiredReplicas   int          `json:"desiredReplicas"`
+	CurrentReplicas   int          `json:"currentReplicas"`
+	ReadyReplicas     int          `json:"readyReplicas"`
+	UpdatedReplicas   int          `json:"updatedReplicas"`
+	AvailableReplicas int          `json:"availableReplicas"`
+	ActiveVersion     string       `json:"activeVersion,omitempty"`
+	PreviousVersion   string       `json:"previousVersion,omitempty"`
+	RestartCount      int          `json:"restartCount"`
+	LastTransitionAt  time.Time    `json:"lastTransitionAt"`
+	Message           string       `json:"message,omitempty"`
 }
 
 // Service represents a supervised long-running agent daemon.
@@ -211,12 +255,17 @@ type Instance struct {
 	TenantID            string           `json:"tenantId"`
 	Namespace           string           `json:"namespace"`
 	AgentID             string           `json:"agentId"`
+	AgentVersion        string           `json:"agentVersion,omitempty"`
+	RuntimeClass        string           `json:"runtimeClass,omitempty"`
+	FencingToken        uint64           `json:"fencingToken,omitempty"`
 	Address             ipc.AgentAddress `json:"address"`
 	Phase               InstancePhase    `json:"phase"`
 	RestartCount        int              `json:"restartCount"`
 	ConsecutiveFailures int              `json:"consecutiveFailures"`
 	NextRestartAt       *time.Time       `json:"nextRestartAt,omitempty"`
 	LastHeartbeat       time.Time        `json:"lastHeartbeat"`
+	DrainingAt          *time.Time       `json:"drainingAt,omitempty"`
+	DrainDeadline       *time.Time       `json:"drainDeadline,omitempty"`
 	CreatedAt           time.Time        `json:"createdAt"`
 	UpdatedAt           time.Time        `json:"updatedAt"`
 	TerminatedAt        *time.Time       `json:"terminatedAt,omitempty"`
@@ -229,7 +278,25 @@ func (inst *Instance) IsHealthy() bool {
 	return inst.Phase == InstanceRunning
 }
 
+// IsActive returns true if the instance is in an active lifecycle state.
+func (inst *Instance) IsActive() bool {
+	return inst.Phase == InstanceCreated ||
+		inst.Phase == InstanceStarting ||
+		inst.Phase == InstanceRunning ||
+		inst.Phase == InstanceDegraded
+}
+
+// IsDraining returns true if the instance is currently draining.
+func (inst *Instance) IsDraining() bool {
+	return inst.Phase == InstanceDraining
+}
+
 // IsTerminal returns true if the instance has exited and cannot be reused.
 func (inst *Instance) IsTerminal() bool {
 	return inst.Phase == InstanceStopped || inst.Phase == InstanceFailed
+}
+
+// IsRecovering returns true if the instance is waiting for a restart backoff.
+func (inst *Instance) IsRecovering() bool {
+	return inst.Phase == InstanceRecovering || (inst.Phase == InstanceFailed && inst.NextRestartAt != nil)
 }
