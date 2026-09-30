@@ -44,6 +44,7 @@ jobs:
       # v1.1 acceptance evidence: the e2e/single-agent suite launches the
       # real Python agent from the repository tree.
       AGENTOS_E2E_PYTHON: python3
+      AGENTOS_E2E_WORKFLOWS: 100
 
     steps:
       - name: Check out source

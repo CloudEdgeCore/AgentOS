@@ -37,6 +37,7 @@ jobs:
       AGENTOS_TEST_DATABASE_URL: postgres://agentos:agentos-test-only@127.0.0.1:5432/agentos_test?sslmode=disable
       AGENTOS_TEST_NATS_URL: nats://127.0.0.1:4222
       AGENTOS_E2E_PYTHON: python3
+      AGENTOS_E2E_WORKFLOWS: 100
     steps:
       - name: Check out immutable tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -155,4 +156,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "AgentOS $GITHUB_REF_NAME"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME exists, uploading assets with clobber..."
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            echo "Release $GITHUB_REF_NAME does not exist, creating..."
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "AgentOS $GITHUB_REF_NAME"
+          fi
