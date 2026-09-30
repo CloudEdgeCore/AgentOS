@@ -44,6 +44,32 @@ agentos-conformance -cmd "python examples/agents/langgraph/server.py --port 0"
 agentos-conformance -endpoint http://127.0.0.1:8088 -json
 ```
 
+### 2.4 Automated GitHub Actions CI Integration & Badge
+
+Third-party framework authors can automatically certify on every pull request using the official composite action:
+
+```yaml
+# In your repository: .github/workflows/conformance.yml
+name: AgentOS Compatibility
+on: [push, pull_request]
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Certify against AgentOS
+        uses: CloudEdgeCore/AgentOS/.github/actions/conformance@v1.2.0
+        with:
+          command: "python server.py --port 0"
+```
+
+Once certified, display the official **AgentOS Compatible** badge in your README:
+
+```markdown
+[![AgentOS Compatible](https://img.shields.io/badge/AgentOS-Compatible-brightgreen.svg)](https://github.com/CloudEdgeCore/AgentOS)
+```
+
 ---
 
 ## 3. Certification Report Format

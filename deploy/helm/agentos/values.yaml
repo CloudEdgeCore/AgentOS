@@ -1,0 +1,74 @@
+# Default values for agentos Helm Chart.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/cloudedgecore/agentos
+  pullPolicy: IfNotPresent
+  tag: "1.2.0"
+
+serviceAccount:
+  create: true
+  name: "agentos-kernel"
+
+controlPlane:
+  port: 8080
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+controller:
+  id: "k8s-controller-fleet"
+  leaseTtl: "30s"
+  reapInterval: "10s"
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+
+# External or bundled PostgreSQL
+postgresql:
+  enabled: true
+  auth:
+    database: agentos
+    username: agentos
+    password: "change-me-in-production"
+  primary:
+    persistence:
+      enabled: true
+      size: 50Gi
+
+# External or bundled NATS JetStream
+nats:
+  enabled: true
+  jetstream:
+    enabled: true
+    memStorage:
+      enabled: true
+      size: 4Gi
+
+# Gateway capabilities and default tenant
+security:
+  devTenant: "prod"
+  spiffeEnabled: false
+  mtlsRequired: false
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: agentos.internal.example.com
+      paths:
+        - path: /
+          pathType: ImplementationSpecific

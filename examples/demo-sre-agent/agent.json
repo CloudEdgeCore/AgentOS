@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agentos.dev/v1/manifest.json",
+  "apiVersion": "agentos.dev/v1",
+  "name": "sre-agent",
+  "version": "1.2.0",
+  "namespace": "production",
+  "description": "Autonomous SRE Self-Healing Agent with fenced remediation and durable checkpoints",
+  "runtime": {
+    "class": "python-remote",
+    "provider": "reference",
+    "entrypoint": "server.py",
+    "port": 8095
+  },
+  "capabilities": {
+    "tools": [
+      "k8s.deployment.restart",
+      "telemetry.query"
+    ],
+    "models": [
+      "deepseek-chat"
+    ],
+    "memory": [
+      "production/sre"
+    ]
+  },
+  "policies": {
+    "maxAttempts": 3,
+    "timeoutSeconds": 300
+  }
+}

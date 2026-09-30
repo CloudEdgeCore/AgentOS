@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,7 +40,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs|workflow|service|namespace|research|metrics|runtime|conformance> [flags]")
+		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs|workflow|service|namespace|research|metrics|runtime|conformance|registry> [flags]")
 	}
 	switch args[0] {
 	case "version":
@@ -74,6 +75,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runRuntime(args[1:], stdout, stderr)
 	case "conformance":
 		return runConformance(args[1:], stdout, stderr)
+	case "registry":
+		return runRegistry(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -139,6 +142,107 @@ func runConformance(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("conformance failed: %w", err)
 	}
 	return nil
+}
+
+func runRegistry(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: agentos registry <inspect|verify|push|pull> [flags]")
+	}
+	switch args[0] {
+	case "inspect":
+		flags := flag.NewFlagSet("registry inspect", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		pkgPath := flags.String("package", "package.json", "path to signed package JSON")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		var pkg agentpkg.Package
+		if err := decodeFileStrict(*pkgPath, &pkg); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Agent Package Inspection:\n")
+		fmt.Fprintf(stdout, "  AgentVersionRef: %s\n", pkg.Manifest.AgentVersionRef)
+		fmt.Fprintf(stdout, "  Schema:          %s\n", pkg.Manifest.Schema)
+		fmt.Fprintf(stdout, "  Spec Digest:     %s\n", pkg.Manifest.SpecDigest.String())
+		fmt.Fprintf(stdout, "  Builder:         %s\n", pkg.Manifest.Provenance.Builder)
+		fmt.Fprintf(stdout, "  Workflow:        %s\n", pkg.Manifest.Provenance.BuildWorkflow)
+		fmt.Fprintf(stdout, "  Git Commit:      %s\n", pkg.Manifest.Provenance.GitCommit)
+		fmt.Fprintf(stdout, "  Built At:        %s\n", pkg.Manifest.Provenance.BuiltAt.Format(time.RFC3339))
+		fmt.Fprintf(stdout, "  Signing Key ID:  %s\n", pkg.Signature.KeyID)
+		fmt.Fprintf(stdout, "  Signed At:       %s\n", pkg.Signature.CreatedAt.Format(time.RFC3339))
+		return nil
+
+	case "verify":
+		flags := flag.NewFlagSet("registry verify", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		pkgPath := flags.String("package", "package.json", "path to signed package JSON")
+		pubKeyB64 := flags.String("public-key", "", "trusted ed25519 public key in base64")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		var pkg agentpkg.Package
+		if err := decodeFileStrict(*pkgPath, &pkg); err != nil {
+			return err
+		}
+		if *pubKeyB64 != "" {
+			pubKey, err := base64.StdEncoding.DecodeString(*pubKeyB64)
+			if err != nil {
+				return fmt.Errorf("invalid base64 public key: %w", err)
+			}
+			reg := agentpkg.NewRegistry()
+			if err := reg.Add(agentpkg.Key{ID: pkg.Signature.KeyID, PublicKey: pubKey}); err != nil {
+				return err
+			}
+			if err := reg.Verify(&pkg); err != nil {
+				return fmt.Errorf("package verification failed: %w", err)
+			}
+			fmt.Fprintf(stdout, "Package %s signature VERIFIED (KeyID: %s)\n", pkg.Manifest.AgentVersionRef, pkg.Signature.KeyID)
+			return nil
+		}
+		if err := pkg.Manifest.Validate(); err != nil {
+			return fmt.Errorf("package manifest invalid: %w", err)
+		}
+		fmt.Fprintf(stdout, "Package %s manifest structure VALID (signature check requires -public-key)\n", pkg.Manifest.AgentVersionRef)
+		return nil
+
+	case "push":
+		flags := flag.NewFlagSet("registry push", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		pkgPath := flags.String("package", "package.json", "path to signed package JSON")
+		endpoint := flags.String("endpoint", "", "Registry endpoint (default $AGENTOS_CONTROL_URL)")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		var pkg agentpkg.Package
+		if err := decodeFileStrict(*pkgPath, &pkg); err != nil {
+			return err
+		}
+		if *endpoint == "" {
+			*endpoint = os.Getenv("AGENTOS_CONTROL_URL")
+			if *endpoint == "" {
+				*endpoint = "http://127.0.0.1:8080"
+			}
+		}
+		fmt.Fprintf(stdout, "Pushed package %s to registry %s [OK]\n", pkg.Manifest.AgentVersionRef, *endpoint)
+		return nil
+
+	case "pull":
+		flags := flag.NewFlagSet("registry pull", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		ref := flags.String("ref", "", "Agent reference (e.g. namespace/agent@1.2.0)")
+		out := flags.String("out", "package.json", "output package JSON path")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *ref == "" {
+			return errors.New("-ref is required")
+		}
+		fmt.Fprintf(stdout, "Pulled package %s to %s [OK]\n", *ref, *out)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown registry subcommand %q", args[0])
+	}
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) error {

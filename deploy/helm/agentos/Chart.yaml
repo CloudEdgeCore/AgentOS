@@ -1,0 +1,18 @@
+apiVersion: v2
+name: agentos
+description: A Helm chart for AgentOS - The Agent Operating System Kernel and Control Plane
+type: application
+version: 1.2.0
+appVersion: "1.2.0"
+keywords:
+  - agentos
+  - ai-agents
+  - operating-system
+  - kernel
+  - orchestration
+home: https://github.com/CloudEdgeCore/AgentOS
+sources:
+  - https://github.com/CloudEdgeCore/AgentOS
+maintainers:
+  - name: AgentOS Maintainers
+    url: https://github.com/CloudEdgeCore/AgentOS

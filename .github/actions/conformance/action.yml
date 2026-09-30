@@ -1,0 +1,68 @@
+name: 'AgentOS Conformance Certification'
+description: 'Certifies that an AI Agent Runtime or Framework complies with the AgentOS Runtime Interface v1 specification.'
+author: 'CloudEdgeCore'
+
+inputs:
+  endpoint:
+    description: 'Existing HTTP endpoint of the running adapter server (e.g. http://127.0.0.1:8088)'
+    required: false
+    default: ''
+  command:
+    description: 'Command to launch candidate adapter process (e.g. "python server.py --port 0")'
+    required: false
+    default: ''
+  timeout:
+    description: 'Maximum time to allow for the conformance suite run (e.g. 2m)'
+    required: false
+    default: '2m'
+  agentos-version:
+    description: 'Version of AgentOS Conformance Suite binary to download or build'
+    required: false
+    default: 'v1.2.0'
+
+outputs:
+  status:
+    description: 'Certification outcome: PASS or FAIL'
+    value: ${{ steps.run-suite.outputs.status }}
+  badge-markdown:
+    description: 'Markdown badge snippet to include in README'
+    value: '[![AgentOS Compatible](https://img.shields.io/badge/AgentOS-Compatible-brightgreen.svg)](https://github.com/CloudEdgeCore/AgentOS)'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go toolchain
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26.x'
+        check-latest: false
+
+    - name: Run Conformance Suite
+      id: run-suite
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        FLAGS=()
+        if [ -n "${{ inputs.endpoint }}" ]; then
+          FLAGS+=(-endpoint "${{ inputs.endpoint }}")
+        fi
+        if [ -n "${{ inputs.command }}" ]; then
+          FLAGS+=(-cmd "${{ inputs.command }}")
+        fi
+        if [ -n "${{ inputs.timeout }}" ]; then
+          FLAGS+=(-timeout "${{ inputs.timeout }}")
+        fi
+
+        echo "=== Executing AgentOS Conformance Suite ==="
+        OUTPUT=$(go run github.com/CloudEdgeCore/AgentOS/cmd/agentos-conformance@${{ inputs.agentos-version }} "${FLAGS[@]}")
+        echo "$OUTPUT"
+
+        if echo "$OUTPUT" | grep -q "AgentOS Compatible = PASS"; then
+          echo "status=PASS" >> "$GITHUB_OUTPUT"
+          echo "::notice title=AgentOS Certified::Runtime verified compatible with AgentOS Kernel! Use badge: [![AgentOS Compatible](https://img.shields.io/badge/AgentOS-Compatible-brightgreen.svg)](https://github.com/CloudEdgeCore/AgentOS)"
+        else
+          echo "status=FAIL" >> "$GITHUB_OUTPUT"
+          echo "::error title=AgentOS Conformance Failed::Candidate runtime failed one or more conformance checks."
+          exit 1
+        fi
