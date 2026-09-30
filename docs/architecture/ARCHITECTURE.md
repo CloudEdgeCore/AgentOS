@@ -129,7 +129,7 @@ External side-effects (third-party API calls, transactions, webhooks) require tr
 
 ## 3. High Availability, Self-Healing, and Soak Invariants
 
-AgentOS is verified under sustained continuous load and chaos conditions (72-hour and 7-day soak tests):
+AgentOS is verified under sustained continuous load and chaos conditions (manual/fixed-host 72-hour and 7-day soak tests completed; scheduled CI reproduction pending self-hosted runners; see [`docs/evidence/soak-process-system-72h-7d.md`](../evidence/soak-process-system-72h-7d.md)):
 - **Zero Lost Tasks**: All tasks reliably reach a verified terminal phase (`COMPLETED`, `FAILED`, `CANCELLED`).
 - **Zero Lost IPC Messages**: Every dispatched message is either acknowledged or available in the mailbox.
 - **Monotonic Fencing Invariant**: Fencing tokens never regress under worker crashes or network partitions.

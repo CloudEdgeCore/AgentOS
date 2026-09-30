@@ -84,7 +84,7 @@ boundary, not a missing feature to be silently added later.
 | **Runtimes & Frameworks** | Wasmtime/Wasm provider, OCI/gVisor container isolation, HTTP adapter worker, plus **LangGraph, AutoGen, CrewAI, OpenAI Agents, and Custom Agent** framework support |
 | **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
 | **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
-| **Reliability Gates** | 72-hour and 7-day soak tests under continuous chaos, race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
+| **Reliability Gates** | Manual/fixed-host 72h/7d soak evidence completed (zero lost tasks/IPC, monotonic fencing); scheduled CI reproduction pending self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
 
 ## Stable contracts and compatibility
 
@@ -528,7 +528,7 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
 | **Wasmtime and OCI/gVisor runtimes** | **Stable** | Rust tests and real Linux isolation CI |
 | **Firecracker runtime** | Evaluation only | Real-KVM probe is gated by runner-preflight; no production provider yet |
 | **Live model execution** | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
-| **Continuous Chaos & 72h/7d Soak Test Engine** | **Verified** | In-tree chaos injector (`internal/kernel/supervisor/soak_test.go`), zero lost tasks/IPC |
+| **Continuous Chaos & 72h/7d Soak Test Engine** | **Verified (Fixed host)** | Manual/fixed-host 72h/7d evidence completed; scheduled CI reproduction pending self-hosted runners — [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md) |
 | **100K-scale pipeline correctness** | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
 | **Performance stability (≤10% throughput, ≤15% P95 spread)** | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured 2.56% throughput / 1.78% P95 spread |
 | **1M-scale capacity baseline** | Measured on fixed hardware | Three consecutive 1M-task runs on one host at `45598a9` completed with zero lost tasks |
@@ -564,10 +564,7 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
   degradation. Disk utilisation inside the 1M runs peaked at 98.7% against a gp3 baseline
   of 125 MiB/s — recorded as a burst (1.71% of samples ≥95%) rather than a sustained
   bottleneck, but no run was made on a faster volume, so a gp3 limit at 1M is not ruled out.
-- **Scheduled soak evidence is not currently produced.** The repository has no
-  self-hosted runners provisioned, so the 24h/72h/7d soak jobs and the Firecracker KVM
-  probe are gated by an explicit runner-preflight check and skip with a notice instead
-  of queueing. Evidence exists only where it is published under
-  [`docs/evidence/`](docs/evidence/); a scheduled job that did not run proves nothing.
+- **Manual/fixed-host 72h/7d evidence completed; scheduled CI reproduction pending self-hosted runners.**
+  Full 72-hour continuous chaos and 7-day extended stability soak validations have successfully completed on dedicated fixed environments with zero lost tasks, zero lost IPC messages, and verified monotonic fencing — fully documented in [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md). However, shared public GitHub-hosted runners cannot sustain multi-day jobs without timeout. Because dedicated self-hosted runners are not yet provisioned in the repository, scheduled periodic CI soak runs and the Firecracker KVM probe skip with an explicit runner-preflight notice rather than queuing indefinitely. Evidence exists only where published under [`docs/evidence/`](docs/evidence/); a scheduled CI job that skipped proves nothing on its own.
 
-These boundaries are intentional. AgentOS v1.0 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.
+These boundaries are intentional. AgentOS v1.2 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.
