@@ -21,7 +21,7 @@ Repository = "https://github.com/CloudEdgeCore/AgentOS"
 Issues = "https://github.com/CloudEdgeCore/AgentOS/issues"
 
 [tool.setuptools]
-packages = ["agentos_runtime"]
+packages = ["agentos_runtime", "agentos_runtime.provider"]
 
 [tool.setuptools.package-data]
 agentos_runtime = ["py.typed"]
