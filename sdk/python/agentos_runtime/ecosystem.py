@@ -32,18 +32,25 @@ class FrameworkAdapterRuntime(AgentRuntime):
         runner_fn: Callable[[Dict[str, Any], AgentOSClient, threading.Event], Any],
         state_serializer: Optional[Callable[[], Dict[str, Any]]] = None,
         state_restorer: Optional[Callable[[Dict[str, Any]], None]] = None,
+        client: Optional[AgentOSClient] = None,
     ) -> None:
         self.framework_name = framework_name
         self.runner_fn = runner_fn
         self.state_serializer = state_serializer
         self.state_restorer = state_restorer
-        self.client = AgentOSClient()
+        self.client = client or AgentOSClient()
 
     def run(self, request: Dict[str, Any], emit: Callable[[str, Any], None], stop_event: threading.Event) -> Any:
         emit(f"{self.framework_name}.starting", {"executionId": request.get("executionId")})
 
         # Resumption check:
-        checkpoint = self.client.checkpoint.restore()
+        checkpoint = None
+        if self.state_restorer:
+            try:
+                checkpoint = self.client.checkpoint.restore()
+            except Exception as err:
+                logger.debug("Checkpoint restore skipped: %s", err)
+
         if checkpoint and self.state_restorer:
             emit(f"{self.framework_name}.restoring", {"checkpoint": True})
             self.state_restorer(checkpoint)
@@ -53,7 +60,10 @@ class FrameworkAdapterRuntime(AgentRuntime):
 
         # Final checkpoint:
         if self.state_serializer:
-            self.client.checkpoint.save(self.state_serializer())
+            try:
+                self.client.checkpoint.save(self.state_serializer())
+            except Exception as err:
+                logger.debug("Checkpoint save skipped: %s", err)
 
         emit(f"{self.framework_name}.completed", {"success": True})
         return result
