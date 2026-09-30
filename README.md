@@ -7,7 +7,7 @@ AgentOS is a control and runtime platform for securely publishing, scheduling, e
 > SemVer / Git tag: [`v1.2.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.2.0)
 >
 > Stable contracts: [v1.2 Contract Freeze](docs/contracts/v1.2-contract-freeze.md) (IPC v1, Service v1, Syscall ABI 1.0.0, Effect v1, Runtime v1, Gateway v1, Control API v1).
-> Architecture & Specification: [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | [Feature Status Matrix](docs/feature-status.md)
+> Architecture & Specification: [User Guide](docs/user-guide.md) | [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | [Feature Status Matrix](docs/feature-status.md) | [Ecosystem Guide](docs/ecosystem/README.md)
 
 AgentOS is not a chat UI, a visual workflow builder, or a managed SaaS product. It addresses the backend systems problems that appear when agents move into production: immutable versions, durable tasks, admission policy, hard budget limits, runtime isolation, multi-tenant identity, tool and model gateways, checkpoints, failure recovery, and auditability.
 

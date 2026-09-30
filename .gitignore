@@ -33,6 +33,7 @@ __pycache__/
 !/docs/releases/
 !/docs/releases/**
 !/docs/feature-status.md
+!/docs/user-guide.md
 
 # Local-only model endpoints and tenant policy overrides (private infra)
 deploy/dev/*.local.json
