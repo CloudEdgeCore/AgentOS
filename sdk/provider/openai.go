@@ -170,11 +170,6 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req GenerateRequest, onChun
 	p.callsCount++
 	p.mu.Unlock()
 
-	model := req.Model
-	if model == "" {
-		model = p.config.Model
-	}
-
 	tokens := []string{"Hello", " from", " OpenAI", " streaming", " runtime!"}
 	id := fmt.Sprintf("chatcmpl-stream-%d", time.Now().UnixNano())
 
