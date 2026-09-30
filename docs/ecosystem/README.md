@@ -179,3 +179,103 @@ This test:
 2. Transmits cross-framework messages via the Kernel Durable Mailbox.
 3. Dispatches guarded side-effects with monotonic fencing tokens.
 4. Injects SIGKILL faults into running instances and verifies supervisor auto-recovery with **zero lost tasks and zero lost messages**.
+
+---
+
+## 6. Unified Provider SDK (Go & Python)
+
+The AgentOS Provider SDK allows external hardware, models, browser engines, and databases to be plugged into AgentOS **without modifying the Kernel**.
+
+### 6.1 Provider Categories
+1. **`ModelProvider`**: Chat completions, function/tool calling, and streaming sessions (`sdk/provider/model.go`).
+2. **`ToolProvider`**: Custom capability tools, parameter validation, and cryptographic audit receipts (`sdk/provider/tool.go`).
+3. **`MemoryProvider`**: Key-value persistence and pgvector semantic vector search (`sdk/provider/memory.go`).
+4. **`BrowserProvider`**: Headless browser automation (navigate, screenshot, click, evaluate) (`sdk/provider/browser.go`).
+5. **`StorageProvider`**: Blob and artifact storage (`sdk/provider/storage.go`).
+6. **`RuntimeProvider`**: Sandbox and container isolation management (`sdk/provider/runtime.go`).
+
+### 6.2 Provider Metadata Contract
+Every Provider must declare:
+```json
+{
+  "name": "openai-provider",
+  "version": "1.0.0",
+  "type": "model",
+  "capabilities": ["model:generate", "model:stream", "model:tools"],
+  "configSchema": { "type": "object", "required": ["apiKey"] },
+  "secrets": ["OPENAI_API_KEY"],
+  "health": { "status": "HEALTHY" },
+  "resourceRequirements": { "cpu": "100m", "memory": "128Mi" }
+}
+```
+
+### 6.3 Reference Providers
+- **`OpenAIProvider`**: [`sdk/provider/openai.go`](../../sdk/provider/openai.go)
+- **`BrowserProvider`**: [`sdk/provider/browser_ref.go`](../../sdk/provider/browser_ref.go)
+- **`PostgresMemoryProvider`**: [`sdk/provider/postgres_memory.go`](../../sdk/provider/postgres_memory.go)
+
+---
+
+## 7. Third-Party Runtime SDK
+
+Based on `agentos.runtime.interface/v1`, third-party runtimes only need to implement 7 lifecycle hooks:
+`health` / `start` / `event` / `result` / `checkpoint` / `restore` / `stop`.
+
+### 7.1 Developer Workflow
+```bash
+# 1. Scaffold a new runtime
+agentos runtime init my-runtime --template docker
+
+# 2. Start the runtime server
+cd my-runtime && go run .
+
+# 3. Test conformance certification
+agentos runtime test http://127.0.0.1:8088
+# Output: AgentOS Compatible = PASS
+```
+
+### 7.2 Official Reference Runtimes
+1. **Docker Runtime**: [`examples/runtimes/docker-runtime`](../../examples/runtimes/docker-runtime) — Container isolation, volume-backed checkpoints.
+2. **Python Runtime**: [`examples/runtimes/python-runtime`](../../examples/runtimes/python-runtime) — Native Python runtime using `agentos_runtime.serve`.
+3. **Remote HTTP Runtime**: [`examples/runtimes/remote-http-runtime`](../../examples/runtimes/remote-http-runtime) — Universal webhook proxy for distributed microservices.
+
+---
+
+## 8. Agent Package Registry & Security Verification Pipeline
+
+AgentOS packages are distributed via OCI registries with signed metadata indexes (`agentos.agentpkg/v1`).
+
+### 8.1 Package Metadata Fields
+- `manifest`: Full agent manifest JSON (`agentos.dev/v1`)
+- `version`: Semver version
+- `oci_digest`: SHA-256 layer hash (`sha256:...`)
+- `signature`: Ed25519 signature & Key ID
+- `sbom`: CycloneDX SBOM digest
+- `syscall_abi_version`: Syscall ABI version (`1.0.0`)
+- `capabilities`: Requested capabilities
+- `runtime_requirements`: CPU, memory, isolation class
+- `publisher`: ID, name, verified status
+- `compatibility`: Min kernel version rule
+
+### 8.2 Developer CLI
+```bash
+agentos login -registry https://registry.agentos.dev -token $REGISTRY_TOKEN
+agentos package build -manifest agent.json -out package.json
+agentos package sign -package package.json -key-id publisher-key -private-key $PRIV_KEY
+agentos package push -package package.signed.json
+agentos package search "sre"
+agentos package verify -package package.signed.json -public-key $PUB_KEY
+agentos package install -package package.signed.json -tenant prod
+```
+
+### 8.3 Mandatory 6-Stage Security Pipeline
+```mermaid
+flowchart TD
+    S1["1. Fetch Package & Metadata"] --> S2["2. Verify Ed25519 Signature"]
+    S2 --> S3["3. Validate SBOM & Layer Digests (SHA-256)"]
+    S3 --> S4["4. Check Syscall ABI Compatibility (1.0.0)"]
+    S4 --> S5["5. Enforce Capability & Admission Policy"]
+    S5 --> S6["6. Create Immutable AgentVersion"]
+```
+
+**Security Invariant**: It is physically impossible for any package from the registry to bypass Admission, Capability grants, or Policy rules. Any failure immediately aborts installation with explicit failure causes.

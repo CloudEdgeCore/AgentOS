@@ -1,0 +1,18 @@
+{
+  "schema": "agentos.dev/v1",
+  "name": "python-runtime",
+  "version": "1.0.0",
+  "runtime": {
+    "provider": "python",
+    "protocolVersion": "agentos.runtime.interface/v1",
+    "endpoint": "http://127.0.0.1:8087",
+    "conformance": {
+      "certified": true,
+      "checks": ["health", "start", "event", "result", "checkpoint", "restore", "stop"]
+    }
+  },
+  "resources": {
+    "cpu": "500m",
+    "memory": "512Mi"
+  }
+}

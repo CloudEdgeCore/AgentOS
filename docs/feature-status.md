@@ -68,6 +68,9 @@ This matrix provides the verified implementation status for all subsystems, prot
 | **CrewAI** | **GA** | Co-located adapter, Runtime Interface v1, Syscall ABI | Yes |
 | **OpenAI Agents SDK**| **GA** | Co-located adapter, Runtime Interface v1, Syscall ABI | Yes |
 | **Custom / In-House**| **GA** | Pure Python/Go/Rust adapter via standard Runtime Protocol | Yes |
+| **Provider SDK (Go/Py)** | **GA** | Model, Tool, Memory, Browser, Storage, Runtime plugin protocols | Yes |
+| **Third-Party Runtime SDK** | **GA** | 7-lifecycle SDK, Docker, Python, Remote HTTP reference runtimes | Yes |
+| **Package Registry & Security** | **GA** | OCI + Metadata Index, 6-stage security pipeline, CLI suite | Yes |
 
 ---
 

@@ -40,13 +40,15 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: agentos <version|init|migrate|validate|package|sign|publish|run|logs|workflow|service|namespace|research|metrics|runtime|conformance|registry> [flags]")
+		return errors.New("usage: agentos <version|init|login|migrate|validate|package|sign|publish|run|logs|workflow|service|namespace|research|metrics|runtime|conformance|registry> [flags]")
 	}
 	switch args[0] {
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
 	case "init":
 		return runInit(args[1:], stdout, stderr)
+	case "login":
+		return runLogin(args[1:], stdout, stderr)
 	case "migrate":
 		return runMigrate(args[1:], stdout, stderr)
 	case "validate":
@@ -384,43 +386,7 @@ func runValidate(args []string, stdout, stderr io.Writer) error {
 }
 
 func runPackage(args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("package", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	path := flags.String("manifest", "agent.json", "Agent Manifest file")
-	out := flags.String("out", "package-manifest.json", "unsigned package manifest output")
-	builder := flags.String("builder", "", "builder identity")
-	workflow := flags.String("workflow", "", "workflow identity")
-	commit := flags.String("git-commit", "", "source commit")
-	builtAtText := flags.String("built-at", "", "RFC3339 build timestamp")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *builder == "" || *workflow == "" || *commit == "" || *builtAtText == "" {
-		return errors.New("-builder, -workflow, -git-commit and -built-at are required")
-	}
-	builtAt, err := time.Parse(time.RFC3339, *builtAtText)
-	if err != nil {
-		return err
-	}
-	manifest, _, _, err := loadManifest(*path)
-	if err != nil {
-		return err
-	}
-	unsigned, err := agentpkg.FromAgentManifest(manifest, agentpkg.Provenance{
-		Builder: *builder, BuildWorkflow: *workflow, GitCommit: *commit, BuiltAt: builtAt.UTC(),
-	})
-	if err != nil {
-		return err
-	}
-	encoded, err := json.Marshal(unsigned)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(*out, encoded, 0o600); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "package manifest written to %s\n", *out)
-	return nil
+	return runPackageCmd(args, stdout, stderr)
 }
 
 func runSignPackage(args []string, stdout, stderr io.Writer) error {

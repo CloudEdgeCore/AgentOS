@@ -82,6 +82,9 @@ boundary, not a missing feature to be silently added later.
 | **External Effect Engine** | Monotonic lease fencing, SHA-256 idempotency protection, and non-replayable `UNKNOWN` ambiguous outcome isolation |
 | **Scheduling and recovery** | Admission, default-deny Rego policy, effective-capacity placement with ranked-candidate fallback, leases, fencing tokens, backoff, and orphan recovery |
 | **Runtimes & Frameworks** | Wasmtime/Wasm provider, OCI/gVisor container isolation, HTTP adapter worker, plus **LangGraph, AutoGen, CrewAI, OpenAI Agents, and Custom Agent** framework support |
+| **Unified Provider SDK** | Plugin protocol for Model, Tool, Memory, Browser, Storage, and Runtime with dynamic registry and zero kernel modifications (`sdk/provider/`) |
+| **Third-Party Runtime SDK** | 7-lifecycle-hook Runtime SDK (`sdk/runtimesdk/`), CLI scaffolding (`agentos runtime init/test`), and 3 official runtimes (Docker, Python, Remote HTTP) |
+| **Agent Package Registry** | OCI + Metadata Index, `agentos login/package <build|sign|push|search|verify|install>`, and mandatory 6-stage security gate (`internal/kernel/agentpkg/`) |
 | **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
 | **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
 | **Reliability Gates** | **Manual/fixed-host evidence complete**: 72h continuous chaos & 7d extended soak verified (zero lost tasks/IPC, monotonic fencing); **Scheduled CI evidence pending**: Multi-day CI reproduction awaits self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
@@ -189,6 +192,61 @@ AgentOS supports running heterogeneous frameworks side-by-side on the same kerne
 - **Custom Enterprise Agent**: [`adapters/custom_agent`](adapters/custom_agent) & [`examples/agents/custom`](examples/agents/custom)
 
 See the comprehensive [Multi-Framework Ecosystem Guide](docs/ecosystem/README.md) for architectural patterns, durable IPC mailbox communication, and external side-effect fencing across frameworks.
+
+### Unified Provider Plugin Protocol
+
+AgentOS provides a unified plugin protocol allowing third-party hardware, models, tools, and storage to be integrated **without modifying the Kernel**:
+
+- **ModelProvider**: LLM completions, function calling, streaming (`sdk/provider/model.go`)
+- **ToolProvider**: Callable capability tools and audit receipts (`sdk/provider/tool.go`)
+- **MemoryProvider**: Persistent KV state & pgvector semantic search (`sdk/provider/memory.go`)
+- **BrowserProvider**: Headless automation (navigate, screenshot, click) (`sdk/provider/browser.go`)
+- **StorageProvider**: Blob & artifact storage (`sdk/provider/storage.go`)
+- **RuntimeProvider**: Isolated process and sandbox management (`sdk/provider/runtime.go`)
+
+Reference implementations:
+- **`OpenAIProvider`**: [`sdk/provider/openai.go`](sdk/provider/openai.go)
+- **`BrowserProvider`**: [`sdk/provider/browser_ref.go`](sdk/provider/browser_ref.go)
+- **`PostgresMemoryProvider`**: [`sdk/provider/postgres_memory.go`](sdk/provider/postgres_memory.go)
+
+### Third-Party Runtime SDK & Scaffolding
+
+Third-party runtime adapters only need to implement 7 lifecycle hooks:
+`health` / `start` / `event` / `result` / `checkpoint` / `restore` / `stop`
+
+```bash
+# 1. Scaffold a new runtime
+agentos runtime init my-runtime --template docker
+
+# 2. Test conformance certification
+agentos runtime test http://127.0.0.1:8088
+# Output: AgentOS Compatible = PASS
+```
+
+Official reference runtimes:
+- **Docker Runtime**: [`examples/runtimes/docker-runtime`](examples/runtimes/docker-runtime)
+- **Python Runtime**: [`examples/runtimes/python-runtime`](examples/runtimes/python-runtime)
+- **Remote HTTP Runtime**: [`examples/runtimes/remote-http-runtime`](examples/runtimes/remote-http-runtime)
+
+### Agent Package Registry & Security Verification Pipeline
+
+Agent packages are distributed via OCI registries with signed metadata indexes (`agentos.agentpkg/v1`):
+
+```bash
+agentos login -registry https://registry.agentos.dev -token $REGISTRY_TOKEN
+agentos package build -manifest agent.json -out package.json
+agentos package sign -package package.json -key-id key-1 -private-key $PRIV_KEY
+agentos package push -package package.signed.json
+agentos package search "sre"
+agentos package verify -package package.signed.json -public-key $PUB_KEY
+agentos package install -package package.signed.json -tenant default
+```
+
+**Mandatory 6-Stage Security Pipeline**:
+```
+Registry Fetch → Verify Signature → Verify SBOM / Digest → Check ABI Compatibility → Check Capability → Create AgentVersion
+```
+*Security Invariant: It is strictly forbidden for any package to bypass Admission, Capability grants, or Policy rules.*
 
 ### Start local control-plane infrastructure
 

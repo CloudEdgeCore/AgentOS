@@ -19,6 +19,24 @@ from .ecosystem import (
 from .host import AgentRuntime, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, RuntimeHost, serve
 from .mcp_client import MCPClient, MCPError, MCPToolError
 from .realagent import RealAgent
+from .provider import (
+    Provider,
+    ProviderManifest,
+    ProviderRegistry,
+    ProviderType,
+    HealthStatus,
+    ResourceRequirements,
+    ModelProvider,
+    ToolProvider,
+    MemoryProvider,
+    BrowserProvider,
+    StorageProvider,
+    RuntimeProvider,
+    OpenAIProvider,
+    BrowserProviderRef,
+    PostgresMemoryProvider,
+    default_registry,
+)
 
 __all__ = [
     "AgentOSClient",
@@ -44,5 +62,21 @@ __all__ = [
     "MCPError",
     "MCPToolError",
     "RealAgent",
+    "Provider",
+    "ProviderManifest",
+    "ProviderRegistry",
+    "ProviderType",
+    "HealthStatus",
+    "ResourceRequirements",
+    "ModelProvider",
+    "ToolProvider",
+    "MemoryProvider",
+    "BrowserProvider",
+    "StorageProvider",
+    "RuntimeProvider",
+    "OpenAIProvider",
+    "BrowserProviderRef",
+    "PostgresMemoryProvider",
+    "default_registry",
 ]
 __version__ = "1.2.0"

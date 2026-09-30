@@ -1,0 +1,18 @@
+{
+  "schema": "agentos.dev/v1",
+  "name": "docker-runtime",
+  "version": "1.0.0",
+  "runtime": {
+    "provider": "docker",
+    "protocolVersion": "agentos.runtime.interface/v1",
+    "endpoint": "http://127.0.0.1:8089",
+    "conformance": {
+      "certified": true,
+      "checks": ["health", "start", "event", "result", "checkpoint", "restore", "stop"]
+    }
+  },
+  "resources": {
+    "cpu": "1000m",
+    "memory": "1024Mi"
+  }
+}
