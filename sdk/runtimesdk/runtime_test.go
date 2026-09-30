@@ -65,9 +65,13 @@ func (m *mockRuntimeHandler) Start(ctx context.Context, req agent.StartRequest) 
 			OccurredAt: now,
 		},
 	}
+	status := agent.StatusSucceeded
+	if string(req.Input) == `{"blockUntilStopped":true}` {
+		status = agent.StatusRunning
+	}
 	m.results[req.ExecutionID] = agent.Result{
 		ExecutionID: req.ExecutionID,
-		Status:      agent.StatusSucceeded,
+		Status:      status,
 		Output:      json.RawMessage(`{"result":"completed"}`),
 		CompletedAt: &now,
 	}

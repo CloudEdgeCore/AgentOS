@@ -153,9 +153,9 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 			ToolCalls: toolCalls,
 		},
 		Usage: Usage{
-			PromptTokens:     len(lastMsg) / 4 + 10,
-			CompletionTokens: len(replyContent) / 4 + 5,
-			TotalTokens:      (len(lastMsg) + len(replyContent)) / 4 + 15,
+			PromptTokens:     len(lastMsg)/4 + 10,
+			CompletionTokens: len(replyContent)/4 + 5,
+			TotalTokens:      (len(lastMsg)+len(replyContent))/4 + 15,
 		},
 		FinishReason: finishReason,
 	}, nil

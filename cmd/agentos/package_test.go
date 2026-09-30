@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
 )
@@ -21,16 +20,49 @@ func TestPackageCLILifecycleAndSecurityGates(t *testing.T) {
 
 	// 1. Create a valid test manifest
 	manifestContent := `{
-  "schema": "agentos.dev/v1",
-  "name": "cli-test-agent",
-  "version": "1.0.0",
-  "entrypoint": "main.py",
-  "capabilities": {
-    "tools": ["calculator"],
-    "models": ["gpt-4o"],
-    "secrets": ["MOCK_KEY"]
+  "apiVersion": "agentos.dev/v1",
+  "kind": "AgentManifest",
+  "metadata": {
+    "name": "cli-test-agent",
+    "version": "1.0.0",
+    "namespace": "default"
   },
-  "runtimes": ["python-remote"]
+  "spec": {
+    "runtimeClassPolicy": {
+      "allowed": ["oci"],
+      "preferred": "oci"
+    },
+    "runtimes": [
+      {
+        "class": "oci",
+        "interface": "agentos.runtime.interface/v1",
+        "runtimeABI": "agentos.oci/v1",
+        "entrypoint": ["/agent/bin/run"]
+      }
+    ],
+    "capabilities": {
+      "tools": ["calculator"],
+      "models": ["gpt-4o"],
+      "secrets": ["MOCK_KEY"],
+      "memory": []
+    },
+    "resources": {
+      "cpuMillis": 500,
+      "memoryMiB": 512,
+      "workspaceBytes": 67108864
+    },
+    "budget": {
+      "tokens": 100000,
+      "costUsd": 10.0,
+      "toolCalls": 100,
+      "wallSeconds": 3600
+    },
+    "checkpoint": {
+      "mode": "logical",
+      "schemaVersion": "test-state/v1",
+      "intervalSeconds": 30
+    }
+  }
 }`
 	manifestPath := filepath.Join(tempDir, "agent.json")
 	if err := os.WriteFile(manifestPath, []byte(manifestContent), 0o644); err != nil {

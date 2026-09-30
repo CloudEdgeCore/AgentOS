@@ -8,11 +8,11 @@ import (
 
 // RuntimeStartRequest specifies the container, binary, or WASM component to launch.
 type RuntimeStartRequest struct {
-	ExecutionID      string            `json:"executionId"`
-	ImageOrArtifact  string            `json:"imageOrArtifact"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	ResourceLimits   ResourceRequirements `json:"resourceLimits,omitempty"`
-	Entrypoint       []string          `json:"entrypoint,omitempty"`
+	ExecutionID     string               `json:"executionId"`
+	ImageOrArtifact string               `json:"imageOrArtifact"`
+	Environment     map[string]string    `json:"environment,omitempty"`
+	ResourceLimits  ResourceRequirements `json:"resourceLimits,omitempty"`
+	Entrypoint      []string             `json:"entrypoint,omitempty"`
 }
 
 // RuntimeStartResponse returns launch metadata.
@@ -24,9 +24,9 @@ type RuntimeStartResponse struct {
 
 // RuntimeStatusResponse returns current execution health.
 type RuntimeStatusResponse struct {
-	ExecutionID string    `json:"executionId"`
-	State       string    `json:"state"` // RUNNING, STOPPED, FAILED
-	ExitCode    int       `json:"exitCode,omitempty"`
+	ExecutionID   string             `json:"executionId"`
+	State         string             `json:"state"` // RUNNING, STOPPED, FAILED
+	ExitCode      int                `json:"exitCode,omitempty"`
 	ResourceUsage map[string]float64 `json:"resourceUsage,omitempty"`
 }
 

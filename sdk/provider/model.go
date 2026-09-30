@@ -7,17 +7,17 @@ import (
 
 // Message represents a prompt turn in chat completions.
 type Message struct {
-	Role    string          `json:"role"` // system, user, assistant, tool
-	Content string          `json:"content"`
-	Name    string          `json:"name,omitempty"`
-	ToolCalls []ToolCall    `json:"toolCalls,omitempty"`
+	Role      string     `json:"role"` // system, user, assistant, tool
+	Content   string     `json:"content"`
+	Name      string     `json:"name,omitempty"`
+	ToolCalls []ToolCall `json:"toolCalls,omitempty"`
 }
 
 // ToolCall represents an assistant-requested tool invocation.
 type ToolCall struct {
-	ID        string          `json:"id"`
-	Type      string          `json:"type"` // function
-	Function  FunctionCall    `json:"function"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"` // function
+	Function FunctionCall `json:"function"`
 }
 
 // FunctionCall describes the function and JSON arguments.
@@ -28,12 +28,12 @@ type FunctionCall struct {
 
 // GenerateRequest defines inputs to a language model invocation.
 type GenerateRequest struct {
-	Model       string          `json:"model"`
-	Messages    []Message       `json:"messages"`
-	Temperature float32         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"maxTokens,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []Message        `json:"messages"`
+	Temperature float32          `json:"temperature,omitempty"`
+	MaxTokens   int              `json:"maxTokens,omitempty"`
 	Tools       []ToolDefinition `json:"tools,omitempty"`
-	Stop        []string        `json:"stop,omitempty"`
+	Stop        []string         `json:"stop,omitempty"`
 }
 
 // Usage reports token consumption for budget accounting.
@@ -45,19 +45,19 @@ type Usage struct {
 
 // GenerateResponse captures the completion result.
 type GenerateResponse struct {
-	ID        string    `json:"id"`
-	Model     string    `json:"model"`
-	Message   Message   `json:"message"`
-	Usage     Usage     `json:"usage"`
-	FinishReason string `json:"finishReason"` // stop, length, tool_calls
+	ID           string  `json:"id"`
+	Model        string  `json:"model"`
+	Message      Message `json:"message"`
+	Usage        Usage   `json:"usage"`
+	FinishReason string  `json:"finishReason"` // stop, length, tool_calls
 }
 
 // StreamChunk conveys one delta in streaming model execution.
 type StreamChunk struct {
-	ID           string   `json:"id"`
-	DeltaContent string   `json:"deltaContent,omitempty"`
+	ID           string     `json:"id"`
+	DeltaContent string     `json:"deltaContent,omitempty"`
 	ToolCalls    []ToolCall `json:"toolCalls,omitempty"`
-	FinishReason string   `json:"finishReason,omitempty"`
+	FinishReason string     `json:"finishReason,omitempty"`
 }
 
 // ModelProvider provides text generation and streaming model capabilities.

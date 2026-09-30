@@ -83,9 +83,13 @@ func EncodePublicKey(key ed25519.PublicKey) string {
 	return base64.RawStdEncoding.EncodeToString(key)
 }
 
-// DecodePublicKey parses a base64 raw std public key.
+// DecodePublicKey parses a base64 raw std or standard public key.
 func DecodePublicKey(encoded string) (ed25519.PublicKey, error) {
-	decoded, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(encoded))
+	trimmed := strings.TrimSpace(encoded)
+	decoded, err := base64.RawStdEncoding.DecodeString(trimmed)
+	if err != nil {
+		decoded, err = base64.StdEncoding.DecodeString(trimmed)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("decode package public key: %w", err)
 	}
@@ -95,9 +99,13 @@ func DecodePublicKey(encoded string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(decoded), nil
 }
 
-// DecodePrivateKey parses a base64 raw std private key for the signing CLI.
+// DecodePrivateKey parses a base64 raw std or standard private key for the signing CLI.
 func DecodePrivateKey(encoded string) (ed25519.PrivateKey, error) {
-	decoded, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(encoded))
+	trimmed := strings.TrimSpace(encoded)
+	decoded, err := base64.RawStdEncoding.DecodeString(trimmed)
+	if err != nil {
+		decoded, err = base64.StdEncoding.DecodeString(trimmed)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("decode package private key: %w", err)
 	}

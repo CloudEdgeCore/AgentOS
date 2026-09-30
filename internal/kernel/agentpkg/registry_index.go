@@ -61,11 +61,11 @@ type MetadataIndex struct {
 
 // SecurityInstallRequest carries inputs for the 6-stage security gate.
 type SecurityInstallRequest struct {
-	Package            *Package
-	ExpectedKeyID      string
+	Package             *Package
+	ExpectedKeyID       string
 	AllowedCapabilities map[string]bool
-	TenantID           string
-	DryRun             bool
+	TenantID            string
+	DryRun              bool
 }
 
 // SecurityInstallResult details the outcome of every security verification stage.

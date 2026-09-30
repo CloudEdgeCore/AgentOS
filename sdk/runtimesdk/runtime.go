@@ -5,8 +5,11 @@ package runtimesdk
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/sdk/agent"
@@ -27,140 +30,215 @@ type LifecycleHandler interface {
 // HandlerToHTTP creates an http.Handler serving the agentos.runtime.interface/v1 specification
 // from a LifecycleHandler implementation.
 func HandlerToHTTP(h LifecycleHandler) http.Handler {
-	mux := http.NewServeMux()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		trimmed := path
+		if strings.HasPrefix(path, "/v1/") {
+			trimmed = strings.TrimPrefix(path, "/v1")
+		} else if strings.HasPrefix(path, "/v1alpha1/") {
+			trimmed = strings.TrimPrefix(path, "/v1alpha1")
+		}
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		resp, err := h.Health(r.Context())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
-
-	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req agent.StartRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		// Capability verification: default-deny capabilities
-		if req.Capabilities.Secrets == nil {
-			http.Error(w, "implicit capabilities denied: secrets array cannot be nil", http.StatusUnprocessableEntity)
-			return
-		}
-		resp, err := h.Start(r.Context(), req)
-		if err != nil {
-			if err == agent.ErrExecutionConflict {
-				http.Error(w, err.Error(), http.StatusConflict)
+		switch {
+		case r.Method == http.MethodGet && (trimmed == "/health" || path == "/health" || path == "/v1/health"):
+			resp, err := h.Health(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+			writeJSON(w, http.StatusOK, resp)
 
-	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		executionID := r.URL.Query().Get("executionId")
-		afterStr := r.URL.Query().Get("after")
-		var after int64
-		if afterStr != "" {
-			fmt.Sscanf(afterStr, "%d", &after)
-		}
-		resp, err := h.Event(r.Context(), executionID, after)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+		case r.Method == http.MethodPost && (trimmed == "/executions:start" || path == "/start" || path == "/v1/executions:start"):
+			var req agent.StartRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			// Capability verification: default-deny capabilities
+			if req.Capabilities.Secrets == nil {
+				writeError(w, http.StatusUnprocessableEntity, errors.New("implicit capabilities denied: secrets array cannot be nil"))
+				return
+			}
+			resp, err := h.Start(r.Context(), req)
+			if err != nil {
+				if errors.Is(err, agent.ErrExecutionConflict) {
+					writeError(w, http.StatusConflict, err)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, resp)
 
-	mux.HandleFunc("/result", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		executionID := r.URL.Query().Get("executionId")
-		resp, err := h.Result(r.Context(), executionID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+		case strings.HasPrefix(trimmed, "/executions/"):
+			rest := strings.TrimPrefix(trimmed, "/executions/")
+			var executionID, action string
+			if idx := strings.Index(rest, ":"); idx != -1 {
+				executionID = rest[:idx]
+				action = rest[idx:]
+			} else if idx := strings.Index(rest, "/"); idx != -1 {
+				executionID = rest[:idx]
+				action = rest[idx+1:]
+			} else {
+				executionID = rest
+			}
+			unescapedID, err := url.PathUnescape(executionID)
+			if err == nil && unescapedID != "" {
+				executionID = unescapedID
+			}
 
-	mux.HandleFunc("/checkpoint", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			ExecutionID string `json:"executionId"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		resp, err := h.Checkpoint(r.Context(), req.ExecutionID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+			switch {
+			case r.Method == http.MethodPost && action == ":stop":
+				resp, err := h.Stop(r.Context(), executionID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+				writeJSON(w, http.StatusAccepted, resp)
 
-	mux.HandleFunc("/restore", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req agent.RestoreRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		resp, err := h.Restore(r.Context(), req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+			case r.Method == http.MethodPost && action == ":checkpoint":
+				resp, err := h.Checkpoint(r.Context(), executionID)
+				if err != nil {
+					if errors.Is(err, agent.ErrExecutionNotFound) {
+						writeError(w, http.StatusNotFound, err)
+						return
+					}
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, resp)
 
-	mux.HandleFunc("/stop", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			ExecutionID string `json:"executionId"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		resp, err := h.Stop(r.Context(), req.ExecutionID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+			case r.Method == http.MethodPost && action == ":restore":
+				var req agent.RestoreRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					writeError(w, http.StatusBadRequest, err)
+					return
+				}
+				resp, err := h.Restore(r.Context(), req)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, resp)
 
-	return mux
+			case r.Method == http.MethodGet && action == "events":
+				afterStr := r.URL.Query().Get("after")
+				var after int64
+				if afterStr != "" {
+					parsed, _ := strconv.ParseInt(afterStr, 10, 64)
+					after = parsed
+				}
+				resp, err := h.Event(r.Context(), executionID, after)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, resp)
+
+			case r.Method == http.MethodGet && action == "result":
+				resp, err := h.Result(r.Context(), executionID)
+				if err != nil {
+					if errors.Is(err, agent.ErrExecutionNotFound) {
+						writeError(w, http.StatusNotFound, err)
+						return
+					}
+					writeError(w, http.StatusInternalServerError, err)
+					return
+				}
+				if resp.Status == agent.StatusAccepted || resp.Status == agent.StatusRunning {
+					writeJSON(w, http.StatusAccepted, resp)
+					return
+				}
+				writeJSON(w, http.StatusOK, resp)
+
+			default:
+				writeError(w, http.StatusNotFound, errors.New("route not found"))
+			}
+
+		// Simple flat endpoints for development convenience
+		case r.Method == http.MethodGet && path == "/events":
+			executionID := r.URL.Query().Get("executionId")
+			afterStr := r.URL.Query().Get("after")
+			var after int64
+			if afterStr != "" {
+				parsed, _ := strconv.ParseInt(afterStr, 10, 64)
+				after = parsed
+			}
+			resp, err := h.Event(r.Context(), executionID, after)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		case r.Method == http.MethodGet && path == "/result":
+			executionID := r.URL.Query().Get("executionId")
+			resp, err := h.Result(r.Context(), executionID)
+			if err != nil {
+				if errors.Is(err, agent.ErrExecutionNotFound) {
+					writeError(w, http.StatusNotFound, err)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if resp.Status == agent.StatusAccepted || resp.Status == agent.StatusRunning {
+				writeJSON(w, http.StatusAccepted, resp)
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		case r.Method == http.MethodPost && path == "/checkpoint":
+			var req struct {
+				ExecutionID string `json:"executionId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			resp, err := h.Checkpoint(r.Context(), req.ExecutionID)
+			if err != nil {
+				if errors.Is(err, agent.ErrExecutionNotFound) {
+					writeError(w, http.StatusNotFound, err)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		case r.Method == http.MethodPost && path == "/restore":
+			var req agent.RestoreRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			resp, err := h.Restore(r.Context(), req)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		case r.Method == http.MethodPost && path == "/stop":
+			var req struct {
+				ExecutionID string `json:"executionId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			resp, err := h.Stop(r.Context(), req.ExecutionID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, resp)
+
+		default:
+			writeError(w, http.StatusNotFound, errors.New("route not found"))
+		}
+	})
 }
 
 // Serve starts an HTTP server for the given LifecycleHandler on the specified address.
@@ -174,7 +252,18 @@ func Serve(h LifecycleHandler, addr string) error {
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("AgentOS-Runtime-Interface", agent.ProtocolVersion)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func writeError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("AgentOS-Runtime-Interface", agent.ProtocolVersion)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":  err.Error(),
+		"status": status,
+	})
 }

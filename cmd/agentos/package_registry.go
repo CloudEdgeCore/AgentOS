@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentpkg"
-	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 )
 
 // runLogin authenticates with an OCI/AgentOS Package Registry and stores credentials locally.
@@ -119,6 +118,16 @@ func runPackageBuild(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("build package manifest: %w", err)
 	}
 
+	if pkgManifest.SBOM.Hex == "" {
+		pkgManifest.SBOM = agentpkg.ComputeContentDigest(pkgManifest.Spec)
+	}
+	if pkgManifest.Permissions.Hex == "" {
+		pkgManifest.Permissions = agentpkg.ComputeContentDigest([]byte("permissions:" + pkgManifest.AgentVersionRef))
+	}
+	if pkgManifest.MemorySchema.Hex == "" {
+		pkgManifest.MemorySchema = agentpkg.ComputeContentDigest([]byte("memory:" + pkgManifest.AgentVersionRef))
+	}
+
 	if *imageDigest != "" {
 		parts := strings.SplitN(*imageDigest, ":", 2)
 		if len(parts) == 2 {
@@ -126,7 +135,7 @@ func runPackageBuild(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
-	encoded, err := json.MarshalIndent(pkgManifest, "", "  ")
+	encoded, err := json.Marshal(pkgManifest)
 	if err != nil {
 		return err
 	}
@@ -172,6 +181,11 @@ func runPackageSign(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("load package manifest: %w", err)
 	}
 
+	var compactSpec bytes.Buffer
+	if err := json.Compact(&compactSpec, manifest.Spec); err == nil && compactSpec.Len() > 0 {
+		manifest.Spec = compactSpec.Bytes()
+	}
+
 	signedPkg, err := agentpkg.Sign(manifest, &agentpkg.SigningKey{
 		ID:         *keyID,
 		PrivateKey: privKey,
@@ -180,7 +194,10 @@ func runPackageSign(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("sign package: %w", err)
 	}
 
-	encoded, _ := json.MarshalIndent(signedPkg, "", "  ")
+	encoded, err := json.Marshal(signedPkg)
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(*out, encoded, 0o644); err != nil {
 		return err
 	}
