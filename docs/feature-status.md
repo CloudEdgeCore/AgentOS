@@ -75,7 +75,7 @@ This matrix provides the verified implementation status for all subsystems, prot
 
 | Quality Gate | Evidence / Environment | Invariant Enforced | Status |
 | :--- | :--- | :--- | :---: |
-| **72-Hour Soak Engine** | Dedicated fixed-host environment (`soak_test.go`) | Zero lost tasks, zero lost IPC messages, monotonic fencing | **PASS (Fixed host)**; scheduled CI reproduction pending self-hosted runners ([Evidence](evidence/soak-process-system-72h-7d.md)) |
-| **7-Day Extended Soak** | Dedicated fixed-host environment | Memory/goroutine leak-free, connection pool stability | **PASS (Fixed host)**; scheduled CI reproduction pending self-hosted runners ([Evidence](evidence/soak-process-system-72h-7d.md)) |
+| **72-Hour Soak Engine** | Dedicated fixed-host environment (`soak_test.go`) | Zero lost tasks, zero lost IPC messages, monotonic fencing | **Manual Evidence: PASS**; Scheduled CI: Pending self-hosted runners ([Evidence](evidence/soak-process-system-72h-7d.md)) |
+| **7-Day Extended Soak** | Dedicated fixed-host environment | Memory/goroutine leak-free, connection pool stability | **Manual Evidence: PASS**; Scheduled CI: Pending self-hosted runners ([Evidence](evidence/soak-process-system-72h-7d.md)) |
 | **Chaos Fault Injector**| In-tree chaos harness | Worker kills, lease expirations, database reconnects | **PASS** |
 | **TLA+ Liveness Proofs**| TLC Model Checker | Guaranteed convergence to terminal phase without deadlocks | **PASS** |

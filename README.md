@@ -84,7 +84,7 @@ boundary, not a missing feature to be silently added later.
 | **Runtimes & Frameworks** | Wasmtime/Wasm provider, OCI/gVisor container isolation, HTTP adapter worker, plus **LangGraph, AutoGen, CrewAI, OpenAI Agents, and Custom Agent** framework support |
 | **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
 | **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
-| **Reliability Gates** | Manual/fixed-host 72h/7d soak evidence completed (zero lost tasks/IPC, monotonic fencing); scheduled CI reproduction pending self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
+| **Reliability Gates** | **Manual/fixed-host evidence complete**: 72h continuous chaos & 7d extended soak verified (zero lost tasks/IPC, monotonic fencing); **Scheduled CI evidence pending**: Multi-day CI reproduction awaits self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
 
 ## Stable contracts and compatibility
 
@@ -484,7 +484,7 @@ The official release workflow runs the GA gates and generates:
 Download and verify all release assets:
 
 ```shell
-gh release download v1.1.0 --repo CloudEdgeCore/AgentOS
+gh release download v1.2.0 --repo CloudEdgeCore/AgentOS
 sha256sum -c checksums.txt
 ```
 
@@ -528,7 +528,7 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
 | **Wasmtime and OCI/gVisor runtimes** | **Stable** | Rust tests and real Linux isolation CI |
 | **Firecracker runtime** | Evaluation only | Real-KVM probe is gated by runner-preflight; no production provider yet |
 | **Live model execution** | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
-| **Continuous Chaos & 72h/7d Soak Test Engine** | **Verified (Fixed host)** | Manual/fixed-host 72h/7d evidence completed; scheduled CI reproduction pending self-hosted runners — [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md) |
+| **Continuous Chaos & 72h/7d Soak Test Engine** | **Manual: Verified**<br>Scheduled CI: Pending | **Manual evidence complete**: 72h continuous chaos and 7d extended soak passed on dedicated fixed host with zero lost tasks/IPC and monotonic fencing — [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md); **Scheduled CI evidence**: Not yet produced on public runners (multi-day jobs exceed 6h timeout; pending self-hosted runners) |
 | **100K-scale pipeline correctness** | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
 | **Performance stability (≤10% throughput, ≤15% P95 spread)** | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured 2.56% throughput / 1.78% P95 spread |
 | **1M-scale capacity baseline** | Measured on fixed hardware | Three consecutive 1M-task runs on one host at `45598a9` completed with zero lost tasks |
@@ -564,7 +564,9 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
   degradation. Disk utilisation inside the 1M runs peaked at 98.7% against a gp3 baseline
   of 125 MiB/s — recorded as a burst (1.71% of samples ≥95%) rather than a sustained
   bottleneck, but no run was made on a faster volume, so a gp3 limit at 1M is not ruled out.
-- **Manual/fixed-host 72h/7d evidence completed; scheduled CI reproduction pending self-hosted runners.**
-  Full 72-hour continuous chaos and 7-day extended stability soak validations have successfully completed on dedicated fixed environments with zero lost tasks, zero lost IPC messages, and verified monotonic fencing — fully documented in [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md). However, shared public GitHub-hosted runners cannot sustain multi-day jobs without timeout. Because dedicated self-hosted runners are not yet provisioned in the repository, scheduled periodic CI soak runs and the Firecracker KVM probe skip with an explicit runner-preflight notice rather than queuing indefinitely. Evidence exists only where published under [`docs/evidence/`](docs/evidence/); a scheduled CI job that skipped proves nothing on its own.
+- **Explicit distinction between manual/fixed-host evidence and scheduled CI evidence for soak testing.**
+  To maintain strict rigor between test execution environments:
+  - **Manual/fixed-host evidence is completed and verified**: Comprehensive 72-hour continuous chaos and 7-day extended stability soak validations have successfully run to completion on dedicated fixed hosts with zero lost tasks, zero lost IPC messages, zero connection pool degradation, and verified monotonic fencing — fully documented in [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md).
+  - **Scheduled CI evidence has not yet been produced**: Shared GitHub-hosted public runners enforce a strict 6-hour job execution ceiling and cannot sustain multi-day soaking. Because dedicated self-hosted runners are not yet provisioned in the repository, scheduled periodic CI soak workflows and the Firecracker KVM probe skip with an explicit runner-preflight notice rather than timing out. Evidence exists only where published under [`docs/evidence/`](docs/evidence/); a scheduled CI job that skipped proves nothing on its own, and only manual fixed-host evidence is claimed for v1.2.
 
 These boundaries are intentional. AgentOS v1.2 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.
