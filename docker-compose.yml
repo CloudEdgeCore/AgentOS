@@ -1,0 +1,54 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: agentos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agentos
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: agentos-secret-change-in-production
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos -d agentos"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.14-alpine
+    container_name: agentos-nats
+    restart: unless-stopped
+    command: ["--jetstream"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+
+  agentos-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentos-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      AGENTOS_DATABASE_URL: postgres://agentos:agentos-secret-change-in-production@postgres:5432/agentos?sslmode=disable
+      AGENTOS_NATS_URL: nats://nats:4222
+      AGENTOS_LOG_LEVEL: info
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+  nats-data:

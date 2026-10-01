@@ -19,6 +19,7 @@ from .ecosystem import (
 from .host import AgentRuntime, LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, RuntimeHost, serve
 from .mcp_client import MCPClient, MCPError, MCPToolError
 from .realagent import RealAgent
+from .easy import Agent, ExecutionResult
 from .provider import (
     Provider,
     ProviderManifest,

@@ -36,6 +36,10 @@ func main() {
 		runInit(args)
 	case "demo":
 		runDemo(args)
+	case "mcp":
+		runMCP(args)
+	case "ui", "dashboard":
+		runUI(args)
 	case "run":
 		runAgent(args)
 	case "help", "-h", "--help":
@@ -57,6 +61,8 @@ Core Commands:
   config set <K> <V>   Set configuration value using dot notation
   config env <name>    Switch active environment profile (development, staging, production)
   test-llm             Verify model connectivity, latency, and streaming reasoning
+  mcp                  Manage Model Context Protocol (MCP) tool adapters
+  ui                   Launch embedded Web Control-Plane dashboard
   init <name>          Scaffold a new enterprise Agent project
   run <path>           Run an Agent manifest and record audit ledger
   demo <name>          Execute demo scenario (fault or quality)
@@ -73,6 +79,8 @@ Examples:
   agent config
   agent config set llm.default_provider deepseek
   agent test-llm
+  agent mcp list
+  agent ui
   agent demo quality
 `)
 }
