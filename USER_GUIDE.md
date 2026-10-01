@@ -17,8 +17,8 @@ The comprehensive **AgentOS User Guide & Developer Manual** is maintained in:
 - [7. 常驻服务与 Supervisor 进程监管 (AgentService, rolling upgrade, drain)](docs/user-guide.md#7-常驻服务与-supervisor-进程监管)
 - [8. 跨 Agent 通信 (Durable IPC, at-least-once, mailbox)](docs/user-guide.md#8-跨-agent-通信-durable-ipc)
 - [9. 外部副作用引擎 (External Effect Engine, fencing tokens, idempotency)](docs/user-guide.md#9-外部副作用引擎-external-effect-engine)
-- [10. 多 Agent 工作流 DAG 编排 (workflow run, workflow tree)](docs/user-guide.md#10-多-agent-工作流-dag-编排)
-- [11. 多租户治理、安全与审计 (namespace, OPA Rego policy, audit export)](docs/user-guide.md#11-多租户治理安全与审计)
+- [10. 多 Agent 工作流 DAG 编排 (workflow create, workflow tree)](docs/user-guide.md#10-多-agent-工作流-dag-编排)
+- [11. 多租户治理、安全与审计 (namespace, OPA Rego policy, /v1/audit/export)](docs/user-guide.md#11-多租户治理安全与审计)
 - [12. CLI 命令族与配置速查表 (command cheat sheet & environment variables)](docs/user-guide.md#12-cli-命令族与配置速查表)
 
 ---

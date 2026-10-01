@@ -2,9 +2,9 @@
 
 AgentOS is a control and runtime platform for securely publishing, scheduling, executing, recovering, governing, and auditing AI agents.
 
-> **Current release: AgentOS 1.2.0 (LTS - Process System & Syscall ABI)**
+> **Current release: AgentOS 1.3.0 (Developer Core CLI & Dynamic Orchestration)**
 >
-> SemVer / Git tag: [`v1.2.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.2.0)
+> SemVer / Git tag: [`v1.3.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.3.0)
 >
 > Stable contracts: [v1.2 Contract Freeze](docs/contracts/v1.2-contract-freeze.md) (IPC v1, Service v1, Syscall ABI 1.0.0, Effect v1, Runtime v1, Gateway v1, Control API v1).
 > Architecture & Specification: [User Guide](docs/user-guide.md) | [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | [Feature Status Matrix](docs/feature-status.md) | [Ecosystem Guide](docs/ecosystem/README.md)
@@ -71,7 +71,7 @@ boundary, not a missing feature to be silently added later.
   artifact, so a replacement attempt resumes on a different runtime instead of
   restarting from zero.
 
-## What AgentOS v1.2 provides
+## What AgentOS provides
 
 | Area | Implemented capability |
 | --- | --- |
@@ -87,6 +87,8 @@ boundary, not a missing feature to be silently added later.
 | **Agent Package Registry** | OCI + Metadata Index, `agentos login/package <build|sign|push|search|verify|install>`, and mandatory 6-stage security gate (`internal/kernel/agentpkg/`) |
 | **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
 | **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
+| **Developer Core CLI & Console** | Unified `agent` CLI: hierarchical `agent.yaml`, multi-provider LLM matrix, chain-of-thought streaming, scaffolding/demo suites, and the embedded `agent ui` developer workbench |
+| **Dynamic & distributed orchestration** | Fenced `agentos.task.spawn` with recursion/fan-out/total-step guards, workflow-wide budgets and deadlines, dynamic group joins, and lease-based fair sharding |
 | **Reliability Gates** | **Manual/fixed-host evidence complete**: 72h continuous chaos & 7d extended soak verified (zero lost tasks/IPC, monotonic fencing); **Scheduled CI evidence pending**: Multi-day CI reproduction awaits self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
 
 ## Stable contracts and compatibility
@@ -139,7 +141,7 @@ Build every Go command:
 go build ./cmd/...
 ```
 
-The official [`v1.2.0` release](docs/releases/v1.2.0.md) (Git tag [`v1.2.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.2.0)) provides stable binary packages, Protobuf stubs, Python wheels, and npm SDK packages.
+The official [`v1.3.0` release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.3.0) (see [CHANGELOG](CHANGELOG.md#130---2026-10-01)) provides stable binary packages, Protobuf stubs, Python wheels, and npm SDK packages. The [v1.2.0 LTS release notes](docs/releases/v1.2.0.md) document the process-system and contract-freeze baseline.
 
 ### Conformance certification suite
 
@@ -257,6 +259,8 @@ $env:DATABASE_URL = "postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos
 go run ./cmd/agentos-migrate -database-url $env:DATABASE_URL
 ```
 
+The repository-root `docker-compose.yml` includes the same definitions (project `agentos-dev`), so `docker compose up -d --wait postgres nats` from the repository root starts the identical stack.
+
 For local development, run each process below in its own terminal:
 
 ```powershell
@@ -331,7 +335,10 @@ These commands use a fixed development tenant, loopback plaintext connections, a
 
 ### CLI workflows
 
-The main CLI exposes the following stable workflows:
+The developer-facing entrypoint is the unified `agent` CLI introduced in
+v1.2.1 (`agent config`, `agent test-llm`, `agent mcp`, `agent init`,
+`agent demo`, `agent ui`); commands it does not own are delegated to the stable
+`agentos` workflows below. The `agentos` CLI exposes:
 
 ```text
 agentos version   Print product, build, and protocol versions
@@ -542,7 +549,7 @@ The official release workflow runs the GA gates and generates:
 Download and verify all release assets:
 
 ```shell
-gh release download v1.2.0 --repo CloudEdgeCore/AgentOS
+gh release download v1.3.0 --repo CloudEdgeCore/AgentOS
 sha256sum -c checksums.txt
 ```
 
@@ -593,7 +600,7 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
 
 ## Current boundaries
 
-- v1.0 is an agent control and execution backend; it does not include a complete web administration console or managed cloud service.
+- AgentOS is an agent control and execution backend. The v1.3 `agent ui` console is an embedded, single-process developer workbench (configuration hub, model connectivity test, MCP tool probe, audit receipts), not a complete multi-tenant web administration console or managed cloud service; the full React dashboard under `web/` remains planned.
 - The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
 - Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
 - Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
@@ -627,4 +634,4 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
   - **Manual/fixed-host evidence is completed and verified**: Comprehensive 72-hour continuous chaos and 7-day extended stability soak validations have successfully run to completion on dedicated fixed hosts with zero lost tasks, zero lost IPC messages, zero connection pool degradation, and verified monotonic fencing — fully documented in [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md).
   - **Scheduled CI evidence has not yet been produced**: Shared GitHub-hosted public runners enforce a strict 6-hour job execution ceiling and cannot sustain multi-day soaking. Because dedicated self-hosted runners are not yet provisioned in the repository, scheduled periodic CI soak workflows and the Firecracker KVM probe skip with an explicit runner-preflight notice rather than timing out. Evidence exists only where published under [`docs/evidence/`](docs/evidence/); a scheduled CI job that skipped proves nothing on its own, and only manual fixed-host evidence is claimed for v1.2.
 
-These boundaries are intentional. AgentOS v1.2 delivers a verifiable, recoverable, default-deny agent runtime kernel with stable public contracts.
+These boundaries are intentional. AgentOS v1.3 delivers a verifiable, recoverable, default-deny agent runtime kernel on top of the stable v1.2 public contracts.

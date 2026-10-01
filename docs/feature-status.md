@@ -1,6 +1,6 @@
 # AgentOS Feature Status & Capability Matrix
 
-This matrix provides the verified implementation status for all subsystems, protocols, and APIs in AgentOS as of **v1.2 (Process System Upgrade)**.
+This matrix provides the verified implementation status for all subsystems, protocols, and APIs in AgentOS as of **v1.3 (Developer Core & Dynamic Orchestration)**.
 
 ---
 
@@ -82,3 +82,15 @@ This matrix provides the verified implementation status for all subsystems, prot
 | **7-Day Extended Soak** | Dedicated fixed-host environment | Memory/goroutine leak-free, connection pool stability | **Manual Evidence: PASS**; Scheduled CI: Pending self-hosted runners ([Evidence](evidence/soak-process-system-72h-7d.md)) |
 | **Chaos Fault Injector**| In-tree chaos harness | Worker kills, lease expirations, database reconnects | **PASS** |
 | **TLA+ Liveness Proofs**| TLC Model Checker | Guaranteed convergence to terminal phase without deadlocks | **PASS** |
+
+---
+
+## 7. Developer Core & Dynamic Orchestration (v1.3)
+
+| Feature / Capability | Status | Since | Protocol / Contract | Description |
+| :--- | :---: | :---: | :--- | :--- |
+| **Developer Core CLI (`agent`)** | **GA** | v1.3 | `cmd/agent` | Cascading `agent.yaml` configuration, multi-provider LLM matrix, chain-of-thought dual-channel streaming, project scaffolding, and demo scenarios. |
+| **Embedded Developer Console** | **GA** | v1.3 | `agent ui` | Single-process local workbench for model connectivity, MCP tool probing, agent/tool configuration, and audit receipts. |
+| **Dual-Protocol Model Layer** | **GA** | v1.3 | `cmd/agent/stream.go` | OpenAI-compatible (`/chat/completions`) and Anthropic Messages (`/v1/messages`) streaming for developer runs. |
+| **Dynamic Task Spawn** | **GA** | v1.3 | `agentos.task.spawn` | Fenced child-task spawning with recursion, fan-out, and total-step guards. |
+| **Workflow Budgets & Fair Sharding** | **GA** | v1.3 | Kernel Store / Orchestrator | Workflow-wide budgets and deadlines, dynamic group joins (`spawn:<parent>`), and lease-based fair sharding across orchestrator instances. |

@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Certify against AgentOS
-        uses: CloudEdgeCore/AgentOS/.github/actions/conformance@v1.2.0
+        uses: CloudEdgeCore/AgentOS/.github/actions/conformance@v1.3.0
         with:
           command: "python server.py --port 0"
 ```

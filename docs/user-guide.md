@@ -32,7 +32,7 @@ AgentOS 不是一个简单的聊天窗口或无代码流程图工具，而是解
 ```mermaid
 flowchart TD
     subgraph ClientLayer["客户端与生态层 (Client & Ecosystem)"]
-        CLI["AgentOS CLI (agentos)"]
+        CLI["AgentOS CLI (agent / agentos)"]
         Registry["Agent Package Registry (OCI)"]
         SDK["Provider SDK & Runtime SDK"]
         Frameworks["LangGraph / AutoGen / CrewAI"]
@@ -98,8 +98,8 @@ flowchart TD
 - **操作系统**：Linux / macOS / Windows (amd64 或 arm64)
 - **依赖工具**：
   - Docker 24.0+ 与 Docker Compose 2.20+
-  - Go 1.22+（如果需要从源码构建）
-  - Rust 1.78+（如果需要构建 Wasmtime 原生运行时组件）
+  - Go 1.26+（如果需要从源码构建；CI 使用 1.26.6）
+  - Rust 1.97+（如果需要构建 Wasmtime 原生运行时组件）
 
 ### 2.2 启动本地基础组件栈
 
@@ -124,7 +124,10 @@ docker compose -f deploy/dev/compose.yaml --profile observability up -d
 ### 2.3 编译 AgentOS 核心组件
 
 ```bash
-# 编译 AgentOS 统一开发者 CLI
+# 编译统一开发者 CLI（agent：配置、模型连通性、脚手架、内嵌控制台）
+go build -o bin/agent ./cmd/agent
+
+# 编译稳定工作流 CLI（agentos：发布、运行、日志、工作流、服务）
 go build -o bin/agentos ./cmd/agentos
 
 # 编译控制面 API 服务
@@ -135,17 +138,15 @@ go build -o bin/agentos-controller ./cmd/agentos-controller
 
 # 编译网关组件
 go build -o bin/agentos-gateway ./cmd/agentos-gateway
+
+# 编译数据库迁移工具
+go build -o bin/agentos-migrate ./cmd/agentos-migrate
 ```
 
 验证安装：
 ```bash
-./bin/agentos version
-```
-输出应显示类似：
-```text
-AgentOS CLI v1.2.0 (LTS)
-Syscall ABI: 1.0.0
-Runtime Protocol: agentos.runtime.interface/v1
+./bin/agentos version   # AgentOS 1.3.0.0 (semver v1.3.0, GA)
+./bin/agent version     # agent CLI 1.3.0 (product: AgentOS 1.3.0.0, syscall ABI: 1.0.0)
 ```
 
 ### 2.4 初始化数据库架构
@@ -153,10 +154,10 @@ Runtime Protocol: agentos.runtime.interface/v1
 执行数据库全量迁移，建立多租户、任务状态机、Lease 租约、IPC 邮箱与安全策略表结构：
 
 ```bash
-export AGENTOS_DATABASE_URL="postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos?sslmode=disable"
+export DATABASE_URL="postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos?sslmode=disable"
 
-# 执行迁移
-./bin/agentos migrate -db "$AGENTOS_DATABASE_URL"
+# 执行数据库迁移（agentos migrate 子命令仅用于 manifest 版本提升）
+./bin/agentos-migrate -database-url "$DATABASE_URL"
 ```
 
 ### 2.5 启动内核服务
@@ -166,18 +167,22 @@ export AGENTOS_DATABASE_URL="postgres://agentos:agentos-dev-only@127.0.0.1:55432
 **终端 1：启动控制面 API Server**
 ```bash
 ./bin/agentos-control \
-  -db "$AGENTOS_DATABASE_URL" \
-  -nats "nats://127.0.0.1:54222" \
-  -listen ":8080"
+  -database-url "$DATABASE_URL" \
+  -listen "127.0.0.1:8080" \
+  -dev-tenant dev
 ```
 
 **终端 2：启动调度与容灾恢复控制器**
 ```bash
 ./bin/agentos-controller \
-  -db "$AGENTOS_DATABASE_URL" \
-  -nats "nats://127.0.0.1:54222" \
-  -worker-id "controller-node-01"
+  -database-url "$DATABASE_URL" \
+  -controller-id "controller-node-01" \
+  -runtime-pools deploy/dev/runtime-pools.json \
+  -tenant-policies deploy/dev/tenant-policies.json \
+  -dev-mode
 ```
+
+> 上述 `-dev-tenant` / `-dev-mode` 仅用于回环地址上的本地开发；生产模式要求 HTTPS、OIDC 与 SPIFFE mTLS，缺失时进程拒绝启动。
 
 ---
 
@@ -188,8 +193,8 @@ export AGENTOS_DATABASE_URL="postgres://agentos:agentos-dev-only@127.0.0.1:55432
 AgentOS 提供了开箱即用的模板脚手架，支持 Go、Python、LangGraph 与 Agent-to-Agent (A2A) 架构：
 
 ```bash
-# 使用 Python 模板初始化新 Agent
-./bin/agentos init my-agent --template python
+# 使用 Python 模板初始化新 Agent（-adapter 可选 go / python / langgraph / a2a）
+./bin/agentos init -dir my-agent -name my-agent -adapter python
 
 cd my-agent
 ls -l
@@ -197,9 +202,7 @@ ls -l
 
 生成的项目目录结构包含：
 - `agent.json`：AgentOS 声明式规格配置
-- `main.py`：业务逻辑入口，遵循 AgentOS Runtime 协议
-- `requirements.txt`：Python 运行时依赖
-- `README.md`：项目说明文档
+- `server.py`：业务逻辑入口，遵循 AgentOS Runtime 协议（go 模板生成 `main.go`）
 
 ### 3.2 深入理解 `agent.json` 规格
 
@@ -262,7 +265,7 @@ ls -l
 ./bin/agentos validate -manifest agent.json
 ```
 
-若通过，会输出 `agent manifest agent.json is valid (ref: default/research-assistant:1.0.0)`。
+若通过，会输出类似 `manifest OK ref=default/research-assistant@1.0.0 digest=... runtimes=1`；校验失败时返回非零退出码并打印具体原因。
 
 ### 3.4 提交与运行单次任务 (`agentos run`)
 
@@ -271,22 +274,25 @@ ls -l
 ```bash
 ./bin/agentos run \
   -endpoint "http://127.0.0.1:8080" \
-  -manifest "agent.json" \
+  -agent "default/research-assistant@1.0.0" \
   -goal "分析近期 AI 操作系统架构设计要点并输出 Markdown 简报" \
-  -input '{"format": "markdown", "max_length": 1500}' \
-  -tenant "default"
+  -namespace "default" \
+  -spec "task-spec.json"
 ```
 
-命令将返回任务全局唯一标识符 `TaskID`（例如 `task_9a2f7c01`）。
+其中 `-spec` 可选，用于传入工作负载 JSON；省略时请求体 `spec` 为空对象。
+命令将返回任务全局唯一标识符 `TaskID`（UUID）。
 
 ### 3.5 实时查看日志与事件流 (`agentos logs`)
 
 AgentOS 将所有生命周期事件、工具调用、思考过程与标准输出持久化为流式事件总线：
 
 ```bash
-# 实时跟踪任务输出（类似 tail -f）
-./bin/agentos logs -endpoint "http://127.0.0.1:8080" -task "task_9a2f7c01" -follow
+# 流式跟踪任务事件（SSE，直到服务端关闭连接）
+./bin/agentos logs -endpoint "http://127.0.0.1:8080" -task "9a2f7c01-4b2e-4f1a-9c3d-7e5b8a1d2f30"
 ```
+
+> `-task` 必须是任务 UUID。
 
 ---
 
@@ -345,7 +351,7 @@ flowchart TD
 
 #### 第 5 步：在线检索公开与企业包 (Search)
 ```bash
-./bin/agentos package search "research" --capability "tools:web-search"
+./bin/agentos package search -query "research" -capability "tools:web-search"
 ```
 
 #### 第 6 步：完整性验证与安装 (Verify & Install)
@@ -550,7 +556,7 @@ modelProv, _ := reg.GetModelProvider("openai")
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Starting: agentos service start
+    [*] --> Starting: agentos service create
     Starting --> Serving: Healthcheck OK
     Serving --> Degraded: Healthcheck Failed / High Load
     Degraded --> Serving: Self Healed
@@ -563,32 +569,32 @@ stateDiagram-v2
 ### 7.1 服务注册与启动
 
 ```bash
-# 注册一个新的守护服务
-./bin/agentos service register \
+# 创建并启动一个新的守护服务
+./bin/agentos service create \
   -name "customer-service-bot" \
-  -version "1.0.0" \
+  -agent "default/customer-service-bot@1.0.0" \
+  -namespace "default" \
   -replicas 2 \
-  -restart-policy "Always" \
-  -health-interval "10s"
+  -restart-policy "Always"
 
-# 启动服务
-./bin/agentos service start -name "customer-service-bot"
+# 查看服务实例与健康状态
+./bin/agentos service instances <serviceId>
 ```
 
 ### 7.2 滚动更新与平滑排空 (Rolling Upgrade & Drain)
 
-当发布新版本服务时，AgentOS Supervisor 支持金丝雀平滑滚动更新与就绪等待：
+当服务定义通过 Control API（`PUT /v1/services/{id}`）指向新的 AgentVersion 时，Supervisor 自动执行滚动更新：老版本实例收到排空信号，等待处理中的长会话自然结束；新版本实例就绪并通过连续健康检查后流量完成原子切换，失败则自动回滚。CLI 提供以下运维操作：
 
 ```bash
-# 滚动升级到 v1.1.0，最大不可用副本数 1，最大激增数 1
-./bin/agentos service upgrade \
-  -name "customer-service-bot" \
-  -target-version "1.1.0" \
-  -strategy "rolling" \
-  -drain-timeout "30s"
-```
+# 扩缩副本（Supervisor 滚动收敛到目标副本数）
+./bin/agentos service scale <serviceId> -replicas 3
 
-在此期间，老版本实例将收到排空信号，等待处理中的长会话自然结束；新版本实例就绪并通过连续 3 次健康检查后，流量完成原子切换。
+# 滚动重启（优雅排空后重建实例）
+./bin/agentos service restart <serviceId>
+
+# 停止服务
+./bin/agentos service stop <serviceId>
+```
 
 ---
 
@@ -701,16 +707,16 @@ AgentOS 提供了基于 DAG 依赖声明的工作流编排引擎。工作流规�
 ### 10.2 执行与可视化工作流
 
 ```bash
-# 提交并运行工作流
-./bin/agentos workflow run -spec workflow.json
+# 创建并运行工作流
+./bin/agentos workflow create -file workflow.json -goal "data pipeline"
 
 # 渲染工作流实时拓扑树与阶段进展
-./bin/agentos workflow tree -id "wf_49a0bc12"
+./bin/agentos workflow tree -id "4fa0bc12-6c1d-4c85-bf52-8f2a3d9e7100"
 ```
 
 控制台将输出清晰的树状依赖拓扑：
 ```text
-Workflow: data-pipeline-workflow (ID: wf_49a0bc12)
+Workflow: data-pipeline-workflow (ID: 4fa0bc12-6c1d-4c85-bf52-8f2a3d9e7100)
 Status: RUNNING (2/3 completed)
 
 ├── [✔] fetch-data (crawler-agent@1.0.0) -> SUCCEEDED (3.2s)
@@ -726,10 +732,10 @@ Status: RUNNING (2/3 completed)
 
 ```bash
 # 创建企业团队命名空间
-./bin/agentos namespace create "fintech-team" --tenant "corp-prod" --budget-usd 5000
+./bin/agentos namespace create -name "fintech-team" -display-name "FinTech Team"
 
-# 查看命名空间资源使用水位
-./bin/agentos namespace describe "fintech-team"
+# 查看命名空间详情与资源使用水位
+./bin/agentos namespace get -name "fintech-team"
 ```
 
 ### 11.2 Rego 准入控制策略
@@ -754,16 +760,19 @@ deny[msg] {
 }
 ```
 
-### 11.3 密码学不可篡改审计导出 (`audit export`)
+### 11.3 密码学不可篡改审计导出 (Control API `/v1/audit/export`)
 
-内核中的每一笔模型 Token 消耗、工具调用收据与权限决策均被记录进 Append-Only 审计日志。安全合规部门可随时导出带有数字签名的审计包：
+内核中的每一笔模型 Token 消耗、工具调用收据与权限决策均被记录进 Append-Only 审计日志。安全合规部门可通过 Control API 导出当前认证租户的完整审计链；控制面配置 `-audit-signing-key` 后导出包携带 Ed25519 签名：
 
 ```bash
-./bin/agentos audit export \
-  -tenant "corp-prod" \
-  -since "2026-09-01T00:00:00Z" \
-  -until "2026-09-30T23:59:59Z" \
-  -out "audit-2026-q3.signed.json"
+# 导出审计链（配置签名密钥后为签名 WORM 归档）
+curl -sS -H "Authorization: Bearer $AGENTOS_TOKEN" \
+  "http://127.0.0.1:8080/v1/audit/export" \
+  -o "audit-export.signed.json"
+
+# 校验审计链完整性
+curl -sS -H "Authorization: Bearer $AGENTOS_TOKEN" \
+  "http://127.0.0.1:8080/v1/audit/verify"
 ```
 
 ---
@@ -774,41 +783,45 @@ deny[msg] {
 
 | 根命令 | 子命令 | 主要用途 | 关键参数示例 |
 | :--- | :--- | :--- | :--- |
-| **`version`** | - | 查看 AgentOS、Syscall ABI 与协议版本 | `./bin/agentos version` |
-| **`init`** | - | 初始化 Agent 开发项目脚手架 | `--template [go\|python\|langgraph\|a2a]` |
+| **`version`** | - | 查看产品版本（`-json` 含 Syscall ABI 与全部协议版本） | `./bin/agentos version -json` |
+| **`init`** | - | 初始化 Agent 开发项目脚手架 | `-dir my-agent -adapter [go\|python\|langgraph\|a2a]` |
 | **`validate`** | - | 静态验证 AgentManifest 语法与规范 | `-manifest agent.json` |
 | **`login`** | - | 登录 OCI Agent Package Registry | `-registry https://... -token ...` |
 | **`package`** | `build` | 构建带 Provenance 与摘要的发行清单 | `-manifest agent.json -out pkg.json` |
 | | `sign` | 使用 Ed25519 私钥加密签名 | `-package pkg.json -key-id ... -private-key ...` |
 | | `push` | 推送至包注册表 | `-package pkg.signed.json -registry ...` |
-| | `search` | 在线搜索公共/企业包 | `package search "keyword" --capability ...` |
+| | `search` | 在线搜索公共/企业包 | `-query "keyword" -capability ...` |
 | | `verify` | 离线/在线校验包签名与摘要 | `-package pkg.signed.json -public-key ...` |
 | | `install` | 经由 6 阶段安全门禁安装至租户 | `-package pkg.signed.json -tenant ...` |
 | **`runtime`** | `init` | 初始化第三方 Runtime SDK 适配器模板 | `--template [docker\|python\|http\|go]` |
 | | `test` | 对指定端点执行一致性套件测试 | `runtime test http://127.0.0.1:8088` |
 | **`conformance`**| - | 运行标准一致性认证并生成评估报告 | `-endpoint http://... -json` |
-| **`run`** | - | 提交并启动单次任务 Attempt | `-manifest ... -goal ... -input ...` |
-| **`logs`** | - | 跟踪或流式输出执行事件日志 | `-task <id> -follow` |
-| **`workflow`** | `run` | 启动 DAG 工作流 | `-spec workflow.json` |
+| **`run`** | - | 提交单次任务 | `-agent name@version -goal ... [-spec spec.json]` |
+| **`logs`** | - | 流式跟踪任务事件（SSE） | `-task <uuid>` |
+| **`workflow`** | `create` | 创建并运行 DAG 工作流 | `-file workflow.json -goal ...` |
 | | `tree` | 可视化工作流拓扑结构 | `-id <workflow_id>` |
-| **`service`** | `register` | 注册常驻守护服务 | `-name ... -replicas ... -restart-policy ...` |
-| | `start` / `stop` | 控制常驻服务启停 | `-name ...` |
-| | `upgrade` | 滚动升级与零停机排空 | `-name ... -target-version ... -drain-timeout ...` |
-| **`namespace`** | `create` / `list` | 组织与多租户命名空间配置 | `namespace create "dev"` |
-| **`migrate`** | - | 执行内核 PostgreSQL 数据库迁移 | `-db $AGENTOS_DATABASE_URL` |
-| **`metrics`** | - | 检查实时性能与 Prometheus 监控指标 | `-endpoint http://127.0.0.1:8080/metrics` |
+| **`service`** | `create` | 创建常驻守护服务 | `-name ... -agent name@version -replicas ... -restart-policy ...` |
+| | `scale` / `restart` / `stop` | 扩缩、滚动重启与停止服务 | `<serviceId> -replicas N`（scale） |
+| | `instances` | 查看服务实例与健康状态 | `<serviceId>` |
+| **`namespace`** | `create` / `list` / `get` | 组织与多租户命名空间配置 | `namespace create -name "dev"` |
+| **`migrate`** | - | 提升旧版 AgentManifest 到 v1（非数据库迁移） | `-manifest agent.v1alpha1.json -out agent.v1.json` |
+| **`metrics`** | - | 检查实时性能与 Prometheus 监控指标 | `-endpoint http://127.0.0.1:8080` |
 
 ### 12.2 核心环境变量清单
 
 | 环境变量 | 作用与示例值 | 默认值 / 备注 |
 | :--- | :--- | :--- |
-| `AGENTOS_DATABASE_URL` | PostgreSQL 连接串，必须支持 pgvector 扩展 | `postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos?sslmode=disable` |
-| `AGENTOS_NATS_URL` | NATS JetStream 服务接入点 | `nats://127.0.0.1:54222` |
-| `AGENTOS_CONTROL_URL` | AgentOS Control Plane API 服务基础 URL | `http://127.0.0.1:8080` |
-| `AGENTOS_REGISTRY_URL` | Agent Package Registry 端点 | `https://registry.agentos.dev` |
-| `AGENTOS_TENANT_ID` | 默认交互租户标识符 | `default` |
+| `DATABASE_URL` | PostgreSQL 连接串，必须支持 pgvector 扩展 | `postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos?sslmode=disable`；control / controller / outbox / migrate 读取 |
+| `AGENTOS_CONTROL_URL` | Control Plane API 基础 URL | `http://127.0.0.1:8080`；`registry push` 默认读取（`publish` / `run` / `logs` 通过 `-endpoint` 传入） |
 | `AGENTOS_TOKEN` | 经过身份认证的 JWT 令牌或 API 密钥 | 用于 CLI 与控制面通信时的 Bearer 鉴权 |
+| `AGENTOS_TENANT_ID` | 默认交互租户标识符（Python SDK / OCI provider） | `default` |
+| `AGENTOS_EMBEDDING_TOKEN` | 控制面/网关调用嵌入服务的 Bearer 令牌 | 生产模式未配置时拒绝启动 |
+| `AGENTOS_AUDIT_SIGNING_KEY` | 审计导出签名私钥 | 未配置时仅开发模式允许未签名导出 |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`| OpenTelemetry 链路与指标采集接入点 | `127.0.0.1:4317` (gRPC) 或 `127.0.0.1:4318` (HTTP) |
+
+> NATS 等组件连接串通过各自进程参数传入（例如 `agentos-outbox -nats-url ...`）。
+
+> 开发者日常入口为 `agent` CLI（`agent config` / `test-llm` / `mcp` / `ui` / `init` / `demo`）；数据库迁移使用独立二进制 `agentos-migrate -database-url $DATABASE_URL`。
 
 ---
 
