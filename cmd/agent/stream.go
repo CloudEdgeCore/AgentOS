@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// OpenAI streaming delta structs
 type StreamDelta struct {
 	Content   string `json:"content"`
 	Reasoning string `json:"reasoning"`
@@ -25,35 +26,112 @@ type StreamChunk struct {
 	Choices []StreamChoice `json:"choices"`
 }
 
+// Anthropic streaming chunk structs
+type AnthropicStreamDelta struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Thinking string `json:"thinking"`
+}
+
+type AnthropicStreamChunk struct {
+	Type  string               `json:"type"`
+	Delta AnthropicStreamDelta `json:"delta"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+func buildOpenAIEndpoint(baseURL string) string {
+	u := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(u, "/chat/completions") {
+		return u
+	}
+	return u + "/chat/completions"
+}
+
+func buildAnthropicEndpoint(baseURL string) string {
+	u := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(u, "/messages") {
+		return u
+	}
+	if strings.HasSuffix(u, "/v1") {
+		return u + "/messages"
+	}
+	return u + "/v1/messages"
+}
+
 func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, error) {
 	provider := cfg.CurrentProvider()
 	if provider.APIKey == "" {
 		return 0, fmt.Errorf("provider %q has no API key configured", cfg.LLM.DefaultProvider)
 	}
 
-	reqBody := map[string]any{
-		"model": provider.Model,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userPrompt},
-		},
-		"stream": true,
+	protocol := strings.ToLower(strings.TrimSpace(provider.Protocol))
+	if protocol == "" {
+		if strings.EqualFold(cfg.LLM.DefaultProvider, "anthropic") || strings.Contains(strings.ToLower(provider.BaseURL), "anthropic") {
+			protocol = "anthropic"
+		} else {
+			protocol = "openai"
+		}
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-	endpoint := strings.TrimRight(provider.BaseURL, "/") + "/chat/completions"
+	var endpoint string
+	var reqBody map[string]any
+
+	if protocol == "anthropic" {
+		endpoint = buildAnthropicEndpoint(provider.BaseURL)
+		reqBody = map[string]any{
+			"model": provider.Model,
+			"messages": []map[string]string{
+				{"role": "user", "content": userPrompt},
+			},
+			"max_tokens": 4096,
+			"stream":     true,
+		}
+		if systemPrompt != "" {
+			reqBody["system"] = systemPrompt
+		}
+	} else {
+		endpoint = buildOpenAIEndpoint(provider.BaseURL)
+		reqBody = map[string]any{
+			"model": provider.Model,
+			"messages": []map[string]string{
+				{"role": "system", "content": systemPrompt},
+				{"role": "user", "content": userPrompt},
+			},
+			"stream": true,
+		}
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshal request: %w", err)
+	}
+
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return 0, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://agentos.dev")
-	req.Header.Set("X-Title", "AgentOS-CLI")
+	if protocol == "anthropic" {
+		req.Header.Set("x-api-key", provider.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		req.Header.Set("HTTP-Referer", "https://agentos.dev")
+		req.Header.Set("X-Title", "AgentOS-CLI")
+	}
+
+	timeoutSec := 45 * time.Second
+	if provider.TimeoutSec > 0 {
+		timeoutSec = time.Duration(provider.TimeoutSec) * time.Second
+	}
 
 	tr := &http.Transport{
-		ResponseHeaderTimeout: 45 * time.Second,
+		ResponseHeaderTimeout: timeoutSec,
 	}
 	client := &http.Client{
 		Transport: tr,
@@ -85,30 +163,58 @@ func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, erro
 			break
 		}
 
-		var chunk StreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-
-		if len(chunk.Choices) > 0 {
-			c := chunk.Choices[0]
-			if c.Delta.Reasoning != "" {
+		if protocol == "anthropic" {
+			var aChunk AnthropicStreamChunk
+			if err := json.Unmarshal([]byte(data), &aChunk); err != nil {
+				continue
+			}
+			if aChunk.Error != nil {
+				return totalChars / 3, fmt.Errorf("anthropic stream error: %s", aChunk.Error.Message)
+			}
+			if aChunk.Delta.Thinking != "" {
 				if !inReasoning {
 					fmt.Print("\n\033[36m[reasoning] \033[0m")
 					inReasoning = true
 				}
-				fmt.Print(c.Delta.Reasoning)
+				fmt.Print(aChunk.Delta.Thinking)
 				_ = os.Stdout.Sync()
-				totalChars += len(c.Delta.Reasoning)
+				totalChars += len(aChunk.Delta.Thinking)
 			}
-			if c.Delta.Content != "" {
+			if aChunk.Delta.Text != "" {
 				if inReasoning {
 					fmt.Print("\n\n\033[32m[content] \033[0m\n")
 					inReasoning = false
 				}
-				fmt.Print(c.Delta.Content)
+				fmt.Print(aChunk.Delta.Text)
 				_ = os.Stdout.Sync()
-				totalChars += len(c.Delta.Content)
+				totalChars += len(aChunk.Delta.Text)
+			}
+		} else {
+			var chunk StreamChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+
+			if len(chunk.Choices) > 0 {
+				c := chunk.Choices[0]
+				if c.Delta.Reasoning != "" {
+					if !inReasoning {
+						fmt.Print("\n\033[36m[reasoning] \033[0m")
+						inReasoning = true
+					}
+					fmt.Print(c.Delta.Reasoning)
+					_ = os.Stdout.Sync()
+					totalChars += len(c.Delta.Reasoning)
+				}
+				if c.Delta.Content != "" {
+					if inReasoning {
+						fmt.Print("\n\n\033[32m[content] \033[0m\n")
+						inReasoning = false
+					}
+					fmt.Print(c.Delta.Content)
+					_ = os.Stdout.Sync()
+					totalChars += len(c.Delta.Content)
+				}
 			}
 		}
 	}

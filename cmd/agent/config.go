@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -14,6 +15,7 @@ type ProviderConfig struct {
 	Model      string `yaml:"model" json:"model"`
 	APIKey     string `yaml:"api_key" json:"api_key"`
 	BaseURL    string `yaml:"base_url" json:"base_url"`
+	Protocol   string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 	TimeoutSec int    `yaml:"timeout_sec,omitempty" json:"timeout_sec,omitempty"`
 }
 
@@ -100,24 +102,35 @@ func DefaultConfig() *AgentYAMLConfig {
 					Model:      "stealth/space-bunny-alpha",
 					APIKey:     "",
 					BaseURL:    "https://openrouter.ai/api/v1",
+					Protocol:   "openai",
 					TimeoutSec: 180,
 				},
 				"deepseek": {
 					Model:      "deepseek-chat",
 					APIKey:     "",
 					BaseURL:    "https://api.deepseek.com/v1",
+					Protocol:   "openai",
 					TimeoutSec: 120,
 				},
 				"qwen": {
 					Model:      "qwen-plus",
 					APIKey:     "",
 					BaseURL:    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+					Protocol:   "openai",
 					TimeoutSec: 120,
 				},
 				"ollama": {
 					Model:      "qwen2.5:7b",
 					APIKey:     "ollama",
 					BaseURL:    "http://localhost:11434/v1",
+					Protocol:   "openai",
+					TimeoutSec: 120,
+				},
+				"anthropic": {
+					Model:      "claude-3-5-sonnet-20241022",
+					APIKey:     "",
+					BaseURL:    "https://api.anthropic.com/v1",
+					Protocol:   "anthropic",
 					TimeoutSec: 120,
 				},
 			},
@@ -308,6 +321,9 @@ func mergeYAMLFile(cfg *AgentYAMLConfig, path string) error {
 			if v.BaseURL != "" {
 				existing.BaseURL = v.BaseURL
 			}
+			if v.Protocol != "" {
+				existing.Protocol = v.Protocol
+			}
 			if v.TimeoutSec > 0 {
 				existing.TimeoutSec = v.TimeoutSec
 			}
@@ -377,6 +393,12 @@ func applyEnvOverrides(cfg *AgentYAMLConfig) {
 		curr.BaseURL = url
 	}
 
+	if proto := os.Getenv("AGENT_LLM_PROTOCOL"); proto != "" {
+		curr.Protocol = proto
+	} else if proto := os.Getenv("LLM_PROTOCOL"); proto != "" {
+		curr.Protocol = proto
+	}
+
 	if budgetStr := os.Getenv("AGENT_BUDGET_USD"); budgetStr != "" {
 		if b, err := strconv.ParseFloat(budgetStr, 64); err == nil {
 			cfg.Kernel.Budget.MaxCostUSD = b
@@ -389,11 +411,19 @@ func applyEnvOverrides(cfg *AgentYAMLConfig) {
 // CurrentProvider returns the parameters of the currently active model provider.
 func (c *AgentYAMLConfig) CurrentProvider() ProviderConfig {
 	if p, ok := c.LLM.Providers[c.LLM.DefaultProvider]; ok {
+		if p.Protocol == "" {
+			if strings.EqualFold(c.LLM.DefaultProvider, "anthropic") || strings.Contains(strings.ToLower(p.BaseURL), "anthropic") {
+				p.Protocol = "anthropic"
+			} else {
+				p.Protocol = "openai"
+			}
+		}
 		return p
 	}
 	return ProviderConfig{
 		Model:      "stealth/space-bunny-alpha",
 		BaseURL:    "https://openrouter.ai/api/v1",
+		Protocol:   "openai",
 		TimeoutSec: 180,
 	}
 }

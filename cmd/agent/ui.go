@@ -46,6 +46,7 @@ type UIModelConfigRequest struct {
 	Provider  string  `json:"provider"`
 	Model     string  `json:"model"`
 	BaseURL   string  `json:"base_url"`
+	Protocol  string  `json:"protocol,omitempty"`
 	APIKey    string  `json:"api_key"`
 	BudgetUSD float64 `json:"budget_usd"`
 }
@@ -55,6 +56,7 @@ type UIFullConfigRequest struct {
 	DefaultProvider string  `json:"default_provider"`
 	Model           string  `json:"model"`
 	BaseURL         string  `json:"base_url"`
+	Protocol        string  `json:"protocol,omitempty"`
 	APIKey          string  `json:"api_key"`
 	TimeoutSec      int     `json:"timeout_sec"`
 	BudgetUSD       float64 `json:"budget_usd"`
@@ -531,6 +533,9 @@ func handleUIConfig(w http.ResponseWriter, r *http.Request) {
 		if req.BaseURL != "" {
 			curr.BaseURL = req.BaseURL
 		}
+		if req.Protocol != "" {
+			curr.Protocol = req.Protocol
+		}
 		if req.APIKey != "" {
 			curr.APIKey = req.APIKey
 		}
@@ -617,6 +622,9 @@ func handleUIModelConfig(w http.ResponseWriter, r *http.Request) {
 	if req.BaseURL != "" {
 		curr.BaseURL = req.BaseURL
 	}
+	if req.Protocol != "" {
+		curr.Protocol = req.Protocol
+	}
 	if req.APIKey != "" {
 		curr.APIKey = req.APIKey
 	}
@@ -643,6 +651,7 @@ func handleUIModelConfig(w http.ResponseWriter, r *http.Request) {
 		"message":    fmt.Sprintf("Configuration successfully saved to %s", targetFile),
 		"provider":   cfg.LLM.DefaultProvider,
 		"model":      curr.Model,
+		"protocol":   curr.Protocol,
 		"budget_usd": cfg.Kernel.Budget.MaxCostUSD,
 	})
 }
@@ -650,6 +659,36 @@ func handleUIModelConfig(w http.ResponseWriter, r *http.Request) {
 func handleUITestLLM(w http.ResponseWriter, r *http.Request) {
 	cfg, _ := LoadConfig()
 	provider := cfg.CurrentProvider()
+
+	var req struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		BaseURL  string `json:"base_url"`
+		Protocol string `json:"protocol"`
+		APIKey   string `json:"api_key"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	if req.Provider != "" {
+		if p, ok := cfg.LLM.Providers[req.Provider]; ok {
+			provider = p
+		}
+	}
+	if req.Model != "" {
+		provider.Model = req.Model
+	}
+	if req.BaseURL != "" {
+		provider.BaseURL = req.BaseURL
+	}
+	if req.Protocol != "" {
+		provider.Protocol = req.Protocol
+	}
+	if req.APIKey != "" {
+		provider.APIKey = req.APIKey
+	}
+
 	if provider.APIKey == "" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -659,9 +698,21 @@ func handleUITestLLM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	probeCfg := *cfg
+	probeCfg.LLM.Providers = make(map[string]ProviderConfig)
+	for k, v := range cfg.LLM.Providers {
+		probeCfg.LLM.Providers[k] = v
+	}
+	probeKey := "probe"
+	if req.Provider != "" {
+		probeKey = req.Provider
+	}
+	probeCfg.LLM.DefaultProvider = probeKey
+	probeCfg.LLM.Providers[probeKey] = provider
+
 	t0 := time.Now()
 	testPrompt := "Respond with one brief sentence confirming connectivity to AgentOS kernel."
-	tokens, err := StreamLLM(cfg, "You are AgentOS kernel.", testPrompt)
+	tokens, err := StreamLLM(&probeCfg, "You are AgentOS kernel.", testPrompt)
 	latencyMs := time.Since(t0).Milliseconds()
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -669,6 +720,7 @@ func handleUITestLLM(w http.ResponseWriter, r *http.Request) {
 			"success":    false,
 			"error":      err.Error(),
 			"latency_ms": latencyMs,
+			"protocol":   provider.Protocol,
 		})
 		return
 	}
@@ -678,8 +730,9 @@ func handleUITestLLM(w http.ResponseWriter, r *http.Request) {
 		"success":    true,
 		"latency_ms": latencyMs,
 		"tokens":     tokens,
-		"provider":   cfg.LLM.DefaultProvider,
+		"provider":   probeKey,
 		"model":      provider.Model,
+		"protocol":   provider.Protocol,
 	})
 }
 
@@ -1859,10 +1912,22 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
                 <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('qwen/qwen-2.5-72b-instruct')">qwen-2.5-72b</span>
                 <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('stealth/space-bunny-alpha')">space-bunny-alpha</span>
                 <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('qwen2.5:7b')">ollama-qwen2.5</span>
+                <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('claude-3-5-sonnet-20241022')">claude-3.5-sonnet</span>
               </div>
 
-              <label style="font-size: 11px; color: var(--outline);" data-i18n="base_url">BASE URL</label>
-              <input type="text" id="cfgBaseURL" placeholder="https://openrouter.ai/api/v1"/>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                  <label style="font-size: 11px; color: var(--outline);" data-i18n="protocol_type">PROTOCOL SPECIFICATION</label>
+                  <select id="cfgProtocol">
+                    <option value="openai" data-i18n="opt_proto_openai">OpenAI Compatible (/chat/completions)</option>
+                    <option value="anthropic" data-i18n="opt_proto_anthropic">Anthropic Claude (/v1/messages)</option>
+                  </select>
+                </div>
+                <div>
+                  <label style="font-size: 11px; color: var(--outline);" data-i18n="base_url">BASE URL</label>
+                  <input type="text" id="cfgBaseURL" placeholder="https://openrouter.ai/api/v1"/>
+                </div>
+              </div>
 
               <label style="font-size: 11px; color: var(--outline); margin-top: 10px;" data-i18n="api_key_label">API KEY (Masked. Leave blank to preserve current key)</label>
               <div style="position: relative;">
@@ -2061,6 +2126,10 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
                 <span id="summaryModel" style="color: var(--secondary-bright); font-weight: 600;">stealth/space-bunny-alpha</span>
               </div>
               <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
+                <span style="color: var(--outline);" data-i18n="lbl_active_protocol">Protocol Format:</span>
+                <span id="summaryProtocol" style="color: var(--tertiary); font-weight: 600;">OPENAI</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
                 <span style="color: var(--outline);" data-i18n="lbl_budget_cap">Budget Ceiling:</span>
                 <span id="summaryBudget" style="color: var(--primary-bright); font-weight: 600;">$1.00 USD</span>
               </div>
@@ -2220,11 +2289,15 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         runtime_state_title: 'Active Runtime State',
         lbl_active_prov: 'Active Provider:',
         lbl_active_model: 'Active Model:',
+        lbl_active_protocol: 'Protocol Spec:',
         lbl_budget_cap: 'Budget Ceiling:',
         lbl_governance_mode: 'Governance Mode:',
         btn_copy_yaml: 'Copy YAML',
         model_gateway_title: 'Model Provider & Gateway Route',
         provider_type: 'PROVIDER TYPE',
+        protocol_type: 'PROTOCOL SPECIFICATION',
+        opt_proto_openai: 'OpenAI Compatible (/chat/completions)',
+        opt_proto_anthropic: 'Anthropic Claude (/v1/messages)',
         model_identifier: 'MODEL IDENTIFIER',
         base_url: 'BASE URL',
         api_key_label: 'API KEY (Masked. Leave blank to preserve current key)',
@@ -2350,11 +2423,15 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         runtime_state_title: '内核实时运行摘要',
         lbl_active_prov: '当前渠道:',
         lbl_active_model: '当前模型:',
+        lbl_active_protocol: '接口协议形式:',
         lbl_budget_cap: '预算上限:',
         lbl_governance_mode: '治理模式:',
         btn_copy_yaml: '复制 YAML',
         model_gateway_title: '模型提供商配置与网关路由',
         provider_type: '网关提供商类型',
+        protocol_type: 'API 接口协议形式',
+        opt_proto_openai: 'OpenAI 兼容协议 (/chat/completions)',
+        opt_proto_anthropic: 'Anthropic Claude 原生协议 (/v1/messages)',
         model_identifier: '模型 Identifier 标识',
         base_url: 'API 服务基地址 (Base URL)',
         api_key_label: 'API Key 凭据 (脱敏保护，留空保持原值)',
@@ -2427,6 +2504,11 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
     function selectModelPreset(model) {
       document.getElementById('cfgModel').value = model;
+      if (model.indexOf('claude') !== -1) {
+        document.getElementById('cfgProvider').value = 'anthropic';
+        document.getElementById('cfgProtocol').value = 'anthropic';
+        document.getElementById('cfgBaseURL').value = 'https://api.anthropic.com/v1';
+      }
     }
 
     function togglePasswordVisibility(id) {
@@ -2501,18 +2583,23 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       if (prov === 'openrouter') {
         document.getElementById('cfgModel').value = 'stealth/space-bunny-alpha';
         document.getElementById('cfgBaseURL').value = 'https://openrouter.ai/api/v1';
+        document.getElementById('cfgProtocol').value = 'openai';
       } else if (prov === 'deepseek') {
         document.getElementById('cfgModel').value = 'deepseek-chat';
         document.getElementById('cfgBaseURL').value = 'https://api.deepseek.com/v1';
+        document.getElementById('cfgProtocol').value = 'openai';
       } else if (prov === 'qwen') {
         document.getElementById('cfgModel').value = 'qwen-plus';
         document.getElementById('cfgBaseURL').value = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        document.getElementById('cfgProtocol').value = 'openai';
       } else if (prov === 'ollama') {
         document.getElementById('cfgModel').value = 'qwen2.5:7b';
         document.getElementById('cfgBaseURL').value = 'http://localhost:11434/v1';
+        document.getElementById('cfgProtocol').value = 'openai';
       } else if (prov === 'anthropic') {
         document.getElementById('cfgModel').value = 'claude-3-5-sonnet-20241022';
         document.getElementById('cfgBaseURL').value = 'https://api.anthropic.com/v1';
+        document.getElementById('cfgProtocol').value = 'anthropic';
       }
     }
 
@@ -2839,6 +2926,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
             var prov = data.llm.providers[k];
             lines.push('    ' + k + ':');
             lines.push('      model: "' + (prov.model || '') + '"');
+            lines.push('      protocol: "' + (prov.protocol || (k === 'anthropic' ? 'anthropic' : 'openai')) + '"');
             lines.push('      base_url: "' + (prov.base_url || '') + '"');
             lines.push('      timeout_sec: ' + (prov.timeout_sec || 120));
           }
@@ -2870,10 +2958,12 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
           if (p) {
             document.getElementById('cfgModel').value = p.model || '';
             document.getElementById('cfgBaseURL').value = p.base_url || '';
+            document.getElementById('cfgProtocol').value = p.protocol || (data.llm.default_provider === 'anthropic' ? 'anthropic' : 'openai');
             if (p.timeout_sec) document.getElementById('cfgTimeoutSec').value = p.timeout_sec;
           }
           document.getElementById('summaryProvider').textContent = data.llm.default_provider;
           document.getElementById('summaryModel').textContent = (p && p.model) || '';
+          document.getElementById('summaryProtocol').textContent = ((p && p.protocol) || (data.llm.default_provider === 'anthropic' ? 'anthropic' : 'openai')).toUpperCase();
         }
         if (data.kernel && data.kernel.budget) {
           var b = data.kernel.budget;
@@ -2910,6 +3000,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         environment: currentEnv,
         default_provider: document.getElementById('cfgProvider').value,
         model: document.getElementById('cfgModel').value.trim(),
+        protocol: document.getElementById('cfgProtocol').value,
         base_url: document.getElementById('cfgBaseURL').value.trim(),
         api_key: document.getElementById('cfgAPIKey').value.trim(),
         timeout_sec: parseInt(document.getElementById('cfgTimeoutSec').value) || 120,
@@ -2955,12 +3046,23 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       feedback.textContent = currentLang === 'zh' ? '正在发送测试请求到模型...' : 'Sending test prompt to model...';
 
       try {
-        var res = await fetch('/api/test-llm', { method: 'POST' });
+        var payload = {
+          provider: document.getElementById('cfgProvider').value,
+          model: document.getElementById('cfgModel').value.trim(),
+          protocol: document.getElementById('cfgProtocol').value,
+          base_url: document.getElementById('cfgBaseURL').value.trim(),
+          api_key: document.getElementById('cfgAPIKey').value.trim()
+        };
+        var res = await fetch('/api/test-llm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
         var data = await res.json();
         if (data.success) {
           badge.textContent = data.latency_ms + 'ms (OK)';
           badge.style.color = 'var(--primary-bright)';
-          feedback.textContent = (currentLang === 'zh' ? '连通性已验证: ' : 'Connectivity verified: ') + data.provider + ' (' + data.model + ') returned ' + data.tokens + ' tokens in ' + data.latency_ms + 'ms';
+          feedback.textContent = (currentLang === 'zh' ? '连通性已验证: ' : 'Connectivity verified: ') + data.provider + ' (' + data.model + ' [' + (data.protocol || 'openai').toUpperCase() + ']) returned ' + data.tokens + ' tokens in ' + data.latency_ms + 'ms';
           feedback.style.color = 'var(--primary-bright)';
         } else {
           badge.textContent = 'FAIL';
