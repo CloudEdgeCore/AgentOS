@@ -958,31 +958,100 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
   <link href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
   <style>
-    :root {
-      --bg-base: #0f131c;
-      --bg-surface: #0f131c;
-      --bg-container-lowest: #0a0e17;
-      --bg-container-low: #181b25;
-      --bg-container: #1c1f29;
-      --bg-container-high: #262a34;
-      --bg-container-highest: #31353f;
-      --outline: #86948a;
-      --outline-variant: #1e293b;
-      --text-main: #dfe2ef;
-      --text-variant: #bbcabf;
-      --primary: #10b981;
-      --primary-bright: #4edea3;
-      --secondary: #06b6d4;
-      --secondary-bright: #4cd7f6;
-      --tertiary: #ffb95f;
-      --error: #ef4444;
-      --error-container: #93000a;
+    :root, html.theme-obsidian {
+      --bg-base: #08090e;
+      --bg-surface: #08090e;
+      --bg-container-lowest: #0c0e16;
+      --bg-container-low: #121522;
+      --bg-container: #171c2c;
+      --bg-container-high: #1f253a;
+      --bg-container-highest: #28304c;
+      --outline: #64748b;
+      --outline-variant: rgba(255, 255, 255, 0.08);
+      --text-main: #f8fafc;
+      --text-variant: #94a3b8;
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --primary-bright: #818cf8;
+      --primary-glow: rgba(99, 102, 241, 0.35);
+      --primary-subtle: rgba(99, 102, 241, 0.12);
+      --secondary: #00f0ff;
+      --secondary-bright: #38bdf8;
+      --tertiary: #f59e0b;
+      --success: #10b981;
+      --success-bright: #34d399;
+      --error: #f43f5e;
+      --error-container: rgba(244, 63, 94, 0.15);
+      --radial-glow: radial-gradient(circle at 50% -10%, rgba(99, 102, 241, 0.14) 0%, rgba(8, 9, 14, 0) 70%);
       --font-body: 'Chivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
     }
+
+    html.theme-amber {
+      --bg-base: #090a0c;
+      --bg-surface: #090a0c;
+      --bg-container-lowest: #0d0f13;
+      --bg-container-low: #13161c;
+      --bg-container: #191d24;
+      --bg-container-high: #232933;
+      --bg-container-highest: #2e3644;
+      --outline: #78716c;
+      --outline-variant: rgba(255, 255, 255, 0.08);
+      --text-main: #fafaf9;
+      --text-variant: #a8a29e;
+      --primary: #f59e0b;
+      --primary-dark: #d97706;
+      --primary-bright: #fbbf24;
+      --primary-glow: rgba(245, 158, 11, 0.35);
+      --primary-subtle: rgba(245, 158, 11, 0.12);
+      --secondary: #38bdf8;
+      --secondary-bright: #7dd3fc;
+      --tertiary: #ec4899;
+      --success: #10b981;
+      --success-bright: #34d399;
+      --error: #ef4444;
+      --error-container: rgba(239, 68, 68, 0.15);
+      --radial-glow: radial-gradient(circle at 50% -10%, rgba(245, 158, 11, 0.12) 0%, rgba(9, 10, 12, 0) 70%);
+    }
+
+    html.theme-emerald {
+      --bg-base: #050c0a;
+      --bg-surface: #050c0a;
+      --bg-container-lowest: #08120f;
+      --bg-container-low: #0d1b17;
+      --bg-container: #12241f;
+      --bg-container-high: #1a332c;
+      --bg-container-highest: #23443b;
+      --outline: #52796f;
+      --outline-variant: rgba(255, 255, 255, 0.08);
+      --text-main: #ecfdf5;
+      --text-variant: #a7f3d0;
+      --primary: #10b981;
+      --primary-dark: #059669;
+      --primary-bright: #34d399;
+      --primary-glow: rgba(16, 185, 129, 0.35);
+      --primary-subtle: rgba(16, 185, 129, 0.12);
+      --secondary: #06b6d4;
+      --secondary-bright: #22d3ee;
+      --tertiary: #fbbf24;
+      --success: #10b981;
+      --success-bright: #34d399;
+      --error: #f43f5e;
+      --error-container: rgba(244, 63, 94, 0.15);
+      --radial-glow: radial-gradient(circle at 50% -10%, rgba(16, 185, 129, 0.14) 0%, rgba(5, 12, 10, 0) 70%);
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-container-lowest); }
+    ::-webkit-scrollbar-thumb { background: var(--bg-container-highest); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--outline); }
+
     body {
       background-color: var(--bg-surface);
+      background-image: var(--radial-glow);
+      background-repeat: no-repeat;
+      background-attachment: fixed;
       color: var(--text-main);
       font-family: var(--font-body);
       font-size: 13px;
@@ -1002,6 +1071,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      backdrop-filter: blur(8px);
     }
     .header-brand {
       display: flex;
@@ -1011,20 +1081,25 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     .brand-icon {
       width: 32px;
       height: 32px;
-      background: linear-gradient(135deg, var(--secondary), #3b82f6);
-      border-radius: 4px;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      border-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: center;
       font-weight: 800;
       font-size: 16px;
       color: #fff;
+      box-shadow: 0 0 14px var(--primary-glow);
+      border: 1px solid rgba(255, 255, 255, 0.15);
     }
     .brand-title {
       font-size: 15px;
-      font-weight: 700;
-      letter-spacing: -0.01em;
+      font-weight: 800;
+      letter-spacing: 0.02em;
       text-transform: uppercase;
+      background: linear-gradient(90deg, #ffffff 30%, var(--primary-bright) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
     .badge {
       display: inline-flex;
@@ -1032,16 +1107,17 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       gap: 4px;
       font-family: var(--font-mono);
       font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 2px;
+      padding: 3px 8px;
+      border-radius: 4px;
       border: 1px solid var(--outline-variant);
       background: var(--bg-container-high);
       color: var(--text-variant);
+      backdrop-filter: blur(4px);
     }
     .badge-primary {
       color: var(--primary-bright);
-      border-color: rgba(16, 185, 129, 0.4);
-      background: rgba(16, 185, 129, 0.1);
+      border-color: var(--primary-glow);
+      background: var(--primary-subtle);
     }
     .pulse-dot {
       width: 6px;
@@ -1095,19 +1171,20 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       text-decoration: none;
       font-size: 12px;
       font-family: var(--font-mono);
-      border-left: 2px solid transparent;
+      border-left: 3px solid transparent;
       transition: all 0.15s ease;
       cursor: pointer;
     }
     .nav-item:hover {
-      background: var(--bg-container);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text-main);
     }
     .nav-item.active {
-      background: var(--bg-container-high);
+      background: linear-gradient(90deg, var(--primary-subtle) 0%, transparent 100%);
       color: var(--primary-bright);
       border-left-color: var(--primary-bright);
       font-weight: 600;
+      text-shadow: 0 0 12px var(--primary-glow);
     }
     .aside-foot {
       padding: 16px;
@@ -1129,7 +1206,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
     .meter-fill {
       height: 100%;
-      background: var(--secondary);
+      background: linear-gradient(90deg, var(--primary), var(--secondary));
       border-radius: 999px;
     }
     .btn-redline {
@@ -1137,32 +1214,35 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       gap: 6px;
-      padding: 8px 12px;
+      padding: 9px 12px;
       background: var(--error-container);
       color: #ffdad6;
-      border: 1px solid var(--error);
-      border-radius: 4px;
+      border: 1px solid rgba(244, 63, 94, 0.4);
+      border-radius: 6px;
       cursor: pointer;
       font-family: var(--font-mono);
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      transition: opacity 0.15s ease;
+      transition: all 0.15s ease;
     }
     .btn-redline:hover {
-      opacity: 0.9;
+      background: rgba(244, 63, 94, 0.25);
+      border-color: var(--error);
+      box-shadow: 0 0 12px rgba(244, 63, 94, 0.3);
     }
     .btn-redline.active {
       background: var(--error);
       color: #fff;
+      box-shadow: 0 0 20px rgba(244, 63, 94, 0.6);
       animation: pulse 1.5s infinite;
     }
     .workspace {
       margin-left: 220px;
       padding-top: 56px;
       min-height: 100vh;
-      background: var(--bg-surface);
+      background: transparent;
     }
     .view-container {
       display: none;
@@ -1174,14 +1254,15 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     .context-strip {
       background: var(--bg-container-low);
       border: 1px solid var(--outline-variant);
-      border-radius: 6px;
-      padding: 10px 16px;
+      border-radius: 8px;
+      padding: 12px 18px;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 20px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
     }
     .stat-grid-4 {
       display: grid;
@@ -1192,9 +1273,15 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     .card {
       background: var(--bg-container-low);
       border: 1px solid var(--outline-variant);
-      border-radius: 6px;
-      padding: 16px;
+      border-radius: 8px;
+      padding: 18px 20px;
       position: relative;
+      transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.45);
+    }
+    .card:hover {
+      border-color: var(--primary-glow);
+      box-shadow: 0 6px 24px -2px rgba(0, 0, 0, 0.6);
     }
     .card-label {
       font-family: var(--font-mono);
@@ -1232,35 +1319,37 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
     th {
       text-align: left;
-      padding: 8px 12px;
+      padding: 10px 14px;
       font-family: var(--font-mono);
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.08em;
       color: var(--outline);
       border-bottom: 1px solid var(--outline-variant);
+      background: rgba(0, 0, 0, 0.2);
     }
     td {
-      padding: 10px 12px;
+      padding: 11px 14px;
       border-bottom: 1px solid var(--outline-variant);
       color: var(--text-variant);
     }
     tr:hover td {
-      background: rgba(255, 255, 255, 0.02);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text-main);
     }
     .terminal-box {
       background: var(--bg-container-lowest);
       border: 1px solid var(--outline-variant);
-      border-radius: 4px;
-      padding: 12px;
+      border-radius: 6px;
+      padding: 14px;
       font-family: var(--font-mono);
       font-size: 11px;
       line-height: 1.6;
-      color: #cbd5e1;
+      color: #e2e8f0;
       height: 380px;
       overflow-y: auto;
       white-space: pre-wrap;
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.4);
     }
     .chip {
       background: var(--bg-container-high);
@@ -1268,31 +1357,46 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       font-family: var(--font-mono);
       font-size: 11px;
       padding: 4px 10px;
-      border-radius: 3px;
+      border-radius: 4px;
       color: var(--text-variant);
       cursor: pointer;
-      transition: all 0.15s;
+      transition: all 0.15s ease;
     }
     .chip:hover {
-      border-color: var(--secondary);
-      color: var(--secondary-bright);
+      border-color: var(--primary-bright);
+      color: var(--text-main);
+      background: var(--bg-container-highest);
+      box-shadow: 0 0 10px var(--primary-glow);
     }
     .btn {
-      background: var(--primary);
-      color: #041019;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+      color: #ffffff;
       font-weight: 600;
       font-size: 12px;
       padding: 8px 16px;
-      border: none;
-      border-radius: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      transition: opacity 0.15s;
+      box-shadow: 0 2px 10px var(--primary-glow);
+      transition: all 0.15s ease;
     }
-    .btn:hover { opacity: 0.9; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:hover {
+      filter: brightness(1.1);
+      box-shadow: 0 4px 18px var(--primary-glow);
+      transform: translateY(-1px);
+    }
+    .btn:active {
+      transform: translateY(0);
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
     .tab-bar {
       display: flex;
       gap: 8px;
@@ -1309,7 +1413,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       font-size: 12px;
       font-weight: 600;
       padding: 8px 14px;
-      border-radius: 4px;
+      border-radius: 6px;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
@@ -1322,8 +1426,9 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
     .tab-btn.active {
       color: var(--primary-bright);
-      background: rgba(0, 229, 255, 0.08);
-      border-color: rgba(0, 229, 255, 0.3);
+      background: var(--primary-subtle);
+      border-color: var(--primary-glow);
+      box-shadow: 0 0 12px var(--primary-glow);
     }
     .tab-panel {
       display: none;
@@ -1363,12 +1468,13 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       border-radius: 50%;
     }
     input:checked + .slider {
-      background-color: rgba(0, 229, 255, 0.2);
+      background-color: var(--primary-subtle);
       border-color: var(--primary-bright);
     }
     input:checked + .slider:before {
       transform: translateX(18px);
       background-color: var(--primary-bright);
+      box-shadow: 0 0 6px var(--primary-bright);
     }
     .field-row {
       display: flex;
@@ -1396,14 +1502,18 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       background: var(--bg-container-lowest);
       border: 1px solid var(--outline-variant);
       color: var(--text-main);
-      padding: 8px 12px;
-      border-radius: 4px;
+      padding: 9px 12px;
+      border-radius: 6px;
       font-family: var(--font-mono);
       font-size: 12px;
       outline: none;
       margin-bottom: 10px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
-    input:focus, select:focus, textarea:focus { border-color: var(--secondary); }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--primary-bright);
+      box-shadow: 0 0 0 2px var(--primary-glow);
+    }
     textarea {
       resize: vertical;
       min-height: 80px;
@@ -1411,24 +1521,29 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     .dag-node {
       background: var(--bg-container-low);
       border: 1px solid var(--outline-variant);
-      border-radius: 6px;
-      padding: 14px 18px;
+      border-radius: 8px;
+      padding: 16px 20px;
       min-width: 170px;
+      transition: all 0.15s ease;
     }
     .dag-node.active-stage {
       border-color: var(--secondary);
-      box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.25);
     }
     .drawer-panel {
       display: none;
       background: var(--bg-container-low);
-      border: 1px solid var(--secondary);
-      border-radius: 6px;
-      padding: 16px;
+      border: 1px solid var(--primary-glow);
+      border-radius: 8px;
+      padding: 18px;
       margin-bottom: 16px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     }
     .drawer-panel.open {
       display: block;
+    }
+    .theme-opt:hover {
+      background: var(--bg-container-high);
     }
   </style>
 </head>
@@ -1452,8 +1567,29 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <span style="color: var(--secondary-bright);" id="headerActiveModel">stealth/space-bunny-alpha</span>
     </div>
 
-    <div style="display: flex; align-items: center; gap: 12px;">
-      <button id="langToggleBtn" class="badge" onclick="toggleLanguage()" style="cursor: pointer; background: var(--bg-container-high); border: 1px solid var(--outline); color: var(--text-main); font-weight: 600; padding: 3px 8px;">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <div class="theme-dropdown" style="position: relative; display: inline-block;">
+        <button id="themeToggleBtn" class="badge" onclick="toggleThemeMenu()" style="cursor: pointer; background: var(--bg-container-high); border: 1px solid var(--outline-variant); color: var(--text-main); font-weight: 600; padding: 4px 10px;">
+          <span class="material-symbols-outlined" style="font-size: 14px; vertical-align: middle; margin-right: 4px; color: var(--primary-bright);">palette</span>
+          <span id="themeLabel">Theme: Cyber Obsidian</span>
+        </button>
+        <div id="themeMenu" style="display: none; position: absolute; right: 0; top: 32px; background: var(--bg-container-lowest); border: 1px solid var(--outline-variant); border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,0.7); z-index: 100; min-width: 190px; padding: 6px 0; backdrop-filter: blur(12px);">
+          <div class="theme-opt" onclick="selectTheme('obsidian')" style="padding: 8px 14px; cursor: pointer; font-size: 11px; display: flex; align-items: center; gap: 8px; color: var(--text-main); font-family: var(--font-mono);">
+            <span style="width: 10px; height: 10px; border-radius: 50%; background: #6366f1; box-shadow: 0 0 8px #6366f1;"></span>
+            <span data-i18n="theme_obsidian">Cyber Obsidian (Default)</span>
+          </div>
+          <div class="theme-opt" onclick="selectTheme('amber')" style="padding: 8px 14px; cursor: pointer; font-size: 11px; display: flex; align-items: center; gap: 8px; color: var(--text-main); font-family: var(--font-mono);">
+            <span style="width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; box-shadow: 0 0 8px #f59e0b;"></span>
+            <span data-i18n="theme_amber">Solar Amber (Industrial)</span>
+          </div>
+          <div class="theme-opt" onclick="selectTheme('emerald')" style="padding: 8px 14px; cursor: pointer; font-size: 11px; display: flex; align-items: center; gap: 8px; color: var(--text-main); font-family: var(--font-mono);">
+            <span style="width: 10px; height: 10px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;"></span>
+            <span data-i18n="theme_emerald">Quantum Emerald (Matrix)</span>
+          </div>
+        </div>
+      </div>
+
+      <button id="langToggleBtn" class="badge" onclick="toggleLanguage()" style="cursor: pointer; background: var(--bg-container-high); border: 1px solid var(--outline-variant); color: var(--text-main); font-weight: 600; padding: 4px 10px;">
         <span class="material-symbols-outlined" style="font-size: 13px; vertical-align: middle; margin-right: 2px;">translate</span>
         <span id="langLabel">EN / 中文</span>
       </button>
@@ -1544,24 +1680,24 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       </div>
 
       <div class="stat-grid-4">
-        <div class="card">
+        <div class="card" style="border-top: 2px solid var(--primary-bright);">
           <div class="card-label" data-i18n="active_agents">Active Agents</div>
           <div class="card-val" id="statAgents">4 <span style="font-size: 14px; color: var(--outline); font-weight: normal;">/ 0 Idle</span></div>
           <div class="card-sub" style="color: var(--primary-bright);" data-i18n="scale_out">+1 scale out</div>
         </div>
-        <div class="card">
+        <div class="card" style="border-top: 2px solid var(--tertiary);">
           <div class="card-label" data-i18n="burn_rate">Burn Rate & Cost</div>
           <div class="card-val" id="statCost">$1.428 <span style="font-size: 13px; color: var(--outline);">USD</span></div>
-          <div class="card-sub" style="color: var(--primary-bright);">-14.2% bdgt (842k tokens)</div>
+          <div class="card-sub" style="color: var(--tertiary);">-14.2% bdgt (842k tokens)</div>
         </div>
-        <div class="card">
+        <div class="card" style="border-top: 2px solid var(--secondary);">
           <div class="card-label" data-i18n="crypto_receipts">Cryptographic Receipts</div>
-          <div class="card-val" id="statReceiptsCount">1,248 <span style="font-size: 14px; color: var(--primary-bright);" data-i18n="verified">Verified</span></div>
-          <div class="card-sub">100% SHA-256 (0 anomalies)</div>
+          <div class="card-val" id="statReceiptsCount">1,248 <span style="font-size: 14px; color: var(--secondary-bright);" data-i18n="verified">Verified</span></div>
+          <div class="card-sub" style="color: var(--text-variant);">100% SHA-256 (0 anomalies)</div>
         </div>
-        <div class="card">
+        <div class="card" style="border-top: 2px solid var(--success);">
           <div class="card-label" data-i18n="gov_gate">Governance Gate</div>
-          <div class="card-val" style="color: var(--primary-bright); font-size: 20px; text-transform: uppercase;" data-i18n="fail_closed">FAIL-CLOSED</div>
+          <div class="card-val" style="color: var(--success-bright); font-size: 20px; text-transform: uppercase;" data-i18n="fail_closed">FAIL-CLOSED</div>
           <div class="card-sub" data-i18n="strict_policy">Strict-Isolation Policy Enforced</div>
         </div>
       </div>
@@ -2305,7 +2441,11 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         save_hot_reload: 'Save & Hot-Reload',
         probe_conn: 'Probe Connectivity & Latency',
         raw_yaml_title: 'Active agent.yaml Config Source',
-        reload_yaml: 'Reload'
+        reload_yaml: 'Reload',
+        theme_btn: 'Theme: Cyber Obsidian',
+        theme_obsidian: 'Cyber Obsidian (Default)',
+        theme_amber: 'Solar Amber (Industrial)',
+        theme_emerald: 'Quantum Emerald (Matrix)'
       },
       zh: {
         lang_btn: '中文 / EN',
@@ -2439,14 +2579,56 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         save_hot_reload: '保存并立即热重载',
         probe_conn: '真实测速探活',
         raw_yaml_title: '实时 agent.yaml 配置源',
-        reload_yaml: '重新读取'
+        reload_yaml: '重新读取',
+        theme_btn: '主题: 极光黑曜',
+        theme_obsidian: '极光黑曜 (赛博黑曜石·默认)',
+        theme_amber: '钛金琥珀 (工业暗金)',
+        theme_emerald: '量子智核 (星际矩阵)'
       }
     };
+
+    var currentTheme = localStorage.getItem('agentos_theme') || 'obsidian';
+
+    function toggleThemeMenu() {
+      var m = document.getElementById('themeMenu');
+      if (m) m.style.display = m.style.display === 'block' ? 'none' : 'block';
+    }
+
+    function selectTheme(theme) {
+      currentTheme = theme;
+      localStorage.setItem('agentos_theme', theme);
+      applyTheme(theme);
+      var m = document.getElementById('themeMenu');
+      if (m) m.style.display = 'none';
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.classList.remove('theme-obsidian', 'theme-amber', 'theme-emerald');
+      document.documentElement.classList.add('theme-' + theme);
+      var lbl = document.getElementById('themeLabel');
+      if (lbl) {
+        var names = {
+          obsidian: currentLang === 'zh' ? '主题: 极光黑曜' : 'Theme: Cyber Obsidian',
+          amber: currentLang === 'zh' ? '主题: 钛金琥珀' : 'Theme: Solar Amber',
+          emerald: currentLang === 'zh' ? '主题: 量子智核' : 'Theme: Quantum Emerald'
+        };
+        lbl.textContent = names[theme] || theme;
+      }
+    }
+
+    document.addEventListener('click', function(e) {
+      var dropdown = document.querySelector('.theme-dropdown');
+      var m = document.getElementById('themeMenu');
+      if (dropdown && m && !dropdown.contains(e.target)) {
+        m.style.display = 'none';
+      }
+    });
 
     function toggleLanguage() {
       currentLang = currentLang === 'en' ? 'zh' : 'en';
       localStorage.setItem('agentos_lang', currentLang);
       applyLanguage(currentLang);
+      applyTheme(currentTheme);
     }
 
     function applyLanguage(lang) {
@@ -3144,6 +3326,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       }
     }
 
+    applyTheme(currentTheme);
     applyLanguage(currentLang);
     loadStatus();
     loadAgents();
