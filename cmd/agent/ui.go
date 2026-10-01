@@ -999,20 +999,25 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       </div>
       <div class="badge badge-primary" style="margin-left: 12px;">
         <span class="pulse-dot"></span>
-        <span id="headerLoopStatus">25ms Reconcile Loop: HEALTHY</span>
+        <span id="headerLoopStatus" data-i18n="reconcile_healthy">25ms Reconcile Loop: HEALTHY</span>
       </div>
     </div>
 
     <div style="display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11px;">
-      <span style="color: var(--outline);">Active Model:</span>
+      <span style="color: var(--outline);" data-i18n="active_model">Active Model:</span>
       <span style="color: var(--secondary-bright);" id="headerActiveModel">stealth/space-bunny-alpha</span>
     </div>
 
-    <div style="display: flex; align-items: center; gap: 14px;">
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <button id="langToggleBtn" class="badge" onclick="toggleLanguage()" style="cursor: pointer; background: var(--bg-container-high); border: 1px solid var(--outline); color: var(--text-main); font-weight: 600; padding: 3px 8px;">
+        <span class="material-symbols-outlined" style="font-size: 13px; vertical-align: middle; margin-right: 2px;">translate</span>
+        <span id="langLabel">EN / 中文</span>
+      </button>
+
       <div class="badge" id="envBadge">PROD</div>
       <div style="display: flex; flex-direction: column; width: 140px; font-family: var(--font-mono); font-size: 10px;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-          <span style="color: var(--outline);">BUDGET</span>
+          <span style="color: var(--outline);" data-i18n="budget_label">BUDGET</span>
           <span style="color: var(--primary-bright);" id="headerSpend">$0.42 / $10.00</span>
         </div>
         <div class="meter-bar">
@@ -1020,7 +1025,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
       <span class="badge" style="color: var(--secondary-bright);">TLS 1.3</span>
-      <span class="badge" id="statusBadge" style="color: var(--primary-bright);">ONLINE</span>
+      <span class="badge" id="statusBadge" style="color: var(--primary-bright);" data-i18n="online_badge">ONLINE</span>
     </div>
   </header>
 
@@ -1028,29 +1033,29 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
   <aside>
     <div>
       <div class="nav-head">
-        <span>Control Plane</span>
+        <span data-i18n="control_plane">Control Plane</span>
         <span class="material-symbols-outlined" style="font-size: 14px;">tune</span>
       </div>
       <nav id="sidebarNav">
         <a class="nav-item active" data-view="overview" onclick="switchView('overview')">
           <span class="material-symbols-outlined" style="font-size: 16px;">grid_view</span>
-          <span>Cluster Overview</span>
+          <span data-i18n="nav_overview">Cluster Overview</span>
         </a>
         <a class="nav-item" data-view="stream" onclick="switchView('stream')">
           <span class="material-symbols-outlined" style="font-size: 16px;">splitscreen</span>
-          <span>Dual-Stream Exec</span>
+          <span data-i18n="nav_stream">Dual-Stream Exec</span>
         </a>
         <a class="nav-item" data-view="audit" onclick="switchView('audit')">
           <span class="material-symbols-outlined" style="font-size: 16px;">verified</span>
-          <span>Audit Ledger</span>
+          <span data-i18n="nav_audit">Audit Ledger</span>
         </a>
         <a class="nav-item" data-view="orchestrator" onclick="switchView('orchestrator')">
           <span class="material-symbols-outlined" style="font-size: 16px;">schema</span>
-          <span>DAG Orchestrator</span>
+          <span data-i18n="nav_orchestrator">DAG Orchestrator</span>
         </a>
         <a class="nav-item" data-view="gateway" onclick="switchView('gateway')">
           <span class="material-symbols-outlined" style="font-size: 16px;">hub</span>
-          <span>Model Gateway</span>
+          <span data-i18n="nav_gateway">Model Gateway</span>
         </a>
       </nav>
     </div>
@@ -1058,7 +1063,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     <div class="aside-foot">
       <div>
         <div style="display: flex; justify-content: space-between;">
-          <span style="color: var(--outline);">SHM ALLOC</span>
+          <span style="color: var(--outline);" data-i18n="shm_alloc">SHM ALLOC</span>
           <span style="color: var(--text-main);">14.2 / 32 GB</span>
         </div>
         <div class="meter-bar">
@@ -1066,12 +1071,12 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
       <div style="display: flex; justify-content: space-between; padding-top: 6px; border-top: 1px solid var(--outline-variant);">
-        <span style="color: var(--outline);">UPTIME</span>
+        <span style="color: var(--outline);" data-i18n="uptime_label">UPTIME</span>
         <span style="color: var(--primary-bright);" id="asideUptime">99.998%</span>
       </div>
       <button class="btn-redline" id="redlineBtn" onclick="toggleRedline()">
         <span class="material-symbols-outlined" style="font-size: 14px;">power_settings_new</span>
-        <span id="redlineText">REDLINE HALT</span>
+        <span id="redlineText" data-i18n="redline_halt">REDLINE HALT</span>
       </button>
     </div>
   </aside>
@@ -1084,74 +1089,74 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div class="context-strip">
         <div style="display: flex; align-items: center; gap: 10px;">
           <span class="pulse-dot"></span>
-          <span style="font-size: 14px; font-weight: 700; text-transform: uppercase;">Cluster Telemetry & Financial Ledger</span>
-          <span class="badge">ZONE: US-EAST-VA-01</span>
-          <span class="badge" style="color: var(--primary-bright);">EPOCH #4829</span>
+          <span style="font-size: 14px; font-weight: 700; text-transform: uppercase;" data-i18n="telemetry_banner_title">Cluster Telemetry & Financial Ledger</span>
+          <span class="badge" data-i18n="zone">ZONE: US-EAST-VA-01</span>
+          <span class="badge" style="color: var(--primary-bright);" data-i18n="epoch">EPOCH #4829</span>
         </div>
         <div style="display: flex; align-items: center; gap: 16px; font-family: var(--font-mono); font-size: 11px;">
-          <span>TELEMETRY SYNC: <strong style="color: var(--text-main);">120ms</strong></span>
-          <span>SLO STATUS: <strong style="color: var(--primary-bright);">NOMINAL (99.998%)</strong></span>
+          <span><span data-i18n="telemetry_sync">TELEMETRY SYNC:</span> <strong style="color: var(--text-main);">120ms</strong></span>
+          <span><span data-i18n="slo_status">SLO STATUS:</span> <strong style="color: var(--primary-bright);" data-i18n="slo_nominal">NOMINAL (99.998%)</strong></span>
         </div>
       </div>
 
       <div class="stat-grid-4">
         <div class="card">
-          <div class="card-label">Active Agents</div>
+          <div class="card-label" data-i18n="active_agents">Active Agents</div>
           <div class="card-val" id="statAgents">4 <span style="font-size: 14px; color: var(--outline); font-weight: normal;">/ 0 Idle</span></div>
-          <div class="card-sub" style="color: var(--primary-bright);">+1 scale out</div>
+          <div class="card-sub" style="color: var(--primary-bright);" data-i18n="scale_out">+1 scale out</div>
         </div>
         <div class="card">
-          <div class="card-label">Burn Rate & Cost</div>
+          <div class="card-label" data-i18n="burn_rate">Burn Rate & Cost</div>
           <div class="card-val" id="statCost">$1.428 <span style="font-size: 13px; color: var(--outline);">USD</span></div>
           <div class="card-sub" style="color: var(--primary-bright);">-14.2% bdgt (842k tokens)</div>
         </div>
         <div class="card">
-          <div class="card-label">Cryptographic Receipts</div>
-          <div class="card-val" id="statReceiptsCount">1,248 <span style="font-size: 14px; color: var(--primary-bright);">Verified</span></div>
+          <div class="card-label" data-i18n="crypto_receipts">Cryptographic Receipts</div>
+          <div class="card-val" id="statReceiptsCount">1,248 <span style="font-size: 14px; color: var(--primary-bright);" data-i18n="verified">Verified</span></div>
           <div class="card-sub">100% SHA-256 (0 anomalies)</div>
         </div>
         <div class="card">
-          <div class="card-label">Governance Gate</div>
-          <div class="card-val" style="color: var(--primary-bright); font-size: 20px; text-transform: uppercase;">FAIL-CLOSED</div>
-          <div class="card-sub">Strict-Isolation Policy Enforced</div>
+          <div class="card-label" data-i18n="gov_gate">Governance Gate</div>
+          <div class="card-val" style="color: var(--primary-bright); font-size: 20px; text-transform: uppercase;" data-i18n="fail_closed">FAIL-CLOSED</div>
+          <div class="card-sub" data-i18n="strict_policy">Strict-Isolation Policy Enforced</div>
         </div>
       </div>
 
       <!-- CREATE AGENT DRAWER -->
       <div class="drawer-panel" id="agentDrawer">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);">Scaffold New Autonomous Agent</span>
-          <button class="chip" onclick="toggleAgentDrawer()">Close</button>
+          <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="drawer_scaffold_title">Scaffold New Autonomous Agent</span>
+          <button class="chip" onclick="toggleAgentDrawer()" data-i18n="drawer_close">Close</button>
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
           <div>
-            <label style="font-size: 11px; color: var(--outline);">AGENT IDENTIFIER</label>
+            <label style="font-size: 11px; color: var(--outline);" data-i18n="field_agent_id">AGENT IDENTIFIER</label>
             <input type="text" id="newAgentName" placeholder="e.g. vibration-analyst"/>
           </div>
           <div>
-            <label style="font-size: 11px; color: var(--outline);">ROLE & PURPOSE</label>
+            <label style="font-size: 11px; color: var(--outline);" data-i18n="field_role">ROLE & PURPOSE</label>
             <input type="text" id="newAgentRole" placeholder="e.g. Bearing RMS & Spectrum Telemetry"/>
           </div>
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
           <div>
-            <label style="font-size: 11px; color: var(--outline);">TARGET MODEL</label>
+            <label style="font-size: 11px; color: var(--outline);" data-i18n="field_target_model">TARGET MODEL</label>
             <input type="text" id="newAgentModel" value="deepseek/deepseek-r1"/>
           </div>
           <div>
-            <label style="font-size: 11px; color: var(--outline);">BUDGET CEILING (USD)</label>
+            <label style="font-size: 11px; color: var(--outline);" data-i18n="field_budget_ceiling">BUDGET CEILING (USD)</label>
             <input type="number" id="newAgentBudget" value="1.50" step="0.25"/>
           </div>
         </div>
         <div>
-          <label style="font-size: 11px; color: var(--outline);">SYSTEM PROMPT & OBJECTIVES</label>
+          <label style="font-size: 11px; color: var(--outline);" data-i18n="field_system_prompt">SYSTEM PROMPT & OBJECTIVES</label>
           <textarea id="newAgentPrompt" placeholder="Define role, constraints, and deterministic outputs...">You are an enterprise AI Agent managed by AgentOS kernel. Always verify telemetry and produce structured reports.</textarea>
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
           <span style="font-family: var(--font-mono); font-size: 11px; color: var(--outline);" id="createAgentMsg">Scaffolds agent.manifest.json, prompt.md, and tools/main.go</span>
           <button class="btn" onclick="submitCreateAgent()">
             <span class="material-symbols-outlined" style="font-size: 14px;">add_circle</span>
-            <span>Scaffold & Deploy Agent</span>
+            <span data-i18n="btn_deploy_agent">Scaffold & Deploy Agent</span>
           </button>
         </div>
       </div>
@@ -1159,7 +1164,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div class="grid-2col">
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <span style="font-weight: 700; text-transform: uppercase;">System Execution Throughput</span>
+            <span style="font-weight: 700; text-transform: uppercase;" data-i18n="sys_throughput">System Execution Throughput</span>
             <span class="badge">Tool: 74.2 ops/s | LLM: 38.6 ops/s</span>
           </div>
           <div style="height: 180px; display: flex; align-items: flex-end; gap: 8px; padding-top: 10px;">
@@ -1175,19 +1180,19 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <span style="font-weight: 700; text-transform: uppercase;">Active Sub-Agent Threads</span>
+            <span style="font-weight: 700; text-transform: uppercase;" data-i18n="sub_agent_threads">Active Sub-Agent Threads</span>
             <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="toggleAgentDrawer()">
               <span class="material-symbols-outlined" style="font-size: 14px;">add</span>
-              <span>+ Create Agent</span>
+              <span data-i18n="create_agent">+ Create Agent</span>
             </button>
           </div>
           <table>
             <thead>
               <tr>
-                <th>Agent Identifier</th>
-                <th>Role</th>
-                <th>Model</th>
-                <th>Status</th>
+                <th data-i18n="col_agent_id">Agent Identifier</th>
+                <th data-i18n="col_role">Role</th>
+                <th data-i18n="col_model">Model</th>
+                <th data-i18n="col_status">Status</th>
               </tr>
             </thead>
             <tbody id="overviewAgentsBody">
@@ -1203,7 +1208,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div class="context-strip">
         <div style="display: flex; align-items: center; gap: 10px;">
           <span class="badge" style="color: var(--secondary-bright);">AGENT: Quality-Tracer-01</span>
-          <span style="font-weight: 700;">Task: Spindle Overheat Root Cause & Action Protocol</span>
+          <span style="font-weight: 700;" data-i18n="stream_task_label">Task: Spindle Overheat Root Cause & Action Protocol</span>
         </div>
         <div style="display: flex; align-items: center; gap: 12px; font-family: var(--font-mono); font-size: 11px;">
           <span>MODEL: <strong style="color: var(--secondary-bright);">DeepSeek-R1 (Reasoner)</strong></span>
@@ -1237,7 +1242,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div class="grid-2col" style="margin-bottom: 20px;">
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <span style="font-weight: 700; text-transform: uppercase;">Autonomous CoT Reasoning Stream</span>
+            <span style="font-weight: 700; text-transform: uppercase;" data-i18n="cot_stream_title">Autonomous CoT Reasoning Stream</span>
             <span class="badge" style="color: var(--secondary-bright);">DEEPSEEK-R1</span>
           </div>
           <div class="terminal-box" id="cotStreamOutput">[reasoning] Ingested live telemetry packet from CNC-03 edge bus.
@@ -1255,7 +1260,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <span style="font-weight: 700; text-transform: uppercase;">Tool Invocations & Telemetry Interceptor</span>
+            <span style="font-weight: 700; text-transform: uppercase;" data-i18n="tool_interceptor_title">Tool Invocations & Telemetry Interceptor</span>
             <span class="badge badge-primary">MCP / JSON-RPC</span>
           </div>
           <div class="terminal-box" id="toolStreamOutput">[mcp:call] industrial.sensor.query@1.0.0
@@ -1276,22 +1281,22 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <span style="font-weight: 700; text-transform: uppercase;">Dispatch New Objective to Execution Kernel</span>
+          <span style="font-weight: 700; text-transform: uppercase;" data-i18n="dispatch_objective_title">Dispatch New Objective to Execution Kernel</span>
           <span id="runLatencyBadge" class="badge" style="color: var(--primary-bright);">IDLE</span>
         </div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
-          <span class="chip" onclick="setPrompt('Analyze CNC-03 spindle temperature spike at 89.4C and check lubrication SOP')">CNC-03 Alarm Diagnostics</span>
-          <span class="chip" onclick="setPrompt('Inspect product lot 202609-B tolerance variances and locate supplier lot history')">Defect SOP Traceability</span>
-          <span class="chip" onclick="setPrompt('Execute kernel conformance self-check across runtime tool interfaces')">Kernel Conformance Check</span>
+          <span class="chip" onclick="setPrompt('Analyze CNC-03 spindle temperature spike at 89.4C and check lubrication SOP')" data-i18n="chip_cnc">CNC-03 Alarm Diagnostics</span>
+          <span class="chip" onclick="setPrompt('Inspect product lot 202609-B tolerance variances and locate supplier lot history')" data-i18n="chip_defect">Defect SOP Traceability</span>
+          <span class="chip" onclick="setPrompt('Execute kernel conformance self-check across runtime tool interfaces')" data-i18n="chip_conformance">Kernel Conformance Check</span>
         </div>
-        <textarea id="taskPromptInput" placeholder="Enter objective for the AgentOS execution kernel..."></textarea>
+        <textarea id="taskPromptInput" placeholder="Enter objective for the AgentOS execution kernel..." data-i18n-ph="prompt_placeholder"></textarea>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
           <div style="display: flex; gap: 10px;">
             <button class="btn" id="dispatchBtn" onclick="dispatchExecution()">
               <span class="material-symbols-outlined" style="font-size: 14px;">play_arrow</span>
-              <span id="dispatchText">Dispatch Execution</span>
+              <span id="dispatchText" data-i18n="dispatch_btn_text">Dispatch Execution</span>
             </button>
-            <button class="chip" style="background: var(--bg-container); color: var(--error);" onclick="alert('Mitigation actuator disengaged by operator.')">Hold Interlock</button>
+            <button class="chip" style="background: var(--bg-container); color: var(--error);" onclick="alert('Mitigation actuator disengaged by operator.')" data-i18n="hold_interlock">Hold Interlock</button>
           </div>
           <span style="font-family: var(--font-mono); font-size: 11px; color: var(--outline);" id="lastReceiptHash">No pending dispatches</span>
         </div>
@@ -1303,26 +1308,26 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
           <div>
-            <span style="font-size: 15px; font-weight: 700; text-transform: uppercase;">Cryptographic Audit Receipts Ledger</span>
-            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--outline); margin-top: 4px;">
+            <span style="font-size: 15px; font-weight: 700; text-transform: uppercase;" data-i18n="audit_ledger_title">Cryptographic Audit Receipts Ledger</span>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--outline); margin-top: 4px;" data-i18n="audit_ledger_sub">
               Immutable SHA-256 Merkle chain with tamper-proof signatures
             </div>
           </div>
-          <button class="chip" onclick="loadReceipts()">Refresh Ledger</button>
+          <button class="chip" onclick="loadReceipts()" data-i18n="refresh_ledger">Refresh Ledger</button>
         </div>
         <div style="overflow-x: auto;">
           <table>
             <thead>
               <tr>
-                <th>Receipt ID</th>
-                <th>Timestamp</th>
-                <th>Caller</th>
-                <th>Task / Objective</th>
-                <th>Latency</th>
-                <th>Tokens</th>
-                <th>Cost (USD)</th>
-                <th>Signature</th>
-                <th>Status</th>
+                <th data-i18n="col_receipt_id">Receipt ID</th>
+                <th data-i18n="col_timestamp">Timestamp</th>
+                <th data-i18n="col_caller">Caller</th>
+                <th data-i18n="col_task">Task / Objective</th>
+                <th data-i18n="col_latency">Latency</th>
+                <th data-i18n="col_tokens">Tokens</th>
+                <th data-i18n="col_cost">Cost (USD)</th>
+                <th data-i18n="col_signature">Signature</th>
+                <th data-i18n="col_status">Status</th>
               </tr>
             </thead>
             <tbody id="auditTableBody">
@@ -1337,53 +1342,53 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     <div id="view-orchestrator" class="view-container">
       <div class="card" style="margin-bottom: 20px;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-          <span style="font-size: 15px; font-weight: 700; text-transform: uppercase;">Deterministic DAG Execution Pipeline</span>
-          <span class="badge badge-primary">ALL STAGES OPERATIONAL</span>
+          <span style="font-size: 15px; font-weight: 700; text-transform: uppercase;" data-i18n="dag_pipeline_title">Deterministic DAG Execution Pipeline</span>
+          <span class="badge badge-primary" data-i18n="dag_status">ALL STAGES OPERATIONAL</span>
         </div>
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; overflow-x: auto; padding: 24px 10px;" id="dagContainer">
           <div class="dag-node active-stage">
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--secondary-bright); text-transform: uppercase; margin-bottom: 4px;">STAGE 1</div>
-            <div style="font-weight: 600; font-size: 13px;">Task Ingestion</div>
+            <div style="font-weight: 600; font-size: 13px;" data-i18n="stage1_name">Task Ingestion</div>
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--outline); margin-top: 4px;">1.2ms | 4 Threads</div>
           </div>
           <div style="color: var(--outline); font-size: 18px;">&rarr;</div>
           <div class="dag-node">
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--secondary-bright); text-transform: uppercase; margin-bottom: 4px;">STAGE 2</div>
-            <div style="font-weight: 600; font-size: 13px;">Security & Budget</div>
+            <div style="font-weight: 600; font-size: 13px;" data-i18n="stage2_name">Security & Budget</div>
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--outline); margin-top: 4px;">0.8ms | Fail-Closed</div>
           </div>
           <div style="color: var(--outline); font-size: 18px;">&rarr;</div>
           <div class="dag-node active-stage">
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--primary-bright); text-transform: uppercase; margin-bottom: 4px;">STAGE 3</div>
-            <div style="font-weight: 600; font-size: 13px;">Dual-Stream CoT</div>
+            <div style="font-weight: 600; font-size: 13px;" data-i18n="stage3_name">Dual-Stream CoT</div>
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--outline); margin-top: 4px;">185ms | Reasoner</div>
           </div>
           <div style="color: var(--outline); font-size: 18px;">&rarr;</div>
           <div class="dag-node">
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--secondary-bright); text-transform: uppercase; margin-bottom: 4px;">STAGE 4</div>
-            <div style="font-weight: 600; font-size: 13px;">MCP Tool Bridge</div>
+            <div style="font-weight: 600; font-size: 13px;" data-i18n="stage4_name">MCP Tool Bridge</div>
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--outline); margin-top: 4px;">14.5ms | 6 Adapters</div>
           </div>
           <div style="color: var(--outline); font-size: 18px;">&rarr;</div>
           <div class="dag-node">
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--primary-bright); text-transform: uppercase; margin-bottom: 4px;">STAGE 5</div>
-            <div style="font-weight: 600; font-size: 13px;">Audit Ledger</div>
+            <div style="font-weight: 600; font-size: 13px;" data-i18n="stage5_name">Audit Ledger</div>
             <div style="font-family: var(--font-mono); font-size: 10px; color: var(--outline); margin-top: 4px;">0.4ms | SHA-256</div>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <div style="font-weight: 700; text-transform: uppercase; margin-bottom: 12px;">Registered Tool Adapters</div>
+        <div style="font-weight: 700; text-transform: uppercase; margin-bottom: 12px;" data-i18n="registered_tools_title">Registered Tool Adapters</div>
         <div style="overflow-x: auto;">
           <table>
             <thead>
               <tr>
-                <th>Tool Identifier</th>
-                <th>Adapter Name</th>
-                <th>Protocol</th>
-                <th>Description</th>
-                <th>Status</th>
+                <th data-i18n="col_tool_id">Tool Identifier</th>
+                <th data-i18n="col_adapter">Adapter Name</th>
+                <th data-i18n="col_protocol">Protocol</th>
+                <th data-i18n="col_desc">Description</th>
+                <th data-i18n="col_status">Status</th>
               </tr>
             </thead>
             <tbody id="toolsCatalogBody">
@@ -1400,11 +1405,11 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         <!-- Interactive Model Configuration Form -->
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-            <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);">Model Provider & Budget Control</span>
+            <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="model_gateway_title">Model Provider & Budget Control</span>
             <span class="badge badge-primary" id="modelProbeBadge">READY</span>
           </div>
 
-          <label style="font-size: 11px; color: var(--outline);">PROVIDER TYPE</label>
+          <label style="font-size: 11px; color: var(--outline);" data-i18n="provider_type">PROVIDER TYPE</label>
           <select id="cfgProvider" onchange="autoFillProviderDefaults()">
             <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
             <option value="deepseek">DeepSeek (Direct API)</option>
@@ -1412,26 +1417,26 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
             <option value="local-oci">Local OCI (Self-hosted Qwen/Llama)</option>
           </select>
 
-          <label style="font-size: 11px; color: var(--outline);">MODEL IDENTIFIER</label>
+          <label style="font-size: 11px; color: var(--outline);" data-i18n="model_identifier">MODEL IDENTIFIER</label>
           <input type="text" id="cfgModel" placeholder="e.g. deepseek/deepseek-r1"/>
 
-          <label style="font-size: 11px; color: var(--outline);">BASE URL</label>
+          <label style="font-size: 11px; color: var(--outline);" data-i18n="base_url">BASE URL</label>
           <input type="text" id="cfgBaseURL" placeholder="https://openrouter.ai/api/v1"/>
 
-          <label style="font-size: 11px; color: var(--outline);">API KEY (Leave blank to preserve current key)</label>
+          <label style="font-size: 11px; color: var(--outline);" data-i18n="api_key_label">API KEY (Leave blank to preserve current key)</label>
           <input type="password" id="cfgAPIKey" placeholder="Enter API key..."/>
 
-          <label style="font-size: 11px; color: var(--outline);">BUDGET CEILING USD ($)</label>
+          <label style="font-size: 11px; color: var(--outline);" data-i18n="budget_ceiling_label">BUDGET CEILING USD ($)</label>
           <input type="number" id="cfgBudget" step="0.50" min="0.10" value="1.00"/>
 
           <div style="display: flex; gap: 10px; margin-top: 14px;">
             <button class="btn" onclick="saveModelConfig()">
               <span class="material-symbols-outlined" style="font-size: 14px;">save</span>
-              <span>Save & Hot-Reload</span>
+              <span data-i18n="save_hot_reload">Save & Hot-Reload</span>
             </button>
             <button class="chip" onclick="testModelConnectivity()">
               <span class="material-symbols-outlined" style="font-size: 14px;">wifi_tethering</span>
-              <span>Probe Connectivity</span>
+              <span data-i18n="probe_conn">Probe Connectivity</span>
             </button>
           </div>
           <div style="font-family: var(--font-mono); font-size: 11px; color: var(--outline); margin-top: 12px;" id="modelConfigFeedback">
@@ -1442,8 +1447,8 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         <!-- Raw YAML Preview -->
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <span style="font-weight: 700; text-transform: uppercase;">Active agent.yaml Config</span>
-            <button class="chip" onclick="loadConfig()">Reload</button>
+            <span style="font-weight: 700; text-transform: uppercase;" data-i18n="raw_yaml_title">Active agent.yaml Config</span>
+            <button class="chip" onclick="loadConfig()" data-i18n="reload_yaml">Reload</button>
           </div>
           <div class="terminal-box" id="configView">Loading configuration...</div>
         </div>
@@ -1453,6 +1458,212 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
   </main>
 
   <script>
+    var currentLang = localStorage.getItem('agentos_lang') || 'en';
+
+    var i18n = {
+      en: {
+        lang_btn: 'EN / 中文',
+        reconcile_healthy: '25ms Reconcile Loop: HEALTHY',
+        active_model: 'Active Model:',
+        budget_label: 'BUDGET',
+        online_badge: 'ONLINE',
+        control_plane: 'Control Plane',
+        nav_overview: 'Cluster Overview',
+        nav_stream: 'Dual-Stream Exec',
+        nav_audit: 'Audit Ledger',
+        nav_orchestrator: 'DAG Orchestrator',
+        nav_gateway: 'Model Gateway',
+        shm_alloc: 'SHM ALLOC',
+        uptime_label: 'UPTIME',
+        redline_halt: 'REDLINE HALT',
+        telemetry_banner_title: 'Cluster Telemetry & Financial Ledger',
+        zone: 'ZONE: US-EAST-VA-01',
+        epoch: 'EPOCH #4829',
+        telemetry_sync: 'TELEMETRY SYNC:',
+        slo_status: 'SLO STATUS:',
+        slo_nominal: 'NOMINAL (99.998%)',
+        active_agents: 'Active Agents',
+        scale_out: '+1 scale out',
+        burn_rate: 'Burn Rate & Cost',
+        crypto_receipts: 'Cryptographic Receipts',
+        verified: 'Verified',
+        gov_gate: 'Governance Gate',
+        fail_closed: 'FAIL-CLOSED',
+        strict_policy: 'Strict-Isolation Policy Enforced',
+        sys_throughput: 'System Execution Throughput',
+        sub_agent_threads: 'Active Sub-Agent Threads',
+        create_agent: '+ Create Agent',
+        col_agent_id: 'Agent Identifier',
+        col_role: 'Role',
+        col_model: 'Model',
+        col_status: 'Status',
+        drawer_scaffold_title: 'Scaffold New Autonomous Agent',
+        drawer_close: 'Close',
+        field_agent_id: 'AGENT IDENTIFIER',
+        field_role: 'ROLE & PURPOSE',
+        field_target_model: 'TARGET MODEL',
+        field_budget_ceiling: 'BUDGET CEILING (USD)',
+        field_system_prompt: 'SYSTEM PROMPT & OBJECTIVES',
+        btn_deploy_agent: 'Scaffold & Deploy Agent',
+        stream_task_label: 'Task: Spindle Overheat Root Cause & Action Protocol',
+        cot_stream_title: 'Autonomous CoT Reasoning Stream',
+        tool_interceptor_title: 'Tool Invocations & Telemetry Interceptor',
+        dispatch_objective_title: 'Dispatch New Objective to Execution Kernel',
+        dispatch_btn_text: 'Dispatch Execution',
+        hold_interlock: 'Hold Interlock',
+        prompt_placeholder: 'Enter objective for the AgentOS execution kernel...',
+        chip_cnc: 'CNC-03 Alarm Diagnostics',
+        chip_defect: 'Defect SOP Traceability',
+        chip_conformance: 'Kernel Conformance Check',
+        audit_ledger_title: 'Cryptographic Audit Receipts Ledger',
+        audit_ledger_sub: 'Immutable SHA-256 Merkle chain with tamper-proof signatures',
+        refresh_ledger: 'Refresh Ledger',
+        col_receipt_id: 'Receipt ID',
+        col_timestamp: 'Timestamp',
+        col_caller: 'Caller',
+        col_task: 'Task / Objective',
+        col_latency: 'Latency',
+        col_tokens: 'Tokens',
+        col_cost: 'Cost (USD)',
+        col_signature: 'Signature',
+        dag_pipeline_title: 'Deterministic DAG Execution Pipeline',
+        dag_status: 'ALL STAGES OPERATIONAL',
+        stage1_name: 'Task Ingestion',
+        stage2_name: 'Security & Budget',
+        stage3_name: 'Dual-Stream CoT',
+        stage4_name: 'MCP Tool Bridge',
+        stage5_name: 'Audit Ledger',
+        registered_tools_title: 'Registered Tool Adapters',
+        col_tool_id: 'Tool Identifier',
+        col_adapter: 'Adapter Name',
+        col_protocol: 'Protocol',
+        col_desc: 'Description',
+        model_gateway_title: 'Model Provider & Budget Control',
+        provider_type: 'PROVIDER TYPE',
+        model_identifier: 'MODEL IDENTIFIER',
+        base_url: 'BASE URL',
+        api_key_label: 'API KEY (Leave blank to preserve current key)',
+        budget_ceiling_label: 'BUDGET CEILING USD ($)',
+        save_hot_reload: 'Save & Hot-Reload',
+        probe_conn: 'Probe Connectivity',
+        raw_yaml_title: 'Active agent.yaml Config',
+        reload_yaml: 'Reload'
+      },
+      zh: {
+        lang_btn: '中文 / EN',
+        reconcile_healthy: '25ms 协调状态环: 正常运行',
+        active_model: '当前驱动模型:',
+        budget_label: '算力预算',
+        online_badge: '在线运行',
+        control_plane: '控制中枢',
+        nav_overview: '集群总览概况',
+        nav_stream: '双流协同执行',
+        nav_audit: '密码学审计账本',
+        nav_orchestrator: 'DAG 任务编排',
+        nav_gateway: '模型推理网关',
+        shm_alloc: '共享内存分配',
+        uptime_label: '高可用正常运行率',
+        redline_halt: '红线急停熔断',
+        telemetry_banner_title: '集群遥测与链上财务审计账本',
+        zone: '可用区: 美东弗吉尼亚-01',
+        epoch: '纪元 #4829',
+        telemetry_sync: '遥测同步延迟:',
+        slo_status: 'SLO 状态评级:',
+        slo_nominal: '极佳 (99.998%)',
+        active_agents: '活跃 Agent 实例',
+        scale_out: '+1 自动弹性扩容',
+        burn_rate: '算力消耗速率与成本',
+        crypto_receipts: '密码学防篡改收据',
+        verified: '已验证',
+        gov_gate: '治理安全门禁',
+        fail_closed: '闭环保护 (Fail-Closed)',
+        strict_policy: '严格隔离策略全面执行',
+        sys_throughput: '系统执行吞吐曲线 (24小时)',
+        sub_agent_threads: '活跃子 Agent 线程矩阵',
+        create_agent: '+ 创建新 Agent',
+        col_agent_id: 'Agent 唯一标识',
+        col_role: '核心职责与角色',
+        col_model: '底层驱动模型',
+        col_status: '运行状态',
+        drawer_scaffold_title: '自动化构建全新自主 Agent',
+        drawer_close: '关闭抽屉',
+        field_agent_id: 'AGENT 唯一英文标识',
+        field_role: '业务职责描述 (角色与任务)',
+        field_target_model: '驱动模型标识',
+        field_budget_ceiling: '单任务成本上限 (USD)',
+        field_system_prompt: '系统提示词 (Prompt) 与安全约束',
+        btn_deploy_agent: '生成脚手架并立即部署',
+        stream_task_label: '当前任务: CNC-03主轴异常温升根因诊断与SOP处置',
+        cot_stream_title: '自主深度思维链推理流 (CoT)',
+        tool_interceptor_title: 'MCP 工具拦截与实施工艺遥测',
+        dispatch_objective_title: '向 AgentOS 执行内核派发全新任务',
+        dispatch_btn_text: '立即派发执行',
+        hold_interlock: '锁定联锁',
+        prompt_placeholder: '输入给 AgentOS 执行内核的目标指令与业务需求...',
+        chip_cnc: 'CNC-03 主轴报警诊断',
+        chip_defect: '产品缺陷 SOP 溯源分析',
+        chip_conformance: '内核一致性自检',
+        audit_ledger_title: '密码学审计收据账本 (不可篡改)',
+        audit_ledger_sub: '具备完整默克尔树 SHA-256 签名与微计费收据',
+        refresh_ledger: '刷新审计账本',
+        col_receipt_id: '收据哈希 (ID)',
+        col_timestamp: '产生时间',
+        col_caller: '调用主体',
+        col_task: '执行目标与摘要',
+        col_latency: '执行耗时',
+        col_tokens: '消耗 Token',
+        col_cost: '成本 (USD)',
+        col_signature: '数字签名',
+        dag_pipeline_title: '确定性 DAG 多 Agent 编排流水线',
+        dag_status: '所有执行阶段就绪',
+        stage1_name: '任务接入网关',
+        stage2_name: '安全与预算策略',
+        stage3_name: '双流 CoT 推理',
+        stage4_name: 'MCP 工具执行桥',
+        stage5_name: '密码学公证入账',
+        registered_tools_title: '已注册 MCP 与原生工具适配器',
+        col_tool_id: '工具标识',
+        col_adapter: '适配器版本',
+        col_protocol: '通信协议',
+        col_desc: '能力描述',
+        model_gateway_title: '模型提供商配置与预算控制',
+        provider_type: '网关提供商类型',
+        model_identifier: '模型 Identifier 标识',
+        base_url: 'API 服务基地址 (Base URL)',
+        api_key_label: 'API Key 凭据 (留空则保留当前已有配置)',
+        budget_ceiling_label: '全局安全预算上限 (USD $)',
+        save_hot_reload: '保存并立即热重载',
+        probe_conn: '真实测速探活',
+        raw_yaml_title: '实时 agent.yaml 配置源',
+        reload_yaml: '重新读取'
+      }
+    };
+
+    function toggleLanguage() {
+      currentLang = currentLang === 'en' ? 'zh' : 'en';
+      localStorage.setItem('agentos_lang', currentLang);
+      applyLanguage(currentLang);
+    }
+
+    function applyLanguage(lang) {
+      var t = i18n[lang] || i18n['en'];
+      var btn = document.getElementById('langLabel');
+      if (btn) btn.textContent = t.lang_btn;
+
+      document.querySelectorAll('[data-i18n]').forEach(function(el) {
+        var key = el.getAttribute('data-i18n');
+        if (t[key]) {
+          el.textContent = t[key];
+        }
+      });
+      document.querySelectorAll('[data-i18n-ph]').forEach(function(el) {
+        var key = el.getAttribute('data-i18n-ph');
+        if (t[key]) {
+          el.setAttribute('placeholder', t[key]);
+        }
+      });
+    }
+
     function switchView(viewName) {
       document.querySelectorAll('#sidebarNav .nav-item').forEach(function(el) {
         el.classList.remove('active');
@@ -1511,7 +1722,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         document.getElementById('headerSpendBar').style.width = pct.toFixed(1) + '%';
         document.getElementById('statAgents').innerHTML = data.active_agents + ' <span style="font-size: 14px; color: var(--outline); font-weight: normal;">/ ' + data.idle_agents + ' Idle</span>';
         document.getElementById('statCost').innerHTML = '$' + data.total_spend_usd.toFixed(3) + ' <span style="font-size: 13px; color: var(--outline);">USD</span>';
-        document.getElementById('statReceiptsCount').innerHTML = data.receipts_count + ' <span style="font-size: 14px; color: var(--primary-bright);">Verified</span>';
+        document.getElementById('statReceiptsCount').innerHTML = data.receipts_count + ' <span style="font-size: 14px; color: var(--primary-bright);">' + (i18n[currentLang].verified || 'Verified') + '</span>';
         document.getElementById('asideUptime').textContent = data.slo_percent + '%';
         
         var redBtn = document.getElementById('redlineBtn');
@@ -1519,13 +1730,13 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         var statusBadge = document.getElementById('statusBadge');
         if (data.redline_halt) {
           redBtn.classList.add('active');
-          redText.textContent = 'HALT ENGAGED';
+          redText.textContent = i18n[currentLang].redline_halted || 'HALT ENGAGED';
           statusBadge.textContent = 'LOCKED';
           statusBadge.style.color = 'var(--error)';
         } else {
           redBtn.classList.remove('active');
-          redText.textContent = 'REDLINE HALT';
-          statusBadge.textContent = 'ONLINE';
+          redText.textContent = i18n[currentLang].redline_halt || 'REDLINE HALT';
+          statusBadge.textContent = i18n[currentLang].online_badge || 'ONLINE';
           statusBadge.style.color = 'var(--primary-bright)';
         }
       } catch (e) {
@@ -1562,11 +1773,11 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       var msg = document.getElementById('createAgentMsg');
 
       if (!name) {
-        alert('Please enter an agent identifier');
+        alert(currentLang === 'zh' ? '请输入 Agent 唯一标识' : 'Please enter an agent identifier');
         return;
       }
 
-      msg.textContent = 'Scaffolding agent project files...';
+      msg.textContent = currentLang === 'zh' ? '正在自动化生成脚手架文件...' : 'Scaffolding agent project files...';
       try {
         var res = await fetch('/api/agents', {
           method: 'POST',
@@ -1575,7 +1786,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         });
         var data = await res.json();
         if (data.success) {
-          msg.textContent = 'Created ' + data.agent.name + ' successfully!';
+          msg.textContent = (currentLang === 'zh' ? '成功创建 Agent: ' : 'Created ') + data.agent.name;
           document.getElementById('newAgentName').value = '';
           toggleAgentDrawer();
           loadAgents();
@@ -1663,7 +1874,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       var budget = parseFloat(document.getElementById('cfgBudget').value) || 1.0;
       var feedback = document.getElementById('modelConfigFeedback');
 
-      feedback.textContent = 'Saving configuration...';
+      feedback.textContent = currentLang === 'zh' ? '正在保存配置并热重载...' : 'Saving configuration...';
       try {
         var res = await fetch('/api/config/model', {
           method: 'POST',
@@ -1672,7 +1883,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         });
         var data = await res.json();
         if (data.success) {
-          feedback.textContent = 'Saved! Model set to: ' + data.model + ' (' + data.provider + ')';
+          feedback.textContent = (currentLang === 'zh' ? '保存成功！已切换模型为: ' : 'Saved! Model set to: ') + data.model + ' (' + data.provider + ')';
           feedback.style.color = 'var(--primary-bright)';
           loadConfig();
           loadStatus();
@@ -1690,9 +1901,9 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       var badge = document.getElementById('modelProbeBadge');
       var feedback = document.getElementById('modelConfigFeedback');
 
-      badge.textContent = 'PROBING...';
+      badge.textContent = currentLang === 'zh' ? '正在探测...' : 'PROBING...';
       badge.style.color = 'var(--tertiary)';
-      feedback.textContent = 'Sending test prompt to model...';
+      feedback.textContent = currentLang === 'zh' ? '正在发送测试请求到模型...' : 'Sending test prompt to model...';
 
       try {
         var res = await fetch('/api/test-llm', { method: 'POST' });
@@ -1700,7 +1911,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         if (data.success) {
           badge.textContent = data.latency_ms + 'ms (OK)';
           badge.style.color = 'var(--primary-bright)';
-          feedback.textContent = 'Connectivity verified: ' + data.provider + ' (' + data.model + ') returned ' + data.tokens + ' tokens in ' + data.latency_ms + 'ms';
+          feedback.textContent = (currentLang === 'zh' ? '连通性已验证: ' : 'Connectivity verified: ') + data.provider + ' (' + data.model + ') returned ' + data.tokens + ' tokens in ' + data.latency_ms + 'ms';
           feedback.style.color = 'var(--primary-bright)';
         } else {
           badge.textContent = 'FAIL';
@@ -1738,7 +1949,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       var hashLabel = document.getElementById('lastReceiptHash');
 
       btn.disabled = true;
-      btnText.textContent = 'Processing...';
+      btnText.textContent = currentLang === 'zh' ? '正在执行...' : 'Processing...';
       latencyBadge.textContent = 'RUNNING';
       latencyBadge.style.color = 'var(--tertiary)';
 
@@ -1763,7 +1974,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
           toolOut.textContent += '\n[mcp:receipt] confirmed SHA-256 attestation: ' + r.signature;
           latencyBadge.textContent = r.duration_ms + 'ms (OK)';
           latencyBadge.style.color = 'var(--primary-bright)';
-          hashLabel.textContent = 'Last receipt: ' + r.receipt_id;
+          hashLabel.textContent = (currentLang === 'zh' ? '最新收据: ' : 'Last receipt: ') + r.receipt_id;
         } else {
           cotOut.textContent += '\n[error] dispatch failed: ' + (data.error || 'Unknown error');
           latencyBadge.textContent = 'FAILED';
@@ -1775,13 +1986,14 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         latencyBadge.style.color = 'var(--error)';
       } finally {
         btn.disabled = false;
-        btnText.textContent = 'Dispatch Execution';
+        btnText.textContent = i18n[currentLang].dispatch_btn_text || 'Dispatch Execution';
         cotOut.scrollTop = cotOut.scrollHeight;
         toolOut.scrollTop = toolOut.scrollHeight;
         loadStatus();
       }
     }
 
+    applyLanguage(currentLang);
     loadStatus();
     loadAgents();
     setInterval(loadStatus, 5000);
