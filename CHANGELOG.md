@@ -6,6 +6,9 @@ public protocol versions evolve independently.
 
 ## Unreleased
 
+### Changed
+- The developer interface is CLI-only: `agent ui` no longer starts for external access and is limited to the loopback-bound internal preview (`agent ui --preview`); `agent config wizard` is the supported interactive configuration path.
+
 ## 1.3.0 - 2026-10-01
 
 ### Added

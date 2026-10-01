@@ -89,8 +89,8 @@ This matrix provides the verified implementation status for all subsystems, prot
 
 | Feature / Capability | Status | Since | Protocol / Contract | Description |
 | :--- | :---: | :---: | :--- | :--- |
-| **Developer Core CLI (`agent`)** | **GA** | v1.3 | `cmd/agent` | Cascading `agent.yaml` configuration, multi-provider LLM matrix, chain-of-thought dual-channel streaming, project scaffolding, and demo scenarios. |
-| **Embedded Developer Console** | **GA** | v1.3 | `agent ui` | Single-process local workbench for model connectivity, MCP tool probing, agent/tool configuration, and audit receipts. |
+| **Developer Core CLI (`agent`)** | **GA** | v1.3 | `cmd/agent` | Cascading `agent.yaml` configuration, interactive `agent config wizard`, multi-provider LLM matrix, chain-of-thought dual-channel streaming, project scaffolding, and demo scenarios. |
+| **Embedded Developer Console** | **Preview (opt-in)** | v1.3 | `agent ui --preview` | Disabled for external access; runs loopback-only for internal polishing with model connectivity, MCP tool probing, agent/tool configuration, and audit receipts. |
 | **Dual-Protocol Model Layer** | **GA** | v1.3 | `cmd/agent/stream.go` | OpenAI-compatible (`/chat/completions`) and Anthropic Messages (`/v1/messages`) streaming for developer runs. |
 | **Dynamic Task Spawn** | **GA** | v1.3 | `agentos.task.spawn` | Fenced child-task spawning with recursion, fan-out, and total-step guards. |
 | **Workflow Budgets & Fair Sharding** | **GA** | v1.3 | Kernel Store / Orchestrator | Workflow-wide budgets and deadlines, dynamic group joins (`spawn:<parent>`), and lease-based fair sharding across orchestrator instances. |

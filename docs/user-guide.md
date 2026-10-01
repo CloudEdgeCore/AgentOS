@@ -124,7 +124,7 @@ docker compose -f deploy/dev/compose.yaml --profile observability up -d
 ### 2.3 编译 AgentOS 核心组件
 
 ```bash
-# 编译统一开发者 CLI（agent：配置、模型连通性、脚手架、内嵌控制台）
+# 编译统一开发者 CLI（agent：配置向导、模型连通性、脚手架、内部预览控制台）
 go build -o bin/agent ./cmd/agent
 
 # 编译稳定工作流 CLI（agentos：发布、运行、日志、工作流、服务）

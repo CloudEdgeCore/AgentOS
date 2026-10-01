@@ -87,7 +87,7 @@ boundary, not a missing feature to be silently added later.
 | **Agent Package Registry** | OCI + Metadata Index, `agentos login/package <build|sign|push|search|verify|install>`, and mandatory 6-stage security gate (`internal/kernel/agentpkg/`) |
 | **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
 | **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
-| **Developer Core CLI & Console** | Unified `agent` CLI: hierarchical `agent.yaml`, multi-provider LLM matrix, chain-of-thought streaming, scaffolding/demo suites, and the embedded `agent ui` developer workbench |
+| **Developer Core CLI & Console** | Unified `agent` CLI: hierarchical `agent.yaml`, interactive `agent config wizard`, multi-provider LLM matrix, chain-of-thought streaming, scaffolding/demo suites, and a preview-gated `agent ui` workbench (CLI-only by default) |
 | **Dynamic & distributed orchestration** | Fenced `agentos.task.spawn` with recursion/fan-out/total-step guards, workflow-wide budgets and deadlines, dynamic group joins, and lease-based fair sharding |
 | **Reliability Gates** | **Manual/fixed-host evidence complete**: 72h continuous chaos & 7d extended soak verified (zero lost tasks/IPC, monotonic fencing); **Scheduled CI evidence pending**: Multi-day CI reproduction awaits self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
 
@@ -336,9 +336,11 @@ These commands use a fixed development tenant, loopback plaintext connections, a
 ### CLI workflows
 
 The developer-facing entrypoint is the unified `agent` CLI introduced in
-v1.2.1 (`agent config`, `agent test-llm`, `agent mcp`, `agent init`,
-`agent demo`, `agent ui`); commands it does not own are delegated to the stable
-`agentos` workflows below. The `agentos` CLI exposes:
+v1.2.1 (`agent config`, `agent config wizard`, `agent test-llm`, `agent mcp`,
+`agent init`, `agent demo`). This release is deliberately CLI-only: `agent ui`
+is disabled for external access and only runs as the loopback-bound internal
+polishing preview (`agent ui --preview`). Commands the `agent` CLI does not own
+are delegated to the stable `agentos` workflows below. The `agentos` CLI exposes:
 
 ```text
 agentos version   Print product, build, and protocol versions
@@ -600,7 +602,7 @@ For the comprehensive capability matrix, see [Feature Status Matrix](docs/featur
 
 ## Current boundaries
 
-- AgentOS is an agent control and execution backend. The v1.3 `agent ui` console is an embedded, single-process developer workbench (configuration hub, model connectivity test, MCP tool probe, audit receipts), not a complete multi-tenant web administration console or managed cloud service; the full React dashboard under `web/` remains planned.
+- AgentOS is an agent control and execution backend. This release is deliberately CLI-only: `agent ui` is disabled for external access and only runs as an internal, loopback-bound polishing preview (`agent ui --preview`); it is not a complete multi-tenant web administration console or managed cloud service, and the full React dashboard under `web/` remains planned.
 - The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
 - Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
 - Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
