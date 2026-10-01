@@ -5,7 +5,7 @@ replicaCount: 2
 image:
   repository: ghcr.io/cloudedgecore/agentos
   pullPolicy: IfNotPresent
-  tag: "1.2.0"
+  tag: "1.3.0"
 
 serviceAccount:
   create: true

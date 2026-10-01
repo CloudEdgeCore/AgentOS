@@ -18,7 +18,7 @@ inputs:
   agentos-version:
     description: 'Version of AgentOS Conformance Suite binary to download or build'
     required: false
-    default: 'v1.2.0'
+    default: 'v1.3.0'
 
 outputs:
   status:
