@@ -28,7 +28,7 @@ type StreamChunk struct {
 func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, error) {
 	provider := cfg.CurrentProvider()
 	if provider.APIKey == "" {
-		return 0, fmt.Errorf("当前模型提供商 %q 未配置 API Key", cfg.LLM.DefaultProvider)
+		return 0, fmt.Errorf("provider %q has no API key configured", cfg.LLM.DefaultProvider)
 	}
 
 	reqBody := map[string]any{
@@ -57,7 +57,7 @@ func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, erro
 	}
 	client := &http.Client{
 		Transport: tr,
-		Timeout:   0, // Long-lived streaming (避免深度思考超时)
+		Timeout:   0, // long-lived streaming to prevent timeout during reasoning
 	}
 
 	resp, err := client.Do(req)
@@ -68,7 +68,7 @@ func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, erro
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("API 响应错误 (状态码 %d): %s", resp.StatusCode, string(b))
+		return 0, fmt.Errorf("upstream API error (status %d): %s", resp.StatusCode, string(b))
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -94,7 +94,7 @@ func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, erro
 			c := chunk.Choices[0]
 			if c.Delta.Reasoning != "" {
 				if !inReasoning {
-					fmt.Print("\n\033[36m[深度思考推理链]: \033[0m")
+					fmt.Print("\n\033[36m[reasoning] \033[0m")
 					inReasoning = true
 				}
 				fmt.Print(c.Delta.Reasoning)
@@ -103,7 +103,7 @@ func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, erro
 			}
 			if c.Delta.Content != "" {
 				if inReasoning {
-					fmt.Print("\n\n\033[32m[智能体结构化输出]:\033[0m\n")
+					fmt.Print("\n\n\033[32m[content] \033[0m\n")
 					inReasoning = false
 				}
 				fmt.Print(c.Delta.Content)

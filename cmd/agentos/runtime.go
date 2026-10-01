@@ -149,13 +149,11 @@ func runRuntimeTest(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "Running AgentOS Conformance Suite against %s ...\n\n", endpoint)
 	report, err := conformance.Run(ctx, client)
 	if err != nil {
-		fmt.Fprintf(stdout, "--------------------------------------------------\n")
-		fmt.Fprintf(stdout, "AgentOS Compatible = FAIL (%v)\n", err)
-		fmt.Fprintf(stdout, "--------------------------------------------------\n")
+		fmt.Fprintf(stdout, "AgentOS Compatible: FAIL (%v)\n\n", err)
 		return fmt.Errorf("runtime test failed: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "=== AgentOS Runtime Interface Conformance Suite ===\n")
+	fmt.Fprintf(stdout, "\nAgentOS Runtime Interface Conformance Suite\n")
 	fmt.Fprintf(stdout, "Adapter:  %s\n", report.Adapter)
 	fmt.Fprintf(stdout, "Protocol: %s\n", report.Protocol)
 	fmt.Fprintf(stdout, "Endpoint: %s\n\n", endpoint)
@@ -163,9 +161,7 @@ func runRuntimeTest(args []string, stdout, stderr io.Writer) error {
 	for _, check := range report.Checks {
 		fmt.Fprintf(stdout, "  [PASS] %s\n", check)
 	}
-	fmt.Fprintf(stdout, "--------------------------------------------------\n")
-	fmt.Fprintf(stdout, "AgentOS Compatible = PASS\n")
-	fmt.Fprintf(stdout, "--------------------------------------------------\n")
+	fmt.Fprintf(stdout, "\nAgentOS Compatible: PASS\n\n")
 	return nil
 }
 

@@ -1,7 +1,5 @@
-# ==============================================================================
-# AgentOS 企业级智能体分级配置文件模板 (agent.yaml.example)
-# 使用方式: cp agent.yaml.example agent.yaml
-# ==============================================================================
+# AgentOS configuration template (agent.yaml.example)
+# Usage: cp agent.yaml.example agent.yaml
 version: "1.0"
 environment: "development"
 

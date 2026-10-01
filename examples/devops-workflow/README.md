@@ -53,7 +53,7 @@ go test -tags=integration -count=1 ./examples/devops-workflow/tests/e2e/
 
 ## Third-party agent (`examples/third-party/hello-agent`)
 
-The hello agent is the plan's "已有 Agent → Manifest → Adapter → Publish →
+The hello agent demonstrates the "Existing Agent -> Manifest -> Adapter -> Publish ->
 Run" flow: its author wrote only `runtime.go` (call one tool, return the
 result). The platform supplies scheduling, capability, budget, isolation,
 recovery and audit — the agent never sees leases, fencing tokens, schedulers,

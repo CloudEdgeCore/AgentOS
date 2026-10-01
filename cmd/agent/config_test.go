@@ -100,7 +100,7 @@ func TestEnvironmentVariablePrecedence(t *testing.T) {
 }
 
 func TestMaskAPIKey(t *testing.T) {
-	if got := MaskAPIKey(""); got != "[未设置 (未配置 API_KEY)]" {
+	if got := MaskAPIKey(""); got != "[not set]" {
 		t.Errorf("unexpected: %s", got)
 	}
 	if got := MaskAPIKey("12345"); got != "******" {

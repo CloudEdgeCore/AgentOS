@@ -2,7 +2,7 @@
 // business logic in this file: the platform supplies scheduling, capability,
 // budget, isolation, recovery and audit around it. The agent knows nothing
 // about leases, fencing tokens, schedulers, runtime pools, or budget ledgers
-// (design plan §7 "第三方开发者无需理解…").
+// (design plan §7 "Third-party developers do not need to understand kernel internals...").
 package hello
 
 import (

@@ -46,52 +46,53 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println(`================================================================================
-   AgentOS 开发者核心命令行工具: agent (v1.2.1)
-================================================================================
-用法:
-  agent <command> [arguments]
+	fmt.Print(`AgentOS Developer Core CLI: agent (v1.2.1)
 
-核心指令 (分级 YAML 配置与日常运维):
-  agent config               查看当前分级生效的 YAML 配置 (脱敏展示)
-  agent config path          查看当前加载的配置文件分级路径与继承链
-  agent config set <K> <V>   点分路径快速设置 (如: agent config set llm.default_provider deepseek)
-  agent config env <name>    快速切换运行环境 (development | staging | production)
-  agent test-llm             一键测试当前激活的大模型端点与流式响应 (验证 Key 与时延)
-  agent init <name>          创建新的企业级 Agent 脚手架工程 (含 agent.yaml + Prompt + Tools)
-  agent run <manifest.json>  执行指定 Agent 任务并输出防篡改审计账本 (Ledger)
-  agent demo [fault|quality] 一键体验 PRD 工业诊断 / 质量溯源真实场景
-  agent version              查看产品版本、ABI 契约与运行时状态
+Usage:
+  agent [command] [flags]
 
-企业高级运维:
-  agent package / sign       对 Agent 产物签名打包并导出 CycloneDX SBOM
-  agent workflow             启动 DAG 确定性状态机工作流
-  agent service              服务守护进程编排与健康检查
+Core Commands:
+  config               Display active hierarchical configuration
+  config path          Show configuration precedence and resolution order
+  config set <K> <V>   Set configuration value using dot notation
+  config env <name>    Switch active environment profile (development, staging, production)
+  test-llm             Verify model connectivity, latency, and streaming reasoning
+  init <name>          Scaffold a new enterprise Agent project
+  run <path>           Run an Agent manifest and record audit ledger
+  demo <name>          Execute demo scenario (fault or quality)
+  version              Display version and runtime information
 
-示例:
-  $ agent config
-  $ agent config set llm.default_provider deepseek
-  $ agent test-llm
-  $ agent demo quality
-================================================================================`)
+Management Commands:
+  package              Package agent artifact into signed bundle
+  sign                 Cryptographically sign package artifact
+  workflow             Manage deterministic DAG workflows
+  service              Manage service daemons and health probes
+  logs                 Stream execution logs for task
+
+Examples:
+  agent config
+  agent config set llm.default_provider deepseek
+  agent test-llm
+  agent demo quality
+`)
 }
 
 func runVersion() {
 	info := version.Current()
-	fmt.Printf("agent CLI %s (Product: %s %s, Syscall ABI: %s)\n",
+	fmt.Printf("agent CLI %s (product: %s %s, syscall ABI: %s)\n",
 		info.SemVer, info.Product, info.ProductVersion, info.SyscallABI)
 	cfg, _ := LoadConfig()
 	if len(cfg.LoadedFiles) > 0 {
-		fmt.Printf("Active hierarchical configs: %s\n", strings.Join(cfg.LoadedFiles, " -> "))
+		fmt.Printf("active configuration chain: %s\n", strings.Join(cfg.LoadedFiles, " -> "))
 	} else {
-		fmt.Println("Active hierarchical configs: [Builtin Defaults]")
+		fmt.Println("active configuration chain: [builtin defaults]")
 	}
 }
 
 func runConfig(args []string) {
 	cfg, err := LoadConfig()
 	if err != nil {
-		fmt.Printf("Error loading config: %v\n", err)
+		fmt.Printf("[error] loading config: %v\n", err)
 		return
 	}
 
@@ -99,25 +100,22 @@ func runConfig(args []string) {
 		sub := args[0]
 		switch sub {
 		case "path", "files":
-			fmt.Println("================================================================================")
-			fmt.Println("                     Agent 分级配置加载继承链 (Precedence)                     ")
-			fmt.Println("================================================================================")
-			fmt.Println("1. [底座预设] Builtin Defaults")
+			fmt.Println("Configuration precedence chain:")
+			fmt.Println("  1. builtin defaults")
 			if len(cfg.LoadedFiles) == 0 {
-				fmt.Println("2. [文件检测] 未找到 agent.yaml 文件，当前直接应用底座预设。")
+				fmt.Println("  2. file: none found (using defaults)")
 			} else {
 				for i, f := range cfg.LoadedFiles {
-					fmt.Printf("%d. [文件覆盖] %s\n", i+2, f)
+					fmt.Printf("  %d. file: %s\n", i+2, f)
 				}
 			}
-			fmt.Printf("%d. [环境剖面] Profiles [%s]\n", len(cfg.LoadedFiles)+2, cfg.Environment)
-			fmt.Printf("%d. [环境覆盖] System Environment Variables (AGENT_LLM_*)\n", len(cfg.LoadedFiles)+3)
-			fmt.Println("================================================================================")
+			fmt.Printf("  %d. profile: %s\n", len(cfg.LoadedFiles)+2, cfg.Environment)
+			fmt.Printf("  %d. environment variables: AGENT_LLM_*\n", len(cfg.LoadedFiles)+3)
 			return
 
 		case "env":
 			if len(args) < 2 {
-				fmt.Printf("当前运行环境: %s\n", cfg.Environment)
+				fmt.Printf("active environment: %s\n", cfg.Environment)
 				return
 			}
 			newEnv := args[1]
@@ -127,17 +125,17 @@ func runConfig(args []string) {
 				target = cfg.LoadedFiles[len(cfg.LoadedFiles)-1]
 			}
 			if err := SaveConfig(cfg, target); err != nil {
-				fmt.Printf("Failed to save environment: %v\n", err)
+				fmt.Printf("[error] failed to save environment: %v\n", err)
 				return
 			}
-			fmt.Printf("✔ 成功切换运行环境为: %s (已保存至 %s)\n", newEnv, target)
+			fmt.Printf("[info] switched environment to %s (saved to %s)\n", newEnv, target)
 			return
 
 		case "set":
 			if len(args) < 3 {
-				fmt.Println("用法: agent config set <key.path> <value>")
-				fmt.Println("示例: agent config set llm.default_provider deepseek")
-				fmt.Println("      agent config set kernel.budget.max_cost_usd 2.50")
+				fmt.Println("usage: agent config set <key.path> <value>")
+				fmt.Println("example: agent config set llm.default_provider deepseek")
+				fmt.Println("         agent config set kernel.budget.max_cost_usd 2.50")
 				return
 			}
 			keyPath := args[1]
@@ -148,17 +146,15 @@ func runConfig(args []string) {
 				target = cfg.LoadedFiles[len(cfg.LoadedFiles)-1]
 			}
 			if err := SaveConfig(cfg, target); err != nil {
-				fmt.Printf("Failed to save config: %v\n", err)
+				fmt.Printf("[error] failed to save config: %v\n", err)
 				return
 			}
-			fmt.Printf("✔ 成功设置 %s = %s (已持久化至 %s)\n", keyPath, val, target)
+			fmt.Printf("[info] updated %s to %s in %s\n", keyPath, val, target)
 			return
 		}
 	}
 
-	// 格式化输出 YAML 分级树形配置
 	displayCopy := *cfg
-	// 深度复制并脱敏所有提供商 API Key
 	displayCopy.LLM.Providers = make(map[string]ProviderConfig)
 	for k, v := range cfg.LLM.Providers {
 		masked := v
@@ -168,23 +164,19 @@ func runConfig(args []string) {
 
 	yamlBytes, err := yaml.Marshal(&displayCopy)
 	if err != nil {
-		fmt.Printf("Failed to serialize yaml: %v\n", err)
+		fmt.Printf("[error] failed to serialize yaml: %v\n", err)
 		return
 	}
 
-	fmt.Println("================================================================================")
-	fmt.Printf("             Agent 分级 YAML 运行环境配置 (当前激活环境: %s)            \n", cfg.Environment)
-	fmt.Println("================================================================================")
+	fmt.Printf("Agent Configuration (environment: %s)\n", cfg.Environment)
 	if len(cfg.LoadedFiles) > 0 {
-		fmt.Printf("继承文件: %s\n", strings.Join(cfg.LoadedFiles, " < "))
+		fmt.Printf("source: %s\n", strings.Join(cfg.LoadedFiles, " < "))
 	} else {
-		fmt.Println("继承文件: [使用内置标准默认值]")
+		fmt.Println("source: [builtin defaults]")
 	}
-	fmt.Printf("默认大模型: %s (模型: %s)\n", cfg.LLM.DefaultProvider, cfg.CurrentProvider().Model)
-	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Printf("provider: %s (model: %s)\n\n", cfg.LLM.DefaultProvider, cfg.CurrentProvider().Model)
 	fmt.Println(string(yamlBytes))
-	fmt.Println("================================================================================")
-	fmt.Println("提示: 可使用 'agent config set <路径> <值>' 快速修改，或直接编辑 agent.yaml。")
+	fmt.Println("hint: use 'agent config set <path> <value>' to modify, or edit agent.yaml directly.")
 }
 
 func applyConfigSet(cfg *AgentYAMLConfig, path, val string) {
@@ -203,38 +195,46 @@ func applyConfigSet(cfg *AgentYAMLConfig, path, val string) {
 			return
 		}
 		if len(parts) >= 4 && parts[1] == "providers" {
-			providerName := parts[2]
-			field := parts[3]
-			p := cfg.LLM.Providers[providerName]
-			switch field {
+			provName := parts[2]
+			prov := cfg.LLM.Providers[provName]
+			switch parts[3] {
+			case "api_key", "key":
+				prov.APIKey = val
 			case "model":
-				p.Model = val
-			case "api_key":
-				p.APIKey = val
-			case "base_url":
-				p.BaseURL = val
+				prov.Model = val
+			case "base_url", "url":
+				prov.BaseURL = val
 			case "timeout_sec":
-				if n, err := strconv.Atoi(val); err == nil {
-					p.TimeoutSec = n
+				if sec, err := strconv.Atoi(val); err == nil {
+					prov.TimeoutSec = sec
 				}
 			}
-			cfg.LLM.Providers[providerName] = p
+			if cfg.LLM.Providers == nil {
+				cfg.LLM.Providers = make(map[string]ProviderConfig)
+			}
+			cfg.LLM.Providers[provName] = prov
 		}
 	case "kernel":
 		if len(parts) >= 3 && parts[1] == "budget" {
 			switch parts[2] {
-			case "max_cost_usd":
-				if f, err := strconv.ParseFloat(val, 64); err == nil {
-					cfg.Kernel.Budget.MaxCostUSD = f
+			case "max_cost_usd", "cost":
+				if cost, err := strconv.ParseFloat(val, 64); err == nil {
+					cfg.Kernel.Budget.MaxCostUSD = cost
 				}
-			case "max_tokens":
-				if n, err := strconv.Atoi(val); err == nil {
-					cfg.Kernel.Budget.MaxTokens = n
+			case "max_tokens", "tokens":
+				if tok, err := strconv.Atoi(val); err == nil {
+					cfg.Kernel.Budget.MaxTokens = tok
 				}
-			case "max_tool_calls":
-				if n, err := strconv.Atoi(val); err == nil {
-					cfg.Kernel.Budget.MaxToolCalls = n
+			case "max_tool_calls", "calls":
+				if c, err := strconv.Atoi(val); err == nil {
+					cfg.Kernel.Budget.MaxToolCalls = c
 				}
+			}
+		}
+	case "gateway":
+		if len(parts) == 2 && parts[1] == "port" {
+			if p, err := strconv.Atoi(val); err == nil {
+				cfg.Gateway.Port = p
 			}
 		}
 	case "logging":
@@ -248,41 +248,41 @@ func runTestLLM() {
 	cfg, _ := LoadConfig()
 	provider := cfg.CurrentProvider()
 	if provider.APIKey == "" {
-		fmt.Printf("❌ 错误: 当前激活的模型提供商 %q 未配置 API Key。\n", cfg.LLM.DefaultProvider)
-		fmt.Printf("请在 agent.yaml 中填写 llm.providers.%s.api_key，\n或执行: agent config set llm.providers.%s.api_key <your-key>\n",
+		fmt.Printf("[error] active provider %q has no API key configured\n", cfg.LLM.DefaultProvider)
+		fmt.Printf("set llm.providers.%s.api_key in agent.yaml or run:\n  agent config set llm.providers.%s.api_key <key>\n",
 			cfg.LLM.DefaultProvider, cfg.LLM.DefaultProvider)
 		return
 	}
 
-	fmt.Printf("[Test] 正在向 [%s] %s (%s) 发起连通性测试...\n",
+	fmt.Printf("[info] probing [%s] %s (%s)...\n",
 		cfg.LLM.DefaultProvider, provider.BaseURL, provider.Model)
 	t0 := time.Now()
-	testPrompt := "请用一句话证明你已成功连通 AgentOS 工业内核，并返回当前连接状态。"
-	tokens, err := StreamLLM(cfg, "你是由 AgentOS 治理的专业 AI Agent。", testPrompt)
+	testPrompt := "Respond with one brief sentence confirming connectivity to AgentOS kernel."
+	tokens, err := StreamLLM(cfg, "You are a professional AI agent managed by the AgentOS kernel.", testPrompt)
 	if err != nil {
-		fmt.Printf("❌ 连接测试失败: %v\n", err)
+		fmt.Printf("[error] connection test failed: %v\n", err)
 		return
 	}
 	dur := time.Since(t0)
-	fmt.Printf("\n✔ 大模型连接正常！耗时: %v | 接收 Token 约: %d\n", dur, tokens)
+	fmt.Printf("\n[info] connectivity verified: latency=%v tokens_received=%d\n", dur.Round(time.Millisecond), tokens)
 }
 
 func runInit(args []string) {
 	if len(args) < 1 {
-		fmt.Println("用法: agent init <agent-name>")
+		fmt.Println("usage: agent init <agent-name>")
 		return
 	}
 	name := args[0]
 	if err := ScaffoldAgent(name); err != nil {
-		fmt.Printf("❌ 初始化失败: %v\n", err)
+		fmt.Printf("[error] initialization failed: %v\n", err)
 		return
 	}
-	fmt.Printf("✔ 成功创建 Agent 工程目录: ./%s/\n", name)
-	fmt.Printf("   ├─ %s/agent.yaml           (项目级分级配置)\n", name)
-	fmt.Printf("   ├─ %s/agent.manifest.json  (权限与预算清单)\n", name)
-	fmt.Printf("   ├─ %s/prompt.md            (系统提示词与PRD规范)\n", name)
-	fmt.Printf("   └─ %s/tools/main.go        (自定义工具模板)\n", name)
-	fmt.Printf("\n可执行 'agent run %s/agent.manifest.json' 开始测试！\n", name)
+	fmt.Printf("[info] created agent project at ./%s/\n", name)
+	fmt.Printf("  ├── %s/agent.yaml          (hierarchical config)\n", name)
+	fmt.Printf("  ├── %s/agent.manifest.json (capability and budget manifest)\n", name)
+	fmt.Printf("  ├── %s/prompt.md           (system prompt and output schema)\n", name)
+	fmt.Printf("  └── %s/tools/main.go       (custom tool implementation)\n", name)
+	fmt.Printf("\nrun 'agent run %s/agent.manifest.json' to start.\n", name)
 }
 
 func runDemo(args []string) {
@@ -297,49 +297,45 @@ func runDemo(args []string) {
 	case "quality", "b", "qa":
 		runQualityDemo()
 	default:
-		fmt.Printf("未知 demo 场景 %q, 可选值: fault (场景A设备诊断) | quality (场景B质量溯源)\n", scenario)
+		fmt.Printf("unknown demo scenario %q, available: fault | quality\n", scenario)
 	}
 }
 
 func runFaultDemo() {
-	fmt.Println(">>> 启动 PRD 场景 A: CNC-03 主轴过热 E102 报警诊断...")
-	paths := []string{"./industrial-demo", "/home/ubuntu/industrial-demo", "../industrial-demo"}
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			cmd := exec.Command(p)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			_ = cmd.Run()
-			return
-		}
+	fmt.Println("[info] starting scenario A: CNC-03 spindle overheat E102 alarm diagnostics...")
+	cfg, _ := LoadConfig()
+	provider := cfg.CurrentProvider()
+	args := []string{"run", "./examples/industrial-agent/cmd"}
+	if provider.APIKey != "" {
+		args = append(args, "-api-key", provider.APIKey)
 	}
-	cmd := exec.Command("go", "run", "./examples/industrial-agent/cmd")
+	if provider.Model != "" {
+		args = append(args, "-model", provider.Model)
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
 	_ = cmd.Run()
 }
 
 func runQualityDemo() {
-	fmt.Println(">>> 启动 PRD 场景 B: A产品质量缺陷溯源与私有知识库排查...")
-	paths := []string{"./quality-demo", "/home/ubuntu/quality-demo", "../quality-demo"}
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			cmd := exec.Command(p)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			_ = cmd.Run()
-			return
-		}
-	}
+	fmt.Println("[info] starting scenario B: product A defect traceability and SOP analysis...")
+	cfg, _ := LoadConfig()
+	provider := cfg.CurrentProvider()
 	cmd := exec.Command("go", "run", "./examples/quality-agent/cmd")
+	if provider.APIKey != "" {
+		cmd.Env = append(os.Environ(), "OPENROUTER_API_KEY="+provider.APIKey)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
 	_ = cmd.Run()
 }
 
 func runAgent(args []string) {
 	if len(args) < 1 {
-		fmt.Println("用法: agent run <manifest.json 或 agent 目录>")
+		fmt.Println("usage: agent run <manifest.json or agent directory>")
 		return
 	}
 
@@ -347,7 +343,7 @@ func runAgent(args []string) {
 	manifestPath := target
 	fi, err := os.Stat(target)
 	if err != nil {
-		fmt.Printf("找不到目标文件: %s\n", target)
+		fmt.Printf("[error] target not found: %s\n", target)
 		return
 	}
 	if fi.IsDir() {
@@ -356,43 +352,41 @@ func runAgent(args []string) {
 
 	content, err := os.ReadFile(manifestPath)
 	if err != nil {
-		fmt.Printf("读取 Manifest 失败: %v\n", err)
+		fmt.Printf("[error] failed to read manifest: %v\n", err)
 		return
 	}
 
 	var manifest map[string]any
 	if err := json.Unmarshal(content, &manifest); err != nil {
-		fmt.Printf("解析 Manifest 格式错误: %v\n", err)
+		fmt.Printf("[error] failed to parse manifest: %v\n", err)
 		return
 	}
 
 	cfg, _ := LoadConfig()
 	provider := cfg.CurrentProvider()
 
-	fmt.Println("================================================================================")
-	fmt.Printf("             AgentOS 内核调度器启动: %s\n", filepath.Base(manifestPath))
-	fmt.Println("================================================================================")
-	fmt.Printf("✔ 激活提供商: %s | 模型: %s\n", cfg.LLM.DefaultProvider, provider.Model)
-	fmt.Printf("✔ 预算硬上限: $%.2f USD | 最大 Token: %d\n", cfg.Kernel.Budget.MaxCostUSD, cfg.Kernel.Budget.MaxTokens)
+	fmt.Printf("[info] starting agent kernel scheduler for %s\n", filepath.Base(manifestPath))
+	fmt.Printf("[info] provider: %s, model: %s\n", cfg.LLM.DefaultProvider, provider.Model)
+	fmt.Printf("[info] budget ceiling: $%.2f USD, max tokens: %d\n", cfg.Kernel.Budget.MaxCostUSD, cfg.Kernel.Budget.MaxTokens)
 
 	dir := filepath.Dir(manifestPath)
 	promptPath := filepath.Join(dir, "prompt.md")
-	sysPrompt := "你是由 AgentOS 治理的专业 AI Agent。"
+	sysPrompt := "You are a professional AI agent managed by the AgentOS kernel."
 	if pb, err := os.ReadFile(promptPath); err == nil {
 		sysPrompt = string(pb)
-		fmt.Printf("✔ 已自动挂载系统提示词: %s\n", promptPath)
+		fmt.Printf("[info] loaded system prompt from: %s\n", promptPath)
 	}
 
-	userGoal := "请针对当前 Manifest 声明的业务目标，执行完整自检并生成执行状态报告。"
+	userGoal := "Execute task self-check and produce execution status report based on the manifest goals."
 	if len(args) > 1 {
 		userGoal = strings.Join(args[1:], " ")
 	}
 
-	fmt.Println("\n[AgentOS Kernel] 触发大模型推理任务...")
+	fmt.Println("[info] triggering model inference...")
 	t0 := time.Now()
 	tokens, err := StreamLLM(cfg, sysPrompt, userGoal)
 	if err != nil {
-		fmt.Printf("执行失败: %v\n", err)
+		fmt.Printf("[error] execution failed: %v\n", err)
 		return
 	}
 	dur := time.Since(t0)
@@ -400,23 +394,21 @@ func runAgent(args []string) {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", manifestPath, time.Now().UnixNano())))
 	receiptID := "sha256:rcpt_" + hex.EncodeToString(h[:8])
 
-	fmt.Println("\n================================================================================")
-	fmt.Println("                 AgentOS 内核量化存证与审计指标 (Audit Ledger)                  ")
-	fmt.Println("================================================================================")
-	fmt.Printf("✔ 任务全链路耗时: %v\n", dur)
-	fmt.Printf("✔ Token 消耗审计: 约 %d tokens\n", tokens)
-	fmt.Printf("✔ 财务微美元记账: ~$%.6f USD (配额安全)\n", float64(tokens)*1.5/1000000.0)
-	fmt.Printf("✔ 审计存证收据: %s\n", receiptID)
-	fmt.Println("================================================================================")
+	fmt.Println()
+	fmt.Println("[audit] task execution ledger:")
+	fmt.Printf("  duration:   %v\n", dur.Round(time.Millisecond))
+	fmt.Printf("  tokens:     %d\n", tokens)
+	fmt.Printf("  cost_usd:   $%.6f\n", float64(tokens)*1.5/1000000.0)
+	fmt.Printf("  receipt_id: %s\n", receiptID)
 }
 
 func runLegacyFallback(command string, args []string) {
-	fmt.Printf("[AgentOS Core] 转发系统指令: agentos %s %s\n", command, strings.Join(args, " "))
+	fmt.Printf("[info] delegating command: agentos %s %s\n", command, strings.Join(args, " "))
 	cmd := exec.Command("agentos", append([]string{command}, args...)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("指令执行结束: %v\n", err)
+		fmt.Printf("[info] process completed: %v\n", err)
 	}
 }

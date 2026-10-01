@@ -107,7 +107,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 	} else {
 		// Formatted certification output
-		fmt.Fprintf(stdout, "\n=== AgentOS Runtime Interface Conformance Suite ===\n")
+		fmt.Fprintf(stdout, "\nAgentOS Runtime Interface Conformance Suite\n")
 		fmt.Fprintf(stdout, "Adapter:  %s\n", report.Adapter)
 		fmt.Fprintf(stdout, "Protocol: %s\n", report.Protocol)
 		fmt.Fprintf(stdout, "Endpoint: %s\n\n", targetEndpoint)
@@ -115,9 +115,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		for _, check := range report.Checks {
 			fmt.Fprintf(stdout, "  [PASS] %s\n", check)
 		}
-		fmt.Fprintf(stdout, "--------------------------------------------------\n")
-		fmt.Fprintf(stdout, "AgentOS Compatible = %s\n", compatStatus)
-		fmt.Fprintf(stdout, "--------------------------------------------------\n\n")
+		fmt.Fprintf(stdout, "\nAgentOS Compatible = %s\n\n", compatStatus)
 	}
 
 	if runErr != nil {

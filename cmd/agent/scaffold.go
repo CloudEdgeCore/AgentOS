@@ -13,7 +13,7 @@ func ScaffoldAgent(name string) error {
 		return err
 	}
 
-	// 1. 生成 agent.manifest.json
+	// 1. Generate agent.manifest.json
 	manifest := map[string]any{
 		"apiVersion": "agentos.dev/v1",
 		"kind":       "AgentManifest",
@@ -44,33 +44,33 @@ func ScaffoldAgent(name string) error {
 		return err
 	}
 
-	// 2. 生成 prompt.md (系统提示词模板)
-	promptContent := fmt.Sprintf(`# %s 智能体系统提示词 (System Prompt)
+	// 2. Generate prompt.md
+	promptContent := fmt.Sprintf(`# %s System Prompt
 
-你是由 AgentOS 治理的企业级专业 AI Agent，专职负责业务问题排查与数据分析。
+You are an enterprise AI Agent governed by AgentOS, responsible for data analysis and operational diagnostics.
 
-## 角色与职责 (Role & Responsibilities)
-- 严谨、专业、遵循工程客观事实。
-- 优先调用注册的工具获取最新实时数据，不主观假设。
+## Role & Responsibilities
+- Rigorous, professional, and strictly adherent to objective engineering facts.
+- Prioritize invoking registered tools for real-time telemetry; do not fabricate assumptions.
 
-## 核心红线约束 (Safety Redlines)
-1. 严禁幻觉：没有工具返回证据支持的字段，必须明确标注“缺少直接证据”。
-2. 安全防呆：涉及高危操作必须给出明确预警和复核步骤。
+## Safety Constraints
+1. Hallucination guard: Any field without supporting evidence from tool execution receipts must be marked as "insufficient evidence".
+2. Safety fail-closed: High-risk operational steps require explicit warnings and verification steps.
 
-## 输出格式规范 (Output Schema)
-请严格按以下结构分节输出：
-1. 【问题概述】
-2. 【数据范围与基线】
-3. 【发现的量化异常】
-4. 【候选根因与置信度】
-5. 【建议排查顺序】
-6. 【数据与知识来源】
+## Output Schema
+Format output strictly into the following sections:
+1. Problem Summary
+2. Data Scope and Baseline
+3. Detected Quantitative Anomalies
+4. Candidate Root Causes and Confidence
+5. Recommended Mitigation Steps
+6. Data Sources and References
 `, name)
 	if err := os.WriteFile(filepath.Join(targetDir, "prompt.md"), []byte(promptContent), 0644); err != nil {
 		return err
 	}
 
-	// 3. 生成项目级 agent.yaml (分级配置)
+	// 3. Generate project-level agent.yaml
 	agentYamlContent := fmt.Sprintf(`version: "1.0"
 environment: "development"
 
@@ -96,7 +96,7 @@ gateway:
 		return err
 	}
 
-	// 4. 生成 tools/main.go (示例工具代码)
+	// 4. Generate tools/main.go
 	toolContent := fmt.Sprintf(`package main
 
 import (
@@ -106,7 +106,7 @@ import (
 	"time"
 )
 
-// 示例自定义工具服务
+// Example custom tool service
 func main() {
 	http.HandleFunc("/api/v1/query", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -120,26 +120,26 @@ func main() {
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
-	fmt.Println("[%s Tool Server] listening on :18080...")
+	fmt.Printf("[%s Tool Server] listening on :18080...\n", "%s")
 	_ = http.ListenAndServe(":18080", nil)
 }
-`, name)
+`, name, name)
 	if err := os.WriteFile(filepath.Join(targetDir, "tools", "main.go"), []byte(toolContent), 0644); err != nil {
 		return err
 	}
 
-	// 5. 生成 README.md
-	readmeContent := fmt.Sprintf(`# %s Agent 工程目录
+	// 5. Generate README.md
+	readmeContent := fmt.Sprintf(`# %s Agent Project
 
-本工程由 AgentOS CLI (agent init) 自动生成。
+Scaffolded by AgentOS CLI (agent init).
 
-## 目录结构
-- agent.yaml         : 项目级分级配置文件 (可覆盖全局配置)
-- agent.manifest.json: 声明工具权限、模型和预算配额
-- prompt.md          : 业务系统提示词与 PRD 输出规范
-- tools/             : 自定义工具微服务源码
+## Project Layout
+- agent.yaml         : Project-level configuration (cascades over global settings)
+- agent.manifest.json: Capability, tool permissions, and budget declaration
+- prompt.md          : System prompt and output schema
+- tools/             : Custom tool service source code
 
-## 运行方式
+## Run
 $ agent run %s/agent.manifest.json
 `, name, name)
 	return os.WriteFile(filepath.Join(targetDir, "README.md"), []byte(readmeContent), 0644)

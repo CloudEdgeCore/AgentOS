@@ -73,7 +73,7 @@ func DecodeVerdict(raw string) (Verdict, error) {
 
 // RenderMarkdown renders the final deliverable (§14 "Markdown Renderer").
 // Every citation appears in a References section so the report is traceable
-// back to its evidence IDs (§18 "Report 可追溯到 Evidence").
+// back to its evidence IDs (§18 "Report Traceable to Evidence").
 func RenderMarkdown(document Document, verdict Verdict) string {
 	var builder strings.Builder
 	builder.WriteString("# " + document.Title + "\n\n")

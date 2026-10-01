@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ProviderConfig 定义每个模型提供商的独立参数
+// ProviderConfig defines parameters for an LLM provider endpoint.
 type ProviderConfig struct {
 	Model      string `yaml:"model" json:"model"`
 	APIKey     string `yaml:"api_key" json:"api_key"`
@@ -17,50 +17,50 @@ type ProviderConfig struct {
 	TimeoutSec int    `yaml:"timeout_sec,omitempty" json:"timeout_sec,omitempty"`
 }
 
-// LLMConfig 定义大模型分级配置
+// LLMConfig defines provider selection and provider configurations.
 type LLMConfig struct {
 	DefaultProvider string                    `yaml:"default_provider" json:"default_provider"`
 	Providers       map[string]ProviderConfig `yaml:"providers" json:"providers"`
 }
 
-// BudgetConfig 定义内核预算
+// BudgetConfig defines kernel runtime resource budgets.
 type BudgetConfig struct {
 	MaxCostUSD   float64 `yaml:"max_cost_usd" json:"max_cost_usd"`
 	MaxTokens    int     `yaml:"max_tokens" json:"max_tokens"`
 	MaxToolCalls int     `yaml:"max_tool_calls" json:"max_tool_calls"`
 }
 
-// GovernanceConfig 定义内核安全合规
+// GovernanceConfig defines kernel compliance and enforcement rules.
 type GovernanceConfig struct {
 	EnforceReceipts bool `yaml:"enforce_receipts" json:"enforce_receipts"`
 	FailClosed      bool `yaml:"fail_closed" json:"fail_closed"`
 }
 
-// KernelConfig 定义内核管控分级
+// KernelConfig defines kernel management tiers.
 type KernelConfig struct {
 	Budget     BudgetConfig     `yaml:"budget" json:"budget"`
 	Governance GovernanceConfig `yaml:"governance" json:"governance"`
 }
 
-// GatewayConfig 定义网关分级
+// GatewayConfig defines network gateway settings.
 type GatewayConfig struct {
 	Port int    `yaml:"port" json:"port"`
 	Host string `yaml:"host" json:"host"`
 }
 
-// LoggingConfig 定义日志追踪分级
+// LoggingConfig defines logging level and output format.
 type LoggingConfig struct {
 	Level  string `yaml:"level" json:"level"`
 	Format string `yaml:"format" json:"format"`
 }
 
-// ProfileOverride 定义环境差异化覆盖
+// ProfileOverride defines environment-specific configuration overrides.
 type ProfileOverride struct {
 	Kernel  *KernelConfig  `yaml:"kernel,omitempty" json:"kernel,omitempty"`
 	Logging *LoggingConfig `yaml:"logging,omitempty" json:"logging,omitempty"`
 }
 
-// AgentYAMLConfig 顶层完整分级配置
+// AgentYAMLConfig is the top-level hierarchical configuration.
 type AgentYAMLConfig struct {
 	Version     string                     `yaml:"version" json:"version"`
 	Environment string                     `yaml:"environment" json:"environment"`
@@ -70,13 +70,13 @@ type AgentYAMLConfig struct {
 	Logging     LoggingConfig              `yaml:"logging" json:"logging"`
 	Profiles    map[string]ProfileOverride `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 
-	// 运行时元数据 (不序列化)
+	// LoadedFiles tracks configuration precedence chain at runtime.
 	LoadedFiles []string `yaml:"-" json:"-"`
 }
 
 var activeConfig *AgentYAMLConfig
 
-// DefaultConfig 提供系统底座默认值
+// DefaultConfig provides baseline system defaults.
 func DefaultConfig() *AgentYAMLConfig {
 	return &AgentYAMLConfig{
 		Version:     "1.0",
@@ -145,13 +145,12 @@ func DefaultConfig() *AgentYAMLConfig {
 	}
 }
 
-// LoadConfig 实现严格的分级加载规则 (Cascading Configuration)
-// 层级优先级:
-// Level 1: 内置默认值
-// Level 2: 全局级 (~/.agent/agent.yaml)
-// Level 3: 项目级 (./agent.yaml 或上级目录)
-// Level 4: 环境 Profile 覆盖 (如 profiles[cfg.Environment])
-// Level 5: 环境变量覆盖 (AGENT_LLM_KEY, LLM_API_KEY 等)
+// LoadConfig implements cascading configuration loading:
+// 1. Builtin defaults
+// 2. Global file (~/.agent/agent.yaml)
+// 3. Project file (./agent.yaml)
+// 4. Environment profile override
+// 5. Environment variables (AGENT_LLM_*, LLM_API_KEY, etc.)
 func LoadConfig() (*AgentYAMLConfig, error) {
 	if activeConfig != nil {
 		return activeConfig, nil
@@ -159,7 +158,7 @@ func LoadConfig() (*AgentYAMLConfig, error) {
 
 	cfg := DefaultConfig()
 
-	// 1. 全局配置查找 (~/.agent/agent.yaml)
+	// 1. Check global user configuration (~/.agent/agent.yaml)
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		globalYaml := filepath.Join(homeDir, ".agent", "agent.yaml")
@@ -168,7 +167,7 @@ func LoadConfig() (*AgentYAMLConfig, error) {
 		}
 	}
 
-	// 2. 本地项目配置查找 (./agent.yaml, ./config.yaml, .agent.yaml)
+	// 2. Check local project directory (./agent.yaml, ./config.yaml, .agent.yaml)
 	projectYamlPaths := []string{
 		"agent.yaml",
 		".agent.yaml",
@@ -183,7 +182,7 @@ func LoadConfig() (*AgentYAMLConfig, error) {
 		}
 	}
 
-	// 3. 应用当前 Environment Profile 覆盖
+	// 3. Apply profile overrides for active environment
 	if profile, ok := cfg.Profiles[cfg.Environment]; ok {
 		if profile.Kernel != nil {
 			if profile.Kernel.Budget.MaxCostUSD > 0 {
@@ -206,7 +205,7 @@ func LoadConfig() (*AgentYAMLConfig, error) {
 		}
 	}
 
-	// 4. 环境变量覆盖 (最高优先级覆盖项)
+	// 4. Apply environment variable overrides (highest precedence)
 	applyEnvOverrides(cfg)
 
 	activeConfig = cfg
@@ -278,12 +277,10 @@ func mergeYAMLFile(cfg *AgentYAMLConfig, path string) error {
 }
 
 func applyEnvOverrides(cfg *AgentYAMLConfig) {
-	// 支持 AGENT_ENV / AGENT_ENVIRONMENT
 	if env := os.Getenv("AGENT_ENV"); env != "" {
 		cfg.Environment = env
 	}
 
-	// 支持默认提供商覆盖
 	if provider := os.Getenv("AGENT_LLM_PROVIDER"); provider != "" {
 		cfg.LLM.DefaultProvider = provider
 	} else if provider := os.Getenv("LLM_PROVIDER"); provider != "" {
@@ -292,7 +289,6 @@ func applyEnvOverrides(cfg *AgentYAMLConfig) {
 
 	curr := cfg.CurrentProvider()
 
-	// 支持当前默认大模型参数环境变量覆盖
 	if key := os.Getenv("AGENT_LLM_API_KEY"); key != "" {
 		curr.APIKey = key
 	} else if key := os.Getenv("LLM_API_KEY"); key != "" {
@@ -322,7 +318,7 @@ func applyEnvOverrides(cfg *AgentYAMLConfig) {
 	cfg.LLM.Providers[cfg.LLM.DefaultProvider] = curr
 }
 
-// CurrentProvider 获取当前激活生效的模型提供商参数
+// CurrentProvider returns the parameters of the currently active model provider.
 func (c *AgentYAMLConfig) CurrentProvider() ProviderConfig {
 	if p, ok := c.LLM.Providers[c.LLM.DefaultProvider]; ok {
 		return p
@@ -334,7 +330,7 @@ func (c *AgentYAMLConfig) CurrentProvider() ProviderConfig {
 	}
 }
 
-// SaveConfig 保存回当前工作的 agent.yaml
+// SaveConfig persists the configuration to the target agent.yaml file.
 func SaveConfig(cfg *AgentYAMLConfig, targetPath string) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -345,7 +341,7 @@ func SaveConfig(cfg *AgentYAMLConfig, targetPath string) error {
 
 func MaskAPIKey(k string) string {
 	if k == "" {
-		return "[未设置 (未配置 API_KEY)]"
+		return "[not set]"
 	}
 	if len(k) <= 8 {
 		return "******"

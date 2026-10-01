@@ -160,7 +160,7 @@ live timeline and a final statistics block:
 
 ```bash
 go run ./cmd/agentos research --endpoint http://127.0.0.1:9095 \
-  --goal "分析未来三年 Agent Runtime 基础设施的发展方向" --max-tokens 2000000
+  --goal "Analyze the next three years of agent runtime infrastructure evolution" --max-tokens 2000000
 
 [00:00] Research created research-… (workflow …)
 [00:02] Planner running

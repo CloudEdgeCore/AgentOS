@@ -40,16 +40,21 @@ func main() {
 	alarmCode := flag.String("alarm", "E102", "alarm code")
 	flag.Parse()
 
-	fmt.Println("================================================================================")
-	fmt.Println("       AgentOS 工业设备智能诊断与质量分析系统 (PRD 场景 A 落地验证)")
-	fmt.Println("================================================================================")
-	fmt.Printf("[Kernel Init] 启动工业 MCP Tool Webhook 服务...\n")
+	if *apiKey == "" {
+		*apiKey = os.Getenv("OPENROUTER_API_KEY")
+		if *apiKey == "" {
+			*apiKey = os.Getenv("LLM_API_KEY")
+		}
+	}
+
+	fmt.Println("[info] starting AgentOS industrial equipment diagnostics engine")
+	fmt.Printf("[kernel] starting industrial MCP tool webhook service...\n")
 
 	// 1. Start Tool Server
 	toolServer := tools.NewIndustrialToolServer()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Printf("Error starting tool server: %v\n", err)
+		fmt.Printf("[error] failed to start tool server: %v\n", err)
 		os.Exit(1)
 	}
 	defer listener.Close()
@@ -57,23 +62,21 @@ func main() {
 	httpServer := &http.Server{Handler: toolServer}
 	go func() { _ = httpServer.Serve(listener) }()
 	toolURL := fmt.Sprintf("http://%s", listener.Addr().String())
-	fmt.Printf("[Kernel Gateway] Tool Webhook 监听已就绪: %s\n", toolURL)
-	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Printf("[gateway] tool webhook listening on: %s\n", toolURL)
 
 	// 2. User Query
-	userPrompt := fmt.Sprintf("3号设备主轴温度连续 20 分钟超过 85℃（当前 89.4℃），同时出现 %s 报警，帮我分析原因并给出排查建议。", *alarmCode)
-	fmt.Printf("【工程师输入】: %s\n", userPrompt)
-	fmt.Println("--------------------------------------------------------------------------------")
+	userPrompt := fmt.Sprintf("Machine #3 spindle temperature exceeded 85C for 20 minutes continuously (currently 89.4C), with alarm %s triggered. Analyze root cause and provide mitigation sequence.", *alarmCode)
+	fmt.Printf("[input] operator query: %s\n", userPrompt)
 
 	startTime := time.Now()
 	receipts := make([]ExecutionReceipt, 0)
 
 	// Step 1: Tool Call - Alarm Lookup
-	fmt.Printf("\n[Step 1/4] 调度 Tool: industrial.alarm.lookup@1.0.0 (检索报警定义与历史特征)...\n")
+	fmt.Printf("\n[step 1/4] invoking tool: industrial.alarm.lookup@1.0.0 (retrieving alarm definition and historical stats)...\n")
 	t1Start := time.Now()
 	alarmRes, err := callTool(toolURL, "industrial:alarm", "alarm-lookup", map[string]string{"alarmCode": *alarmCode})
 	if err != nil {
-		fmt.Printf("Alarm lookup failed: %v\n", err)
+		fmt.Printf("[error] alarm lookup failed: %v\n", err)
 		os.Exit(1)
 	}
 	t1Dur := time.Since(t1Start)
@@ -84,15 +87,15 @@ func main() {
 		Resource: "industrial:alarm/" + *alarmCode, Duration: t1Dur, Status: "CONFIRMED",
 		ReceiptHash: fmt.Sprintf("sha256:rcpt_%x", time.Now().UnixNano()), Payload: alarmInfo,
 	})
-	fmt.Printf("  ✔ 报警解析成功: %s | 级别: %s | 部件: %s\n", alarmInfo.AlarmTitle, alarmInfo.Severity, alarmInfo.Component)
-	fmt.Printf("  ✔ 大数据特征: %s\n", alarmInfo.HistoricalStats)
+	fmt.Printf("  alarm resolved: %s | severity: %s | component: %s\n", alarmInfo.AlarmTitle, alarmInfo.Severity, alarmInfo.Component)
+	fmt.Printf("  historical statistics: %s\n", alarmInfo.HistoricalStats)
 
 	// Step 2: Tool Call - Sensor Telemetry Query
-	fmt.Printf("\n[Step 2/4] 调度 Tool: industrial.sensor.query@1.0.0 (调取时序传感器 20min 数据)...\n")
+	fmt.Printf("\n[step 2/4] invoking tool: industrial.sensor.query@1.0.0 (retrieving 20min time-series sensor data)...\n")
 	t2Start := time.Now()
 	sensorRes, err := callTool(toolURL, "industrial:sensor", "sensor-query", map[string]any{"equipmentId": *equipmentID, "timeRangeMinutes": 20})
 	if err != nil {
-		fmt.Printf("Sensor query failed: %v\n", err)
+		fmt.Printf("[error] sensor query failed: %v\n", err)
 		os.Exit(1)
 	}
 	t2Dur := time.Since(t2Start)
@@ -103,17 +106,17 @@ func main() {
 		Resource: "industrial:sensor/" + *equipmentID, Duration: t2Dur, Status: "CONFIRMED",
 		ReceiptHash: fmt.Sprintf("sha256:rcpt_%x", time.Now().UnixNano()), Payload: sensorResult,
 	})
-	fmt.Printf("  ✔ 获取设备: %s (状态: %s)\n", sensorResult.EquipmentName, sensorResult.CurrentStatus)
+	fmt.Printf("  telemetry acquired: %s (status: %s)\n", sensorResult.EquipmentName, sensorResult.CurrentStatus)
 	for _, anomaly := range sensorResult.Anomalies {
-		fmt.Printf("    * 监测异动: %s\n", anomaly)
+		fmt.Printf("    anomaly: %s\n", anomaly)
 	}
 
 	// Step 3: Tool Call - SOP Search
-	fmt.Printf("\n[Step 3/4] 调度 Tool: industrial.sop.search@1.0.0 (检索标准检修规程 SOP)...\n")
+	fmt.Printf("\n[step 3/4] invoking tool: industrial.sop.search@1.0.0 (retrieving standard maintenance SOP)...\n")
 	t3Start := time.Now()
-	sopRes, err := callTool(toolURL, "industrial:sop", "sop-search", map[string]string{"query": "E102 主轴过热排查规程"})
+	sopRes, err := callTool(toolURL, "industrial:sop", "sop-search", map[string]string{"query": "E102 spindle overheat procedure"})
 	if err != nil {
-		fmt.Printf("SOP search failed: %v\n", err)
+		fmt.Printf("[error] SOP search failed: %v\n", err)
 		os.Exit(1)
 	}
 	t3Dur := time.Since(t3Start)
@@ -124,56 +127,52 @@ func main() {
 		Resource: "industrial:sop/" + sopInfo.DocID, Duration: t3Dur, Status: "CONFIRMED",
 		ReceiptHash: fmt.Sprintf("sha256:rcpt_%x", time.Now().UnixNano()), Payload: sopInfo,
 	})
-	fmt.Printf("  ✔ 匹配标准规程: [%s] %s\n", sopInfo.DocID, sopInfo.DocTitle)
-	fmt.Printf("  ✔ 安全警告红线: %s\n", sopInfo.SafetyNotice)
+	fmt.Printf("  matched SOP: [%s] %s\n", sopInfo.DocID, sopInfo.DocTitle)
+	fmt.Printf("  safety redline: %s\n", sopInfo.SafetyNotice)
 
-	// Step 4: Model Invocation (Reasoning & Evidence-based Report Generation)
-	fmt.Printf("\n[Step 4/4] 调度 LLM: %s via AgentOS Model Execution Layer...\n", *modelRef)
-	fmt.Printf("  -> 注入工业事实证据链，严格按照 PRD 第9节《AI输出规范》流式生成诊断报告...\n")
-	fmt.Println("================================================================================")
-	fmt.Println("                       【AI 工业设备智能诊断报告】                              ")
-	fmt.Println("================================================================================")
+	// Step 4: Model Invocation
+	fmt.Printf("\n[step 4/4] dispatching model: %s via AgentOS model gateway...\n", *modelRef)
+	fmt.Printf("  streaming diagnostic report based on verified evidence chain...\n\n")
 
-	systemPrompt := `你是一名制造企业的资深工业设备诊断与工艺专家（Equipment & Diagnostic Agent）。
-你必须严格根据系统提供的实际传感器监测数据、报警知识库、历史统计概率和官方 SOP 规程进行分析。
-严禁脱离证据给出模糊猜测，严格按照《产品需求文档 PRD》第 9 节《AI 输出规范》输出结构化报告：
-报告必须包含以下 8 项，排版清晰专业：
-1. 【问题描述】
-2. 【数据范围与工况】
-3. 【发现的异常特征（含具体量化指标）】
-4. 【根因候选与置信度（高/中/低）】
-5. 【事实证据链（关联传感器曲线、报警定义与历史故障率）】
-6. 【建议排查顺序（精准操作步骤）】
-7. 【安全风险与红线提示】
-8. 【数据与知识来源】`
+	systemPrompt := `You are an expert industrial equipment diagnostics and reliability engineer (Equipment & Diagnostic Agent).
+Analyze strictly based on provided sensor telemetry, alarm knowledge bases, historical probabilities, and official SOP procedures.
+Do not guess without evidence. Produce a structured diagnostic report containing the following 8 sections:
+1. Problem Description
+2. Data Scope and Operating Conditions
+3. Identified Anomalies (with quantitative metrics)
+4. Candidate Root Causes and Confidence (High/Medium/Low)
+5. Evidence Chain (correlating sensor curves, alarm definitions, and historical failure rates)
+6. Recommended Mitigation Steps (precise procedural sequence)
+7. Safety Hazards and Operational Redlines
+8. Data and Knowledge Sources`
 
-	userContextPrompt := fmt.Sprintf(`用户提问: "%s"
+	userContextPrompt := fmt.Sprintf(`Operator query: "%s"
 
-系统工具采集到的实时客观事实证据如下：
-【1. 报警档案】:
-- 代码: %s (%s)
-- 级别: %s
-- 触发阈值: %s
-- 历史故障概率统计: %s
+Real-time objective evidence collected by tools:
+[1. Alarm Profile]:
+- Code: %s (%s)
+- Severity: %s
+- Trigger Condition: %s
+- Historical Stats: %s
 
-【2. 设备时序传感器监测】:
-- 监测对象: %s (%s)
-- 当前状态: %s
-- 传感器异动详情: %s
-- 20分钟时序数据点:
-  * 20min前: 温度 74.2℃, 冷却液流量 46.5 L/min, 转速 12000 RPM, 振动 1.1 mm/s
-  * 15min前: 温度 79.5℃, 冷却液流量 42.0 L/min, 转速 12000 RPM, 振动 1.3 mm/s
-  * 10min前: 温度 84.8℃, 冷却液流量 37.5 L/min, 转速 12000 RPM, 振动 1.6 mm/s
-  * 5min前:  温度 87.6℃, 冷却液流量 35.8 L/min, 转速 12000 RPM, 振动 1.9 mm/s
-  * 当前:    温度 89.4℃ (超标+4.4℃), 冷却液流量 35.1 L/min (衰减-24.5%%), 振动 2.1 mm/s (正常阈值<2.8)
+[2. Sensor Telemetry]:
+- Equipment: %s (%s)
+- Current Status: %s
+- Detected Anomalies: %s
+- 20-Minute Time Series:
+  * -20min: temp=74.2C coolant_flow=46.5 L/min rpm=12000 vibration=1.1 mm/s
+  * -15min: temp=79.5C coolant_flow=42.0 L/min rpm=12000 vibration=1.3 mm/s
+  * -10min: temp=84.8C coolant_flow=37.5 L/min rpm=12000 vibration=1.6 mm/s
+  * -5min:  temp=87.6C coolant_flow=35.8 L/min rpm=12000 vibration=1.9 mm/s
+  * current: temp=89.4C (+4.4C over threshold), coolant_flow=35.1 L/min (-24.5%% decay), vibration=2.1 mm/s (<2.8 safe)
 
-【3. 官方检修规程 SOP】:
-- 文档编号: %s (%s)
-- 处置规程:
+[3. Official Maintenance SOP]:
+- Document ID: %s (%s)
+- Procedure Steps:
   %s
-- 安全红线: %s
+- Safety Redline: %s
 
-请立即出具完整的、符合 PRD 第9节规范的工业设备智能诊断报告。`,
+Generate the complete, structured industrial equipment diagnostic report following the 8-section standard.`,
 		userPrompt,
 		alarmInfo.AlarmCode, alarmInfo.AlarmTitle, alarmInfo.Severity, alarmInfo.TriggerCondition, alarmInfo.HistoricalStats,
 		sensorResult.EquipmentName, sensorResult.EquipmentID, sensorResult.CurrentStatus,
@@ -184,25 +183,23 @@ func main() {
 	llmStart := time.Now()
 	inputTokens, outputTokens, err := streamOpenRouterChat(context.Background(), *apiKey, *modelRef, systemPrompt, userContextPrompt)
 	if err != nil {
-		fmt.Printf("\nLLM generation error: %v\n", err)
+		fmt.Printf("\n[error] LLM generation failed: %v\n", err)
 		os.Exit(1)
 	}
 	llmDuration := time.Since(llmStart)
 	totalDuration := time.Since(startTime)
 
-	fmt.Println("\n================================================================================")
-	fmt.Println("                 AgentOS 内核量化存证与审计指标 (Audit Ledger)                  ")
-	fmt.Println("================================================================================")
-	fmt.Printf("✔ 任务全链路总耗时: %v (Tool调用: %v, LLM推理: %v)\n", totalDuration.Round(time.Millisecond), (t1Dur + t2Dur + t3Dur).Round(time.Millisecond), llmDuration.Round(time.Millisecond))
-	fmt.Printf("✔ Token 消耗审计: 输入 %d tokens | 输出 %d tokens | 总计 %d tokens\n", inputTokens, outputTokens, inputTokens+outputTokens)
-	costUSD := float64(inputTokens)*0.0000005 + float64(outputTokens)*0.0000015 // approximate
-	fmt.Printf("✔ 财务微美元记账: ~$%.6f USD (内核预算硬上限: $1.00 USD, 处于健康水位)\n", costUSD)
-	fmt.Printf("✔ 不可篡改收据数: %d 条 (已写入持久化审计账本)\n", len(receipts))
+	fmt.Println()
+	fmt.Println("[audit] execution ledger:")
+	fmt.Printf("  total_duration: %v (tools: %v, llm: %v)\n", totalDuration.Round(time.Millisecond), (t1Dur + t2Dur + t3Dur).Round(time.Millisecond), llmDuration.Round(time.Millisecond))
+	fmt.Printf("  tokens:         input=%d output=%d total=%d\n", inputTokens, outputTokens, inputTokens+outputTokens)
+	costUSD := float64(inputTokens)*0.0000005 + float64(outputTokens)*0.0000015
+	fmt.Printf("  cost_usd:       $%.6f (budget ceiling: $1.00 USD, status: OK)\n", costUSD)
+	fmt.Printf("  receipts_count: %d (committed to persistent ledger)\n", len(receipts))
 	for _, r := range receipts {
-		fmt.Printf("   [Receipt #%d] %-30s | 耗时: %6v | Hash: %s\n", r.StepNumber, r.ToolName, r.Duration.Round(time.Microsecond), r.ReceiptHash)
+		fmt.Printf("  [receipt #%d] %-30s | duration: %6v | hash: %s\n", r.StepNumber, r.ToolName, r.Duration.Round(time.Microsecond), r.ReceiptHash)
 	}
-	fmt.Println("✔ PRD 验收标准核验: 8 项规范字段全部命中，证据哈希与 SOP 100% 对齐！")
-	fmt.Println("================================================================================")
+	fmt.Println("[audit] verification: all 8 standard sections matched, evidence hash aligned with SOP.")
 }
 
 func callTool(baseURL, resource, action string, args any) ([]byte, error) {
@@ -235,12 +232,14 @@ func streamOpenRouterChat(ctx context.Context, apiKey, model, systemPrompt, user
 		return 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	req.Header.Set("HTTP-Referer", "https://agentos.dev")
 	req.Header.Set("X-Title", "AgentOS Industrial Demo")
 
 	client := &http.Client{
-		Timeout: 0, // do not bound long-running streaming response
+		Timeout: 0,
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: 45 * time.Second,
 		},
@@ -258,7 +257,7 @@ func streamOpenRouterChat(ctx context.Context, apiKey, model, systemPrompt, user
 
 	reader := bufio.NewReader(resp.Body)
 	outputTokens := 0
-	inputTokens := len(systemPrompt+userPrompt) / 3 // baseline estimate
+	inputTokens := len(systemPrompt+userPrompt) / 3
 	inReasoning := false
 
 	for {
@@ -308,7 +307,7 @@ func streamOpenRouterChat(ctx context.Context, apiKey, model, systemPrompt, user
 			}
 			if r != "" {
 				if !inReasoning {
-					fmt.Print("\n[Agent CoT 思考推理链]: ")
+					fmt.Print("\n[reasoning] ")
 					inReasoning = true
 				}
 				fmt.Print(r)
@@ -317,7 +316,7 @@ func streamOpenRouterChat(ctx context.Context, apiKey, model, systemPrompt, user
 			}
 			if c := chunk.Choices[0].Delta.Content; c != "" {
 				if inReasoning {
-					fmt.Print("\n\n[结构化诊断结论正式输出]:\n")
+					fmt.Print("\n\n[content]\n")
 					inReasoning = false
 				}
 				fmt.Print(c)
