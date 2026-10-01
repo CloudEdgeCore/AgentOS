@@ -2143,20 +2143,11 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
           <div class="tab-panel active" id="cfgPanel-model">
             <div class="card">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="model_gateway_title">Model Provider & Gateway Route</span>
+                <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="model_gateway_title">Model Gateway & Endpoint Route</span>
                 <span class="badge badge-primary" id="modelProbeBadge">READY</span>
               </div>
 
-              <label style="font-size: 11px; color: var(--outline);" data-i18n="provider_type">PROVIDER TYPE</label>
-              <select id="cfgProvider" onchange="autoFillProviderDefaults()">
-                <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
-                <option value="deepseek">DeepSeek (Direct API)</option>
-                <option value="qwen">Qwen / DashScope (Aliyun Direct)</option>
-                <option value="ollama">Ollama (Local Self-hosted)</option>
-                <option value="anthropic">Anthropic (Claude Direct)</option>
-              </select>
-
-              <label style="font-size: 11px; color: var(--outline); margin-top: 10px;" data-i18n="model_identifier">MODEL IDENTIFIER</label>
+              <label style="font-size: 11px; color: var(--outline);" data-i18n="model_identifier">MODEL IDENTIFIER</label>
               <input type="text" id="cfgModel" placeholder="e.g. deepseek/deepseek-r1"/>
               <div style="display: flex; gap: 6px; margin-top: 4px; margin-bottom: 10px; flex-wrap: wrap;">
                 <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('deepseek/deepseek-r1')">deepseek-r1</span>
@@ -2370,8 +2361,8 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
             </div>
             <div style="display: flex; flex-direction: column; gap: 8px; font-family: var(--font-mono); font-size: 11px;">
               <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
-                <span style="color: var(--outline);" data-i18n="lbl_active_prov">Active Provider:</span>
-                <span id="summaryProvider" style="color: var(--text-main); font-weight: 600;">openrouter</span>
+                <span style="color: var(--outline);" data-i18n="lbl_active_endpoint">Gateway Endpoint:</span>
+                <span id="summaryEndpoint" style="color: var(--text-main); font-weight: 600; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">openrouter.ai</span>
               </div>
               <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
                 <span style="color: var(--outline);" data-i18n="lbl_active_model">Active Model:</span>
@@ -2539,14 +2530,13 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         gateway_host_label: 'GATEWAY HOST',
         gateway_port_label: 'GATEWAY PORT',
         runtime_state_title: 'Active Runtime State',
-        lbl_active_prov: 'Active Provider:',
+        lbl_active_endpoint: 'Gateway Endpoint:',
         lbl_active_model: 'Active Model:',
         lbl_active_protocol: 'Protocol Spec:',
         lbl_budget_cap: 'Budget Ceiling:',
         lbl_governance_mode: 'Governance Mode:',
         btn_copy_yaml: 'Copy YAML',
-        model_gateway_title: 'Model Provider & Gateway Route',
-        provider_type: 'PROVIDER TYPE',
+        model_gateway_title: 'Model Gateway & Endpoint Route',
         protocol_type: 'PROTOCOL SPECIFICATION',
         opt_proto_openai: 'OpenAI Compatible (/chat/completions)',
         opt_proto_anthropic: 'Anthropic Claude (/v1/messages)',
@@ -2677,14 +2667,13 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         gateway_host_label: '网关监听主机 (Host)',
         gateway_port_label: '网关监听端口 (Port)',
         runtime_state_title: '内核实时运行摘要',
-        lbl_active_prov: '当前渠道:',
+        lbl_active_endpoint: '网关地址端点:',
         lbl_active_model: '当前模型:',
         lbl_active_protocol: '接口协议形式:',
         lbl_budget_cap: '预算上限:',
         lbl_governance_mode: '治理模式:',
         btn_copy_yaml: '复制 YAML',
-        model_gateway_title: '模型提供商配置与网关路由',
-        provider_type: '网关提供商类型',
+        model_gateway_title: '模型网关与端点路由配置',
         protocol_type: 'API 接口协议形式',
         opt_proto_openai: 'OpenAI 兼容协议 (/chat/completions)',
         opt_proto_anthropic: 'Anthropic Claude 原生协议 (/v1/messages)',
@@ -2803,9 +2792,20 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     function selectModelPreset(model) {
       document.getElementById('cfgModel').value = model;
       if (model.indexOf('claude') !== -1) {
-        document.getElementById('cfgProvider').value = 'anthropic';
         document.getElementById('cfgProtocol').value = 'anthropic';
         document.getElementById('cfgBaseURL').value = 'https://api.anthropic.com/v1';
+      } else if (model.indexOf('ollama') !== -1 || model.indexOf(':') !== -1) {
+        document.getElementById('cfgProtocol').value = 'openai';
+        document.getElementById('cfgBaseURL').value = 'http://localhost:11434/v1';
+      } else if (model.indexOf('qwen') !== -1) {
+        document.getElementById('cfgProtocol').value = 'openai';
+        document.getElementById('cfgBaseURL').value = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      } else if (model.indexOf('deepseek') !== -1) {
+        document.getElementById('cfgProtocol').value = 'openai';
+        document.getElementById('cfgBaseURL').value = 'https://api.deepseek.com/v1';
+      } else {
+        document.getElementById('cfgProtocol').value = 'openai';
+        document.getElementById('cfgBaseURL').value = 'https://openrouter.ai/api/v1';
       }
     }
 
@@ -2876,30 +2876,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       d.classList.toggle('open');
     }
 
-    function autoFillProviderDefaults() {
-      var prov = document.getElementById('cfgProvider').value;
-      if (prov === 'openrouter') {
-        document.getElementById('cfgModel').value = 'stealth/space-bunny-alpha';
-        document.getElementById('cfgBaseURL').value = 'https://openrouter.ai/api/v1';
-        document.getElementById('cfgProtocol').value = 'openai';
-      } else if (prov === 'deepseek') {
-        document.getElementById('cfgModel').value = 'deepseek-chat';
-        document.getElementById('cfgBaseURL').value = 'https://api.deepseek.com/v1';
-        document.getElementById('cfgProtocol').value = 'openai';
-      } else if (prov === 'qwen') {
-        document.getElementById('cfgModel').value = 'qwen-plus';
-        document.getElementById('cfgBaseURL').value = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-        document.getElementById('cfgProtocol').value = 'openai';
-      } else if (prov === 'ollama') {
-        document.getElementById('cfgModel').value = 'qwen2.5:7b';
-        document.getElementById('cfgBaseURL').value = 'http://localhost:11434/v1';
-        document.getElementById('cfgProtocol').value = 'openai';
-      } else if (prov === 'anthropic') {
-        document.getElementById('cfgModel').value = 'claude-3-5-sonnet-20241022';
-        document.getElementById('cfgBaseURL').value = 'https://api.anthropic.com/v1';
-        document.getElementById('cfgProtocol').value = 'anthropic';
-      }
-    }
+
 
     async function loadStatus() {
       try {
@@ -3190,8 +3167,9 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
     function resetConfigDefaults() {
       if (!confirm(currentLang === 'zh' ? '确认将所有系统配置重置为官方默认值？' : 'Reset all configuration to system defaults?')) return;
-      document.getElementById('cfgProvider').value = 'openrouter';
-      autoFillProviderDefaults();
+      document.getElementById('cfgModel').value = 'stealth/space-bunny-alpha';
+      document.getElementById('cfgProtocol').value = 'openai';
+      document.getElementById('cfgBaseURL').value = 'https://openrouter.ai/api/v1';
       document.getElementById('cfgBudget').value = '1.00';
       document.getElementById('cfgMaxTokens').value = '30000';
       document.getElementById('cfgMaxToolCalls').value = '15';
@@ -3251,7 +3229,6 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
         if (data.environment) setEnvironment(data.environment);
         if (data.llm && data.llm.default_provider) {
-          document.getElementById('cfgProvider').value = data.llm.default_provider;
           var p = data.llm.providers && data.llm.providers[data.llm.default_provider];
           if (p) {
             document.getElementById('cfgModel').value = p.model || '';
@@ -3259,7 +3236,20 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
             document.getElementById('cfgProtocol').value = p.protocol || (data.llm.default_provider === 'anthropic' ? 'anthropic' : 'openai');
             if (p.timeout_sec) document.getElementById('cfgTimeoutSec').value = p.timeout_sec;
           }
-          document.getElementById('summaryProvider').textContent = data.llm.default_provider;
+          var endpointHost = 'Default';
+          if (p && p.base_url) {
+            try {
+              var u = new URL(p.base_url);
+              endpointHost = u.hostname;
+            } catch(e) {
+              endpointHost = p.base_url;
+            }
+          }
+          var summaryEnd = document.getElementById('summaryEndpoint');
+          if (summaryEnd) {
+            summaryEnd.textContent = endpointHost;
+            summaryEnd.title = (p && p.base_url) || '';
+          }
           document.getElementById('summaryModel').textContent = (p && p.model) || '';
           document.getElementById('summaryProtocol').textContent = ((p && p.protocol) || (data.llm.default_provider === 'anthropic' ? 'anthropic' : 'openai')).toUpperCase();
         }
@@ -3294,12 +3284,28 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       feedback.textContent = currentLang === 'zh' ? '正在全量保存配置并触发内核热重载...' : 'Saving full configuration & triggering hot-reload...';
       feedback.style.color = 'var(--tertiary)';
 
+      var proto = document.getElementById('cfgProtocol').value;
+      var modelVal = document.getElementById('cfgModel').value.trim();
+      var baseUrlVal = document.getElementById('cfgBaseURL').value.trim();
+      var defProv = 'custom';
+      if (proto === 'anthropic') {
+        defProv = 'anthropic';
+      } else if (modelVal.indexOf('deepseek') !== -1) {
+        defProv = 'deepseek';
+      } else if (modelVal.indexOf('qwen') !== -1) {
+        defProv = 'qwen';
+      } else if (modelVal.indexOf('ollama') !== -1) {
+        defProv = 'ollama';
+      } else if (baseUrlVal.indexOf('openrouter') !== -1) {
+        defProv = 'openrouter';
+      }
+
       var payload = {
         environment: currentEnv,
-        default_provider: document.getElementById('cfgProvider').value,
-        model: document.getElementById('cfgModel').value.trim(),
-        protocol: document.getElementById('cfgProtocol').value,
-        base_url: document.getElementById('cfgBaseURL').value.trim(),
+        default_provider: defProv,
+        model: modelVal,
+        protocol: proto,
+        base_url: baseUrlVal,
         api_key: document.getElementById('cfgAPIKey').value.trim(),
         timeout_sec: parseInt(document.getElementById('cfgTimeoutSec').value) || 120,
         budget_usd: parseFloat(document.getElementById('cfgBudget').value) || 1.0,
@@ -3344,11 +3350,15 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       feedback.textContent = currentLang === 'zh' ? '正在发送测试请求到模型...' : 'Sending test prompt to model...';
 
       try {
+        var proto = document.getElementById('cfgProtocol').value;
+        var modelVal = document.getElementById('cfgModel').value.trim();
+        var baseUrlVal = document.getElementById('cfgBaseURL').value.trim();
+        var defProv = proto === 'anthropic' ? 'anthropic' : 'custom';
         var payload = {
-          provider: document.getElementById('cfgProvider').value,
-          model: document.getElementById('cfgModel').value.trim(),
-          protocol: document.getElementById('cfgProtocol').value,
-          base_url: document.getElementById('cfgBaseURL').value.trim(),
+          provider: defProv,
+          model: modelVal,
+          protocol: proto,
+          base_url: baseUrlVal,
           api_key: document.getElementById('cfgAPIKey').value.trim()
         };
         var res = await fetch('/api/test-llm', {
