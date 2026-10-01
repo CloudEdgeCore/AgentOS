@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -56,31 +57,31 @@ Usage:
   agent [command] [flags]
 
 Core Commands:
-  config               Display active hierarchical configuration
-  config path          Show configuration precedence and resolution order
-  config set <K> <V>   Set configuration value using dot notation
-  config env <name>    Switch active environment profile (development, staging, production)
-  test-llm             Verify model connectivity, latency, and streaming reasoning
-  mcp                  Manage Model Context Protocol (MCP) tool adapters
-  ui                   Launch embedded Web Control-Plane dashboard
-  init <name>          Scaffold a new enterprise Agent project
-  run <path>           Run an Agent manifest and record audit ledger
-  demo <name>          Execute demo scenario (fault or quality)
-  version              Display version and runtime information
+  config                 Display active hierarchical configuration
+  config path            Show configuration precedence and resolution order
+  config set <K> <V>     Set configuration value using dot notation
+  config env <name>      Switch active environment profile (development, staging, production)
+  config wizard          Interactive terminal configuration wizard
+  test-llm               Verify model connectivity, latency, and streaming reasoning
+  mcp                    Manage Model Context Protocol (MCP) tool adapters
+  init <name>            Scaffold a new enterprise Agent project
+  run <path>             Run an Agent manifest and record audit ledger
+  demo <name>            Execute demo scenario (fault or quality)
+  version                Display version and runtime information
 
 Management Commands:
-  package              Package agent artifact into signed bundle
-  sign                 Cryptographically sign package artifact
-  workflow             Manage deterministic DAG workflows
-  service              Manage service daemons and health probes
-  logs                 Stream execution logs for task
+  package                Package agent artifact into signed bundle
+  sign                   Cryptographically sign package artifact
+  workflow               Manage deterministic DAG workflows
+  service                Manage service daemons and health probes
+  logs                   Stream execution logs for task
 
 Examples:
   agent config
+  agent config wizard
   agent config set llm.default_provider deepseek
   agent test-llm
   agent mcp list
-  agent ui
   agent demo quality
 `)
 }
@@ -137,6 +138,10 @@ func runConfig(args []string) {
 				return
 			}
 			fmt.Printf("[info] switched environment to %s (saved to %s)\n", newEnv, target)
+			return
+
+		case "wizard", "setup", "interactive":
+			runConfigWizard(cfg)
 			return
 
 		case "set":
@@ -418,5 +423,124 @@ func runLegacyFallback(command string, args []string) {
 	cmd.Stdin = os.Stdin
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("[info] process completed: %v\n", err)
+	}
+}
+
+func runConfigWizard(cfg *AgentYAMLConfig) {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Println("AgentOS Interactive Configuration Wizard (CLI)")
+	fmt.Println("Press Enter to accept current/default value shown in brackets [].")
+	fmt.Println()
+
+	// 1. Environment
+	fmt.Printf("1. Environment Profile [%s]: ", cfg.Environment)
+	if envInput, _ := reader.ReadString('\n'); strings.TrimSpace(envInput) != "" {
+		cfg.Environment = strings.TrimSpace(envInput)
+	}
+
+	// 2. Default Provider
+	curProvName := cfg.LLM.DefaultProvider
+	if curProvName == "" {
+		curProvName = "deepseek"
+	}
+	fmt.Printf("2. Default LLM Provider (e.g. deepseek, openrouter, qwen, ollama, custom) [%s]: ", curProvName)
+	if provInput, _ := reader.ReadString('\n'); strings.TrimSpace(provInput) != "" {
+		curProvName = strings.TrimSpace(provInput)
+		cfg.LLM.DefaultProvider = curProvName
+	}
+
+	if cfg.LLM.Providers == nil {
+		cfg.LLM.Providers = make(map[string]ProviderConfig)
+	}
+	prov := cfg.LLM.Providers[curProvName]
+
+	// 3. Model
+	curModel := prov.Model
+	if curModel == "" {
+		curModel = "deepseek-chat"
+	}
+	fmt.Printf("3. Model Name [%s]: ", curModel)
+	if modelInput, _ := reader.ReadString('\n'); strings.TrimSpace(modelInput) != "" {
+		prov.Model = strings.TrimSpace(modelInput)
+	} else {
+		prov.Model = curModel
+	}
+
+	// 4. Base URL
+	curBaseURL := prov.BaseURL
+	if curBaseURL == "" {
+		curBaseURL = "https://api.deepseek.com/v1"
+	}
+	fmt.Printf("4. Base URL [%s]: ", curBaseURL)
+	if urlInput, _ := reader.ReadString('\n'); strings.TrimSpace(urlInput) != "" {
+		prov.BaseURL = strings.TrimSpace(urlInput)
+	} else {
+		prov.BaseURL = curBaseURL
+	}
+
+	// 5. Protocol Form (OpenAI Native /v1 vs AgentOS Gateway /v1alpha)
+	curProtocol := prov.Protocol
+	if curProtocol == "" {
+		curProtocol = "openai"
+	}
+	fmt.Printf("5. Protocol Format (1: openai native /v1, 2: agentos gateway /v1alpha) [%s]: ", curProtocol)
+	if protoInput, _ := reader.ReadString('\n'); strings.TrimSpace(protoInput) != "" {
+		trimmed := strings.TrimSpace(protoInput)
+		if trimmed == "1" || strings.ToLower(trimmed) == "openai" {
+			prov.Protocol = "openai"
+		} else if trimmed == "2" || strings.ToLower(trimmed) == "agentos" {
+			prov.Protocol = "agentos"
+		} else {
+			prov.Protocol = trimmed
+		}
+	} else {
+		prov.Protocol = curProtocol
+	}
+
+	// 6. API Key
+	maskedKey := MaskAPIKey(prov.APIKey)
+	if maskedKey == "" {
+		maskedKey = "none"
+	}
+	fmt.Printf("6. API Key [%s]: ", maskedKey)
+	if keyInput, _ := reader.ReadString('\n'); strings.TrimSpace(keyInput) != "" {
+		prov.APIKey = strings.TrimSpace(keyInput)
+	}
+
+	// 7. Budget Max Cost
+	curCost := cfg.Kernel.Budget.MaxCostUSD
+	if curCost <= 0 {
+		curCost = 2.00
+	}
+	fmt.Printf("7. Budget Ceiling (USD) [$%.2f]: ", curCost)
+	if costInput, _ := reader.ReadString('\n'); strings.TrimSpace(costInput) != "" {
+		if c, err := strconv.ParseFloat(strings.TrimSpace(costInput), 64); err == nil && c > 0 {
+			cfg.Kernel.Budget.MaxCostUSD = c
+		}
+	} else {
+		cfg.Kernel.Budget.MaxCostUSD = curCost
+	}
+
+	cfg.LLM.Providers[curProvName] = prov
+
+	// Save
+	target := "agent.yaml"
+	if len(cfg.LoadedFiles) > 0 {
+		target = cfg.LoadedFiles[len(cfg.LoadedFiles)-1]
+	}
+	if err := SaveConfig(cfg, target); err != nil {
+		fmt.Printf("\n[error] failed to save config to %s: %v\n", target, err)
+		return
+	}
+
+	fmt.Printf("\n[success] configuration updated and saved to %s\n", target)
+	fmt.Printf("  Provider: %s | Model: %s | Protocol: %s\n", curProvName, prov.Model, prov.Protocol)
+	fmt.Printf("  BaseURL:  %s\n", prov.BaseURL)
+	fmt.Printf("  Budget:   $%.2f USD\n\n", cfg.Kernel.Budget.MaxCostUSD)
+
+	fmt.Print("Would you like to test model connectivity now? [Y/n]: ")
+	if testInput, _ := reader.ReadString('\n'); strings.TrimSpace(strings.ToLower(testInput)) != "n" {
+		runTestLLM()
 	}
 }

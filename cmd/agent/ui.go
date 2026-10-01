@@ -211,10 +211,13 @@ var (
 )
 
 func runUI(args []string) {
+	hasPreview := false
 	port := "8080"
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "-p" || arg == "--port" {
+		if arg == "--preview" || arg == "--dev" || arg == "--internal" {
+			hasPreview = true
+		} else if arg == "-p" || arg == "--port" {
 			if i+1 < len(args) {
 				port = args[i+1]
 				i++
@@ -226,6 +229,22 @@ func runUI(args []string) {
 				port = arg
 			}
 		}
+	}
+
+	if !hasPreview {
+		fmt.Println("[info] Web UI is currently under internal polishing and is disabled for external access in this release.")
+		fmt.Println("[info] Only CLI operations are permitted at this stage.")
+		fmt.Println("[info] For all configuration, testing, and agent management, please use the CLI commands:")
+		fmt.Println("  - agent config              (display active configuration)")
+		fmt.Println("  - agent config wizard       (interactive terminal configuration wizard)")
+		fmt.Println("  - agent config set <K> <V>  (set configuration value)")
+		fmt.Println("  - agent test-llm            (test model inference & latency)")
+		fmt.Println("  - agent mcp                 (manage Model Context Protocol tools)")
+		fmt.Println("  - agent init <name>         (scaffold new enterprise agent project)")
+		fmt.Println("  - agent run <manifest>      (execute agent workload)")
+		fmt.Println()
+		fmt.Println("hint: to launch in local loopback preview mode strictly for polishing, run: agent ui --preview")
+		return
 	}
 
 	mux := http.NewServeMux()
@@ -242,9 +261,9 @@ func runUI(args []string) {
 	mux.HandleFunc("/api/test-llm", handleUITestLLM)
 	mux.HandleFunc("/api/agents", handleUIAgents)
 
-	addr := "0.0.0.0:" + port
-	fmt.Printf("[info] starting AgentOS control plane web server on %s\n", addr)
-	fmt.Printf("[info] dashboard ui accessible at: http://127.0.0.1:%s\n", port)
+	addr := "127.0.0.1:" + port
+	fmt.Printf("[info] starting AgentOS control plane web server (internal preview) on %s\n", addr)
+	fmt.Printf("[info] dashboard ui strictly bound to loopback: http://127.0.0.1:%s\n", port)
 	fmt.Println("[info] api endpoints available:")
 	fmt.Println("  - GET  /api/status")
 	fmt.Println("  - GET  /api/receipts")
