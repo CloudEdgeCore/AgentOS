@@ -1668,7 +1668,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div>
         <div style="display: flex; align-items: center; gap: 6px;">
           <span class="brand-title">AgentOS Kernel</span>
-          <span class="badge">v1.2.1 LTS</span>
+          <span class="badge">v1.3.0 LTS</span>
         </div>
         <div style="font-size: 9px; color: var(--secondary-bright); font-family: var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;">CloudEdge Architecture</div>
       </div>

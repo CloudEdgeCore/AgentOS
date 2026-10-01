@@ -6,6 +6,17 @@ public protocol versions evolve independently.
 
 ## Unreleased
 
+## 1.3.0 - 2026-10-01
+
+### Added
+- **Visual Design Overhaul ("Cyber Obsidian & Electric Lumina")**: Modernized console with deep obsidian surfaces, electric indigo, neon cyan, and emerald luminous highlights, glassmorphic cards, and custom cyber scrollbars.
+- **3-Palette Live Theme Switcher**: Real-time theme engine supporting Cyber Obsidian (Default), Solar Amber (Industrial), and Quantum Emerald (Matrix) with localStorage persistence and instant DOM class synchronization.
+- **Custom CloudEdge Vector Brand Mark**: Bespoke vector SVG logo created via Stitch incorporating Cloud elasticity, Edge crystallographic polygonal facets, and circuit bus routes into the header.
+- **Dual-Protocol Model Gateway**: Native dual-protocol switching supporting both OpenAI-compatible (/chat/completions) and Anthropic Claude (/v1/messages) APIs across all runtime providers.
+- **Streamlined 4-Parameter Gateway Configuration**: Simplified model configuration removing redundant provider type dropdown in favor of core parameters (Model, Protocol, Base URL, API Key) and 1-click Preset chips.
+- **Full Bilingual i18n Engine**: Seamless live switching between English and Simplified Chinese across the entire dashboard and controls.
+- **Web-Based Process & Agent Orchestrator**: Interactive graphical workbench for testing model connectivity, probing MCP tool endpoints, and hot-reloading configurations.
+
 ## 1.2.1 - 2026-10-01
 
 ### Added

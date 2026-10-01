@@ -50,7 +50,7 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Print(`AgentOS Developer Core CLI: agent (v1.2.1)
+	fmt.Print(`AgentOS Developer Core CLI: agent (v1.3.0)
 
 Usage:
   agent [command] [flags]

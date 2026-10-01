@@ -5,8 +5,8 @@ package version
 
 const (
 	Product             = "AgentOS"
-	ProductVersion      = "1.2.1.0"
-	SemVer              = "1.2.1"
+	ProductVersion      = "1.3.0.0"
+	SemVer              = "1.3.0"
 	ReleaseStage        = "GA"
 	Manifest            = "agentos.dev/v1"
 	RuntimeProtocol     = "agentos.runtime.v1"
