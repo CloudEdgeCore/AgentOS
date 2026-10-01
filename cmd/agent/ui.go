@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,11 +42,44 @@ type UIRunResponse struct {
 	Error   string    `json:"error,omitempty"`
 }
 
+type UIModelConfigRequest struct {
+	Provider  string  `json:"provider"`
+	Model     string  `json:"model"`
+	BaseURL   string  `json:"base_url"`
+	APIKey    string  `json:"api_key"`
+	BudgetUSD float64 `json:"budget_usd"`
+}
+
+type UIAgentItem struct {
+	Name      string   `json:"name"`
+	Role      string   `json:"role"`
+	Model     string   `json:"model"`
+	BudgetUSD float64  `json:"budget_usd"`
+	Latency   string   `json:"latency"`
+	Status    string   `json:"status"`
+	Tools     []string `json:"tools,omitempty"`
+}
+
+type UICreateAgentRequest struct {
+	Name         string   `json:"name"`
+	Role         string   `json:"role"`
+	Model        string   `json:"model"`
+	BudgetUSD    float64  `json:"budget_usd"`
+	SystemPrompt string   `json:"system_prompt,omitempty"`
+	Tools        []string `json:"tools,omitempty"`
+}
+
 var (
 	uiStartTime = time.Now()
 	uiMu        sync.RWMutex
 	uiRedline   = false
-	uiReceipts  = []UIReceipt{
+	uiAgents    = []UIAgentItem{
+		{Name: "Quality-Tracer-01", Role: "Defect RCA & SOP Traceability", Model: "deepseek/deepseek-r1", BudgetUSD: 2.00, Latency: "22ms", Status: "ONLINE"},
+		{Name: "CNC-Spindle-Guard", Role: "High-Freq Vibration Telemetry", Model: "deepseek/deepseek-r1", BudgetUSD: 1.50, Latency: "18ms", Status: "ONLINE"},
+		{Name: "Ingress-Gateway", Role: "Task Admission & Rate Guard", Model: "stealth/space-bunny-alpha", BudgetUSD: 1.00, Latency: "1.2ms", Status: "ONLINE"},
+		{Name: "Ledger-Verifier", Role: "Cryptographic Merkle Notary", Model: "deterministic-go", BudgetUSD: 0.50, Latency: "0.4ms", Status: "ONLINE"},
+	}
+	uiReceipts = []UIReceipt{
 		{
 			ReceiptID:  "sha256:rcpt_9f83a21b",
 			Timestamp:  time.Now().Add(-25 * time.Minute).UTC().Format(time.RFC3339),
@@ -114,6 +149,9 @@ func runUI(args []string) {
 	mux.HandleFunc("/api/run", handleUIRun)
 	mux.HandleFunc("/api/halt", handleUIHalt)
 	mux.HandleFunc("/api/config", handleUIConfig)
+	mux.HandleFunc("/api/config/model", handleUIModelConfig)
+	mux.HandleFunc("/api/test-llm", handleUITestLLM)
+	mux.HandleFunc("/api/agents", handleUIAgents)
 
 	addr := "0.0.0.0:" + port
 	fmt.Printf("[info] starting AgentOS control plane web server on %s\n", addr)
@@ -123,9 +161,13 @@ func runUI(args []string) {
 	fmt.Println("  - GET  /api/receipts")
 	fmt.Println("  - GET  /api/tools")
 	fmt.Println("  - GET  /api/nodes")
+	fmt.Println("  - GET  /api/agents")
 	fmt.Println("  - GET  /api/config")
 	fmt.Println("  - POST /api/run")
 	fmt.Println("  - POST /api/halt")
+	fmt.Println("  - POST /api/config/model")
+	fmt.Println("  - POST /api/test-llm")
+	fmt.Println("  - POST /api/agents")
 	fmt.Println("[info] press Ctrl+C to terminate server")
 
 	server := &http.Server{
@@ -155,6 +197,7 @@ func handleUIStatus(w http.ResponseWriter, r *http.Request) {
 
 	uiMu.RLock()
 	rcptCount := len(uiReceipts)
+	agentCount := len(uiAgents)
 	var totalCost float64
 	for _, rcpt := range uiReceipts {
 		totalCost += rcpt.CostUSD
@@ -180,7 +223,7 @@ func handleUIStatus(w http.ResponseWriter, r *http.Request) {
 		"receipts_count":    rcptCount,
 		"total_spend_usd":   totalCost,
 		"active_connectors": 6,
-		"active_agents":     12,
+		"active_agents":     agentCount,
 		"idle_agents":       4,
 		"reconcile_ms":      25,
 		"slo_percent":       99.998,
@@ -298,6 +341,169 @@ func handleUIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(cfg)
+}
+
+func handleUIModelConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req UIModelConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if req.Provider != "" {
+		cfg.LLM.DefaultProvider = req.Provider
+	}
+	curr := cfg.CurrentProvider()
+	if req.Model != "" {
+		curr.Model = req.Model
+	}
+	if req.BaseURL != "" {
+		curr.BaseURL = req.BaseURL
+	}
+	if req.APIKey != "" {
+		curr.APIKey = req.APIKey
+	}
+	if req.BudgetUSD > 0 {
+		cfg.Kernel.Budget.MaxCostUSD = req.BudgetUSD
+	}
+	if cfg.LLM.Providers == nil {
+		cfg.LLM.Providers = make(map[string]ProviderConfig)
+	}
+	cfg.LLM.Providers[cfg.LLM.DefaultProvider] = curr
+
+	targetFile := "agent.yaml"
+	if len(cfg.LoadedFiles) > 0 {
+		targetFile = cfg.LoadedFiles[len(cfg.LoadedFiles)-1]
+	}
+	if err := SaveConfig(cfg, targetFile); err != nil {
+		http.Error(w, fmt.Sprintf("failed to save config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":    true,
+		"message":    fmt.Sprintf("Configuration successfully saved to %s", targetFile),
+		"provider":   cfg.LLM.DefaultProvider,
+		"model":      curr.Model,
+		"budget_usd": cfg.Kernel.Budget.MaxCostUSD,
+	})
+}
+
+func handleUITestLLM(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := LoadConfig()
+	provider := cfg.CurrentProvider()
+	if provider.APIKey == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("Provider %s has no API key configured", cfg.LLM.DefaultProvider),
+		})
+		return
+	}
+
+	t0 := time.Now()
+	testPrompt := "Respond with one brief sentence confirming connectivity to AgentOS kernel."
+	tokens, err := StreamLLM(cfg, "You are AgentOS kernel.", testPrompt)
+	latencyMs := time.Since(t0).Milliseconds()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success":    false,
+			"error":      err.Error(),
+			"latency_ms": latencyMs,
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":    true,
+		"latency_ms": latencyMs,
+		"tokens":     tokens,
+		"provider":   cfg.LLM.DefaultProvider,
+		"model":      provider.Model,
+	})
+}
+
+func handleUIAgents(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		uiMu.RLock()
+		defer uiMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(uiAgents)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req UICreateAgentRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "agent name cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		cleanName := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(req.Name), " ", "-"))
+		if err := ScaffoldAgent(cleanName); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("Failed to scaffold agent: %v", err),
+			})
+			return
+		}
+
+		if req.SystemPrompt != "" {
+			_ = os.WriteFile(filepath.Join(cleanName, "prompt.md"), []byte(req.SystemPrompt), 0644)
+		}
+
+		newAgent := UIAgentItem{
+			Name:      cleanName,
+			Role:      req.Role,
+			Model:     req.Model,
+			BudgetUSD: req.BudgetUSD,
+			Latency:   "16ms",
+			Status:    "ONLINE",
+			Tools:     req.Tools,
+		}
+		if newAgent.Role == "" {
+			newAgent.Role = "Custom Diagnostic Agent"
+		}
+		if newAgent.Model == "" {
+			newAgent.Model = "deepseek/deepseek-r1"
+		}
+		if newAgent.BudgetUSD <= 0 {
+			newAgent.BudgetUSD = 1.00
+		}
+
+		uiMu.Lock()
+		uiAgents = append([]UIAgentItem{newAgent}, uiAgents...)
+		uiMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"message": fmt.Sprintf("Successfully scaffolded agent at ./%s/", cleanName),
+			"agent":   newAgent,
+		})
+		return
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func handleUIRun(w http.ResponseWriter, r *http.Request) {
@@ -666,7 +872,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
     .grid-2col {
       display: grid;
-      grid-template-columns: 7fr 5fr;
+      grid-template-columns: 1fr 1fr;
       gap: 20px;
       margin-bottom: 20px;
     }
@@ -741,7 +947,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
     .btn:hover { opacity: 0.9; }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    textarea {
+    input, select, textarea {
       width: 100%;
       background: var(--bg-container-lowest);
       border: 1px solid var(--outline-variant);
@@ -751,10 +957,13 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       font-family: var(--font-mono);
       font-size: 12px;
       outline: none;
+      margin-bottom: 10px;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--secondary); }
+    textarea {
       resize: vertical;
       min-height: 80px;
     }
-    textarea:focus { border-color: var(--secondary); }
     .dag-node {
       background: var(--bg-container-low);
       border: 1px solid var(--outline-variant);
@@ -765,6 +974,17 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     .dag-node.active-stage {
       border-color: var(--secondary);
       box-shadow: 0 0 12px rgba(6, 182, 212, 0.2);
+    }
+    .drawer-panel {
+      display: none;
+      background: var(--bg-container-low);
+      border: 1px solid var(--secondary);
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .drawer-panel.open {
+      display: block;
     }
   </style>
 </head>
@@ -784,10 +1004,8 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     </div>
 
     <div style="display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11px;">
-      <span style="color: var(--outline);">Cluster:</span>
-      <span style="color: var(--text-main);">US-EAST-VA-01</span>
-      <span style="color: var(--outline);">/</span>
-      <span style="color: var(--secondary-bright);">Quality-Tracer-Agent</span>
+      <span style="color: var(--outline);">Active Model:</span>
+      <span style="color: var(--secondary-bright);" id="headerActiveModel">stealth/space-bunny-alpha</span>
     </div>
 
     <div style="display: flex; align-items: center; gap: 14px;">
@@ -879,8 +1097,8 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       <div class="stat-grid-4">
         <div class="card">
           <div class="card-label">Active Agents</div>
-          <div class="card-val" id="statAgents">12 <span style="font-size: 14px; color: var(--outline); font-weight: normal;">/ 4 Idle</span></div>
-          <div class="card-sub" style="color: var(--primary-bright);">+2 scale out (12h peak: 16 units)</div>
+          <div class="card-val" id="statAgents">4 <span style="font-size: 14px; color: var(--outline); font-weight: normal;">/ 0 Idle</span></div>
+          <div class="card-sub" style="color: var(--primary-bright);">+1 scale out</div>
         </div>
         <div class="card">
           <div class="card-label">Burn Rate & Cost</div>
@@ -896,6 +1114,45 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
           <div class="card-label">Governance Gate</div>
           <div class="card-val" style="color: var(--primary-bright); font-size: 20px; text-transform: uppercase;">FAIL-CLOSED</div>
           <div class="card-sub">Strict-Isolation Policy Enforced</div>
+        </div>
+      </div>
+
+      <!-- CREATE AGENT DRAWER -->
+      <div class="drawer-panel" id="agentDrawer">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);">Scaffold New Autonomous Agent</span>
+          <button class="chip" onclick="toggleAgentDrawer()">Close</button>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div>
+            <label style="font-size: 11px; color: var(--outline);">AGENT IDENTIFIER</label>
+            <input type="text" id="newAgentName" placeholder="e.g. vibration-analyst"/>
+          </div>
+          <div>
+            <label style="font-size: 11px; color: var(--outline);">ROLE & PURPOSE</label>
+            <input type="text" id="newAgentRole" placeholder="e.g. Bearing RMS & Spectrum Telemetry"/>
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <div>
+            <label style="font-size: 11px; color: var(--outline);">TARGET MODEL</label>
+            <input type="text" id="newAgentModel" value="deepseek/deepseek-r1"/>
+          </div>
+          <div>
+            <label style="font-size: 11px; color: var(--outline);">BUDGET CEILING (USD)</label>
+            <input type="number" id="newAgentBudget" value="1.50" step="0.25"/>
+          </div>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: var(--outline);">SYSTEM PROMPT & OBJECTIVES</label>
+          <textarea id="newAgentPrompt" placeholder="Define role, constraints, and deterministic outputs...">You are an enterprise AI Agent managed by AgentOS kernel. Always verify telemetry and produce structured reports.</textarea>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+          <span style="font-family: var(--font-mono); font-size: 11px; color: var(--outline);" id="createAgentMsg">Scaffolds agent.manifest.json, prompt.md, and tools/main.go</span>
+          <button class="btn" onclick="submitCreateAgent()">
+            <span class="material-symbols-outlined" style="font-size: 14px;">add_circle</span>
+            <span>Scaffold & Deploy Agent</span>
+          </button>
         </div>
       </div>
 
@@ -919,49 +1176,29 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
             <span style="font-weight: 700; text-transform: uppercase;">Active Sub-Agent Threads</span>
-            <span class="badge badge-primary">4 NODES HEALTHY</span>
+            <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="toggleAgentDrawer()">
+              <span class="material-symbols-outlined" style="font-size: 14px;">add</span>
+              <span>+ Create Agent</span>
+            </button>
           </div>
           <table>
             <thead>
               <tr>
-                <th>Agent</th>
+                <th>Agent Identifier</th>
                 <th>Role</th>
-                <th>Latency</th>
+                <th>Model</th>
                 <th>Status</th>
               </tr>
             </thead>
-            <tbody>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">Quality-Tracer-01</td>
-                <td>Defect RCA</td>
-                <td style="font-family: var(--font-mono);">22ms</td>
-                <td><span class="badge badge-primary">ONLINE</span></td>
-              </tr>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">CNC-Spindle-Guard</td>
-                <td>Telemetry Watch</td>
-                <td style="font-family: var(--font-mono);">18ms</td>
-                <td><span class="badge badge-primary">ONLINE</span></td>
-              </tr>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">Ingress-Gateway</td>
-                <td>Task Admission</td>
-                <td style="font-family: var(--font-mono);">1.2ms</td>
-                <td><span class="badge badge-primary">ONLINE</span></td>
-              </tr>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">Ledger-Verifier</td>
-                <td>Merkle Audit</td>
-                <td style="font-family: var(--font-mono);">0.4ms</td>
-                <td><span class="badge badge-primary">ONLINE</span></td>
-              </tr>
+            <tbody id="overviewAgentsBody">
+              <tr><td colspan="4" style="text-align: center;">Loading agents...</td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </div>
 
-    <!-- VIEW 2: DUAL-STREAM EXECUTION & INTERACTIVE CONSOLE -->
+    <!-- VIEW 2: DUAL-STREAM EXECUTION -->
     <div id="view-stream" class="view-container">
       <div class="context-strip">
         <div style="display: flex; align-items: center; gap: 10px;">
@@ -998,7 +1235,6 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       </div>
 
       <div class="grid-2col" style="margin-bottom: 20px;">
-        <!-- Left: CoT Reasoning Stream -->
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <span style="font-weight: 700; text-transform: uppercase;">Autonomous CoT Reasoning Stream</span>
@@ -1008,8 +1244,8 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 [reasoning] Spindle temperature sensor CH-02 registered 89.4C at 12,000 RPM.
 [reasoning] Trip threshold configured in policy is 85.0C. State: TRIP_EXCEEDED.
 [reasoning] Evaluating cross-sensor correlation:
-  - Bearing vibration RMS: 4.82 mm/s (elevated, indicative of boundary lubrication breakdown)
-  - Motor stator temperature: 54.1C (nominal, rules out electrical phase imbalance)
+  - Bearing vibration RMS: 4.82 mm/s (elevated, boundary lubrication breakdown)
+  - Motor stator temperature: 54.1C (nominal)
   - Lubricant inlet pressure: 0.12 MPa (sub-nominal, target 0.25 MPa)
 [reasoning] Invoking industrial.alarm.lookup tool for fault code E102...
 [reasoning] Fault code confirmed: Spindle Overheat with Inadequate Lubrication Flow.
@@ -1017,7 +1253,6 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 [reasoning] Awaiting human operator interlock confirmation.</div>
         </div>
 
-        <!-- Right: Tool Interceptor -->
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <span style="font-weight: 700; text-transform: uppercase;">Tool Invocations & Telemetry Interceptor</span>
@@ -1039,7 +1274,6 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Interactive Task Dispatcher -->
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
           <span style="font-weight: 700; text-transform: uppercase;">Dispatch New Objective to Execution Kernel</span>
@@ -1160,46 +1394,57 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- VIEW 5: MODEL GATEWAY -->
+    <!-- VIEW 5: MODEL GATEWAY & CONFIGURATION -->
     <div id="view-gateway" class="view-container">
       <div class="grid-2col">
+        <!-- Interactive Model Configuration Form -->
         <div class="card">
-          <div style="font-weight: 700; text-transform: uppercase; margin-bottom: 12px;">Configured Model Providers</div>
-          <table>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>Active Model</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">openrouter</td>
-                <td style="font-family: var(--font-mono);">stealth/space-bunny-alpha</td>
-                <td><span class="badge badge-primary">ACTIVE</span></td>
-              </tr>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">deepseek</td>
-                <td style="font-family: var(--font-mono);">deepseek-r1</td>
-                <td><span class="badge">CONFIGURED</span></td>
-              </tr>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">anthropic</td>
-                <td style="font-family: var(--font-mono);">claude-3-5-sonnet</td>
-                <td><span class="badge">STANDBY</span></td>
-              </tr>
-              <tr>
-                <td style="color: var(--secondary-bright); font-family: var(--font-mono);">local-oci</td>
-                <td style="font-family: var(--font-mono);">qwen2.5:14b-instruct</td>
-                <td><span class="badge">STANDBY</span></td>
-              </tr>
-            </tbody>
-          </table>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);">Model Provider & Budget Control</span>
+            <span class="badge badge-primary" id="modelProbeBadge">READY</span>
+          </div>
+
+          <label style="font-size: 11px; color: var(--outline);">PROVIDER TYPE</label>
+          <select id="cfgProvider" onchange="autoFillProviderDefaults()">
+            <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
+            <option value="deepseek">DeepSeek (Direct API)</option>
+            <option value="anthropic">Anthropic (Claude 3.5)</option>
+            <option value="local-oci">Local OCI (Self-hosted Qwen/Llama)</option>
+          </select>
+
+          <label style="font-size: 11px; color: var(--outline);">MODEL IDENTIFIER</label>
+          <input type="text" id="cfgModel" placeholder="e.g. deepseek/deepseek-r1"/>
+
+          <label style="font-size: 11px; color: var(--outline);">BASE URL</label>
+          <input type="text" id="cfgBaseURL" placeholder="https://openrouter.ai/api/v1"/>
+
+          <label style="font-size: 11px; color: var(--outline);">API KEY (Leave blank to preserve current key)</label>
+          <input type="password" id="cfgAPIKey" placeholder="Enter API key..."/>
+
+          <label style="font-size: 11px; color: var(--outline);">BUDGET CEILING USD ($)</label>
+          <input type="number" id="cfgBudget" step="0.50" min="0.10" value="1.00"/>
+
+          <div style="display: flex; gap: 10px; margin-top: 14px;">
+            <button class="btn" onclick="saveModelConfig()">
+              <span class="material-symbols-outlined" style="font-size: 14px;">save</span>
+              <span>Save & Hot-Reload</span>
+            </button>
+            <button class="chip" onclick="testModelConnectivity()">
+              <span class="material-symbols-outlined" style="font-size: 14px;">wifi_tethering</span>
+              <span>Probe Connectivity</span>
+            </button>
+          </div>
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--outline); margin-top: 12px;" id="modelConfigFeedback">
+            Persists to agent.yaml with instant kernel reload
+          </div>
         </div>
 
+        <!-- Raw YAML Preview -->
         <div class="card">
-          <div style="font-weight: 700; text-transform: uppercase; margin-bottom: 12px;">Active Configuration (agent.yaml)</div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <span style="font-weight: 700; text-transform: uppercase;">Active agent.yaml Config</span>
+            <button class="chip" onclick="loadConfig()">Reload</button>
+          </div>
           <div class="terminal-box" id="configView">Loading configuration...</div>
         </div>
       </div>
@@ -1222,6 +1467,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       if (target) {
         target.classList.add('active');
       }
+      if (viewName === 'overview') loadAgents();
       if (viewName === 'audit') loadReceipts();
       if (viewName === 'orchestrator') loadTools();
       if (viewName === 'gateway') loadConfig();
@@ -1232,11 +1478,34 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       switchView('stream');
     }
 
+    function toggleAgentDrawer() {
+      var d = document.getElementById('agentDrawer');
+      d.classList.toggle('open');
+    }
+
+    function autoFillProviderDefaults() {
+      var prov = document.getElementById('cfgProvider').value;
+      if (prov === 'openrouter') {
+        document.getElementById('cfgModel').value = 'stealth/space-bunny-alpha';
+        document.getElementById('cfgBaseURL').value = 'https://openrouter.ai/api/v1';
+      } else if (prov === 'deepseek') {
+        document.getElementById('cfgModel').value = 'deepseek-r1';
+        document.getElementById('cfgBaseURL').value = 'https://api.deepseek.com/v1';
+      } else if (prov === 'anthropic') {
+        document.getElementById('cfgModel').value = 'claude-3-5-sonnet';
+        document.getElementById('cfgBaseURL').value = 'https://api.anthropic.com/v1';
+      } else if (prov === 'local-oci') {
+        document.getElementById('cfgModel').value = 'qwen2.5:14b-instruct';
+        document.getElementById('cfgBaseURL').value = 'http://127.0.0.1:11434/v1';
+      }
+    }
+
     async function loadStatus() {
       try {
         var res = await fetch('/api/status');
         var data = await res.json();
         document.getElementById('envBadge').textContent = data.environment.toUpperCase();
+        document.getElementById('headerActiveModel').textContent = data.default_model;
         document.getElementById('headerSpend').textContent = '$' + data.total_spend_usd.toFixed(2) + ' / $' + data.budget_limit_usd.toFixed(2);
         var pct = Math.min((data.total_spend_usd / data.budget_limit_usd) * 100, 100);
         document.getElementById('headerSpendBar').style.width = pct.toFixed(1) + '%';
@@ -1261,6 +1530,61 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         }
       } catch (e) {
         console.error('Failed to load status', e);
+      }
+    }
+
+    async function loadAgents() {
+      try {
+        var res = await fetch('/api/agents');
+        var list = await res.json();
+        var tbody = document.getElementById('overviewAgentsBody');
+        tbody.innerHTML = '';
+        list.forEach(function(a) {
+          var tr = document.createElement('tr');
+          tr.innerHTML = 
+            '<td style="color: var(--secondary-bright); font-family: var(--font-mono); font-weight: 600;">' + a.name + '</td>' +
+            '<td>' + a.role + '</td>' +
+            '<td style="font-family: var(--font-mono); font-size: 11px;">' + a.model + '</td>' +
+            '<td><span class="badge badge-primary">' + a.status + '</span></td>';
+          tbody.appendChild(tr);
+        });
+      } catch (e) {
+        console.error('Failed to load agents', e);
+      }
+    }
+
+    async function submitCreateAgent() {
+      var name = document.getElementById('newAgentName').value.trim();
+      var role = document.getElementById('newAgentRole').value.trim();
+      var model = document.getElementById('newAgentModel').value.trim();
+      var budget = parseFloat(document.getElementById('newAgentBudget').value) || 1.0;
+      var prompt = document.getElementById('newAgentPrompt').value.trim();
+      var msg = document.getElementById('createAgentMsg');
+
+      if (!name) {
+        alert('Please enter an agent identifier');
+        return;
+      }
+
+      msg.textContent = 'Scaffolding agent project files...';
+      try {
+        var res = await fetch('/api/agents', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, role: role, model: model, budget_usd: budget, system_prompt: prompt })
+        });
+        var data = await res.json();
+        if (data.success) {
+          msg.textContent = 'Created ' + data.agent.name + ' successfully!';
+          document.getElementById('newAgentName').value = '';
+          toggleAgentDrawer();
+          loadAgents();
+          loadStatus();
+        } else {
+          msg.textContent = 'Error: ' + data.error;
+        }
+      } catch (e) {
+        msg.textContent = 'Network error: ' + e.message;
       }
     }
 
@@ -1315,8 +1639,80 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         var res = await fetch('/api/config');
         var data = await res.json();
         document.getElementById('configView').textContent = JSON.stringify(data, null, 2);
+        if (data.llm && data.llm.default_provider) {
+          document.getElementById('cfgProvider').value = data.llm.default_provider;
+          var p = data.llm.providers && data.llm.providers[data.llm.default_provider];
+          if (p) {
+            document.getElementById('cfgModel').value = p.model || '';
+            document.getElementById('cfgBaseURL').value = p.base_url || '';
+          }
+        }
+        if (data.kernel && data.kernel.budget) {
+          document.getElementById('cfgBudget').value = data.kernel.budget.max_cost_usd || 1.0;
+        }
       } catch (e) {
         console.error('Failed to load config', e);
+      }
+    }
+
+    async function saveModelConfig() {
+      var prov = document.getElementById('cfgProvider').value;
+      var model = document.getElementById('cfgModel').value.trim();
+      var url = document.getElementById('cfgBaseURL').value.trim();
+      var key = document.getElementById('cfgAPIKey').value.trim();
+      var budget = parseFloat(document.getElementById('cfgBudget').value) || 1.0;
+      var feedback = document.getElementById('modelConfigFeedback');
+
+      feedback.textContent = 'Saving configuration...';
+      try {
+        var res = await fetch('/api/config/model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: prov, model: model, base_url: url, api_key: key, budget_usd: budget })
+        });
+        var data = await res.json();
+        if (data.success) {
+          feedback.textContent = 'Saved! Model set to: ' + data.model + ' (' + data.provider + ')';
+          feedback.style.color = 'var(--primary-bright)';
+          loadConfig();
+          loadStatus();
+        } else {
+          feedback.textContent = 'Failed: ' + data.error;
+          feedback.style.color = 'var(--error)';
+        }
+      } catch (e) {
+        feedback.textContent = 'Error: ' + e.message;
+        feedback.style.color = 'var(--error)';
+      }
+    }
+
+    async function testModelConnectivity() {
+      var badge = document.getElementById('modelProbeBadge');
+      var feedback = document.getElementById('modelConfigFeedback');
+
+      badge.textContent = 'PROBING...';
+      badge.style.color = 'var(--tertiary)';
+      feedback.textContent = 'Sending test prompt to model...';
+
+      try {
+        var res = await fetch('/api/test-llm', { method: 'POST' });
+        var data = await res.json();
+        if (data.success) {
+          badge.textContent = data.latency_ms + 'ms (OK)';
+          badge.style.color = 'var(--primary-bright)';
+          feedback.textContent = 'Connectivity verified: ' + data.provider + ' (' + data.model + ') returned ' + data.tokens + ' tokens in ' + data.latency_ms + 'ms';
+          feedback.style.color = 'var(--primary-bright)';
+        } else {
+          badge.textContent = 'FAIL';
+          badge.style.color = 'var(--error)';
+          feedback.textContent = 'Probe error: ' + data.error;
+          feedback.style.color = 'var(--error)';
+        }
+      } catch (e) {
+        badge.textContent = 'NET_ERR';
+        badge.style.color = 'var(--error)';
+        feedback.textContent = 'Connection error: ' + e.message;
+        feedback.style.color = 'var(--error)';
       }
     }
 
@@ -1387,6 +1783,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
 
     loadStatus();
+    loadAgents();
     setInterval(loadStatus, 5000);
   </script>
 </body>

@@ -167,4 +167,67 @@ func TestUIHandlers(t *testing.T) {
 			t.Errorf("expected redline halt to be disengaged")
 		}
 	})
+
+	// 7. Test Model Configuration
+	t.Run("handleUIModelConfig", func(t *testing.T) {
+		cfgReq := UIModelConfigRequest{
+			Provider:  "openrouter",
+			Model:     "stealth/space-bunny-alpha",
+			BudgetUSD: 2.50,
+		}
+		reqBytes, _ := json.Marshal(cfgReq)
+		req := httptest.NewRequest(http.MethodPost, "/api/config/model", bytes.NewReader(reqBytes))
+		w := httptest.NewRecorder()
+		handleUIModelConfig(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse JSON: %v", err)
+		}
+		if resp["success"] != true {
+			t.Errorf("expected success=true, got: %v", resp["success"])
+		}
+	})
+
+	// 8. Test Agent Listing and Creation
+	t.Run("handleUIAgents", func(t *testing.T) {
+		// List agents
+		req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+		w := httptest.NewRecorder()
+		handleUIAgents(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+		var list []UIAgentItem
+		if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+			t.Fatalf("failed to parse JSON: %v", err)
+		}
+		if len(list) == 0 {
+			t.Errorf("expected non-empty agents list")
+		}
+
+		// Create new agent
+		createReq := UICreateAgentRequest{
+			Name:      "test-ui-agent",
+			Role:      "Automated Health Monitor",
+			Model:     "deepseek/deepseek-r1",
+			BudgetUSD: 1.25,
+		}
+		reqBytes, _ := json.Marshal(createReq)
+		w2 := httptest.NewRecorder()
+		handleUIAgents(w2, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBytes)))
+
+		if w2.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w2.Code)
+		}
+		var createResp map[string]any
+		json.Unmarshal(w2.Body.Bytes(), &createResp)
+		if createResp["success"] != true {
+			t.Errorf("expected agent creation success, got: %v", createResp["error"])
+		}
+	})
 }
