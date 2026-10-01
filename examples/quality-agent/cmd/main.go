@@ -17,10 +17,10 @@ import (
 )
 
 type ToolReceipt struct {
-	ToolName  string
-	Duration  time.Duration
-	Hash      string
-	Payload   string
+	ToolName string
+	Duration time.Duration
+	Hash     string
+	Payload  string
 }
 
 func main() {
@@ -148,11 +148,11 @@ func main() {
 
 请使用客观、严谨、专业的工程技术语言进行结构化输出。`
 
-	userPrompt := fmt.Sprintf(`用户提问：
+	userPrompt := `用户提问：
 "最近 3 天 A 产品不良率为什么从 1.8% 升到 4.6%？请根据车间质检数据、工艺参数以及企业历史案例知识库，输出完整的质量问题溯源与排查报告。"
 
 以下是 AgentOS 内核拦截并执行的真实自定义工具调用返回：
-%s`, toolContext.String())
+` + toolContext.String()
 
 	fmt.Println("\n[AgentOS Model Gateway] 激活大模型推理 (OpenRouter / stealth/space-bunny-alpha)...")
 	fmt.Println("----------------------- [LLM 实时思考与报告流式输出] -----------------------")

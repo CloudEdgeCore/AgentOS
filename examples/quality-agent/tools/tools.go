@@ -43,8 +43,8 @@ func (s *ToolServer) Start() error {
 		}
 
 		resp := map[string]any{
-			"product": "Product-A (高精度注塑结构件)",
-			"time_window": "过去 72 小时 (3天)",
+			"product":         "Product-A (高精度注塑结构件)",
+			"time_window":     "过去 72 小时 (3天)",
 			"total_inspected": 12500,
 			"overall_trend": []map[string]any{
 				{"day": "Day-1 (-3d)", "inspected": 4100, "defects": 74, "defect_rate": "1.80%"},
@@ -58,11 +58,11 @@ func (s *ToolServer) Start() error {
 			},
 			"cross_tabulation_by_line_and_shift": map[string]any{
 				"Line-01 (1号注塑机 IM-01)": map[string]string{
-					"白班 (Day Shift 08:00-20:00)": "不良率 1.62% (正常)",
+					"白班 (Day Shift 08:00-20:00)":   "不良率 1.62% (正常)",
 					"夜班 (Night Shift 20:00-08:00)": "不良率 1.75% (正常)",
 				},
 				"Line-02 (2号注塑机 IM-02)": map[string]string{
-					"白班 (Day Shift 08:00-20:00)": "不良率 2.05% (轻微上升)",
+					"白班 (Day Shift 08:00-20:00)":   "不良率 2.05% (轻微上升)",
 					"夜班 (Night Shift 20:00-08:00)": "不良率 8.92% (严重恶化！贡献全厂 81.3% 的翘曲缺陷)",
 				},
 			},
@@ -85,18 +85,18 @@ func (s *ToolServer) Start() error {
 			"equipment_id": "Line-02 / IM-02 (2号注塑机)",
 			"parameters_analyzed": map[string]any{
 				"mold_temperature (模具温度)": map[string]any{
-					"target_sop": "65.0 ℃ (工艺窗口: 62.0℃ ~ 68.0℃)",
-					"im01_baseline_night": "平均 64.9 ℃ (标准差 σ=0.7℃, 极其平稳)",
-					"im02_actual_night": "平均 49.1 ℃ (最低跌至 44.8℃, 标准差 σ=6.8℃, 严重失稳！)",
-					"abnormal_time_range": "夜间 01:15 ~ 05:40 模温连续跌破 52℃ 以下",
+					"target_sop":                       "65.0 ℃ (工艺窗口: 62.0℃ ~ 68.0℃)",
+					"im01_baseline_night":              "平均 64.9 ℃ (标准差 σ=0.7℃, 极其平稳)",
+					"im02_actual_night":                "平均 49.1 ℃ (最低跌至 44.8℃, 标准差 σ=6.8℃, 严重失稳！)",
+					"abnormal_time_range":              "夜间 01:15 ~ 05:40 模温连续跌破 52℃ 以下",
 					"pearson_correlation_with_warpage": 0.942, // 与翘曲缺陷呈极强负相关(温度越低翘曲越高)
 				},
 				"injection_pressure (注塑压力)": map[string]any{
-					"target_sop": "8.50 MPa (窗口 8.2 ~ 8.8 MPa)",
+					"target_sop":        "8.50 MPa (窗口 8.2 ~ 8.8 MPa)",
 					"im02_actual_night": "平均 8.48 MPa (波动 < 0.15 MPa, 完全正常)",
 				},
 				"cooling_time (保压冷却时长)": map[string]any{
-					"target_sop": "18.0 s",
+					"target_sop":        "18.0 s",
 					"im02_actual_night": "18.0 s (PLC程序受控，无改动)",
 				},
 			},
@@ -120,17 +120,17 @@ func (s *ToolServer) Start() error {
 			"query": "IM-02 模温过低 夜班 翘曲 裂纹 模温机 案例与SOP",
 			"retrieved_cases": []map[string]any{
 				{
-					"case_id": "CASE-QA-2025-081",
-					"title": "《2号注塑机夜间模温失控导致结构件翘曲与微裂纹故障溯源报告》",
-					"incident_date": "2025-11-14",
+					"case_id":          "CASE-QA-2025-081",
+					"title":            "《2号注塑机夜间模温失控导致结构件翘曲与微裂纹故障溯源报告》",
+					"incident_date":    "2025-11-14",
 					"similarity_score": 0.965,
-					"case_summary": "车间夜间环境温度降至10℃以下时，IM-02配套的模温机2号加热旁通比例阀阀芯机械卡死在小开度位置，热介质循环受阻。白天环境气温高时模温能被动维持在60℃，夜间气温骤降无法有效补热，模温跌至48℃，导致成型内应力急剧增大，产生大批量翘曲和微裂纹缺陷。",
-					"verified_fix": "拆洗模温机电磁比例阀阀芯，清理水垢异物，更换高温密封圈后恢复正常。",
+					"case_summary":     "车间夜间环境温度降至10℃以下时，IM-02配套的模温机2号加热旁通比例阀阀芯机械卡死在小开度位置，热介质循环受阻。白天环境气温高时模温能被动维持在60℃，夜间气温骤降无法有效补热，模温跌至48℃，导致成型内应力急剧增大，产生大批量翘曲和微裂纹缺陷。",
+					"verified_fix":     "拆洗模温机电磁比例阀阀芯，清理水垢异物，更换高温密封圈后恢复正常。",
 				},
 			},
 			"retrieved_sop": map[string]any{
 				"sop_id": "SOP-QA-MOLD-04",
-				"title": "《注塑成型模温异常应急排查与处置规程 (2026修订版)》",
+				"title":  "《注塑成型模温异常应急排查与处置规程 (2026修订版)》",
 				"critical_rules": []string{
 					"模温低于 55℃ 时熔体流动前沿结晶过快，严禁继续生产，必须触发防呆停机 (Auto-Hold)",
 					"排查顺序必须先查模温机循环泵进出口压差，再测加热管阻值及比例阀驱动电压 (0-10V)",

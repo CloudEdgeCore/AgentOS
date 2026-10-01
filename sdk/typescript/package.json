@@ -1,6 +1,6 @@
 {
   "name": "@agentos/sdk",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Typed AgentOS Control API and Runtime Interface clients",
   "license": "Apache-2.0",
   "type": "module",

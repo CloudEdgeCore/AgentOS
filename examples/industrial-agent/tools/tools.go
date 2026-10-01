@@ -30,13 +30,13 @@ type SensorQueryResult struct {
 
 // AlarmInfo is returned by industrial.alarm.lookup.
 type AlarmInfo struct {
-	AlarmCode         string   `json:"alarmCode"`
-	AlarmTitle        string   `json:"alarmTitle"`
-	Severity          string   `json:"severity"` // CRITICAL, WARNING, INFO
-	Component         string   `json:"component"`
-	TriggerCondition  string   `json:"triggerCondition"`
-	HistoricalStats   string   `json:"historicalStats"`
-	PossibleCauses    []string `json:"possibleCauses"`
+	AlarmCode        string   `json:"alarmCode"`
+	AlarmTitle       string   `json:"alarmTitle"`
+	Severity         string   `json:"severity"` // CRITICAL, WARNING, INFO
+	Component        string   `json:"component"`
+	TriggerCondition string   `json:"triggerCondition"`
+	HistoricalStats  string   `json:"historicalStats"`
+	PossibleCauses   []string `json:"possibleCauses"`
 }
 
 // SOPGuideline is returned by industrial.sop.search.
