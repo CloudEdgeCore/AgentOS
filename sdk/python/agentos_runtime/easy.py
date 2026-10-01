@@ -25,6 +25,22 @@ class ExecutionResult:
         self.tokens = tokens
         self.cost_usd = cost_usd
 
+    @property
+    def receipt_id(self) -> str:
+        return self.receipts[0].get("receipt_id", "") if self.receipts else ""
+
+    @property
+    def status(self) -> str:
+        return self.receipts[0].get("status", "VERIFIED") if self.receipts else "VERIFIED"
+
+    @property
+    def signature(self) -> str:
+        return self.receipts[0].get("signature", "") if self.receipts else ""
+
+    @property
+    def duration_ms(self) -> int:
+        return self.receipts[0].get("duration_ms", 0) if self.receipts else 0
+
     def __str__(self) -> str:
         return self.content
 
