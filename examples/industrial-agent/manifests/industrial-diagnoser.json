@@ -1,0 +1,50 @@
+{
+  "apiVersion": "agentos.dev/v1",
+  "kind": "AgentManifest",
+  "metadata": {
+    "name": "industrial-diagnoser",
+    "version": "1.0.0",
+    "namespace": "default"
+  },
+  "spec": {
+    "runtimeClassPolicy": {
+      "allowed": ["oci", "reference", "process"],
+      "preferred": "reference"
+    },
+    "runtimes": [
+      {
+        "class": "reference",
+        "interface": "agentos.runtime.interface/v1",
+        "runtimeABI": "agentos.reference/v1",
+        "entrypoint": ["internal"]
+      }
+    ],
+    "capabilities": {
+      "tools": [
+        "industrial.sensor.query@1.0.0",
+        "industrial.alarm.lookup@1.0.0",
+        "industrial.sop.search@1.0.0"
+      ],
+      "models": [
+        "stealth/space-bunny-alpha"
+      ],
+      "memory": [],
+      "secrets": []
+    },
+    "resources": {
+      "cpuMillis": 500,
+      "memoryMiB": 512,
+      "workspaceBytes": 8388608
+    },
+    "budget": {
+      "tokens": 15000,
+      "costUsd": 1,
+      "toolCalls": 10,
+      "wallSeconds": 300
+    },
+    "checkpoint": {
+      "mode": "logical",
+      "schemaVersion": "industrial-diagnoser/v1"
+    }
+  }
+}

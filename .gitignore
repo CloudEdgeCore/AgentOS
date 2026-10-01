@@ -42,6 +42,14 @@ deploy/dev/*.local.json
 .env
 .env.*
 !.env.example
+agent.yaml
+!.agent.yaml.example
+
+# Local binaries
+/agent
+/industrial-demo
+/quality-demo
+/test-invoke
 
 # Editors and operating systems
 .idea/

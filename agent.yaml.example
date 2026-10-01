@@ -1,0 +1,61 @@
+# ==============================================================================
+# AgentOS 企业级智能体分级配置文件模板 (agent.yaml.example)
+# 使用方式: cp agent.yaml.example agent.yaml
+# ==============================================================================
+version: "1.0"
+environment: "development"
+
+llm:
+  default_provider: "openrouter"
+  providers:
+    openrouter:
+      model: "stealth/space-bunny-alpha"
+      api_key: "your_openrouter_api_key_here"
+      base_url: "https://openrouter.ai/api/v1"
+      timeout_sec: 180
+    deepseek:
+      model: "deepseek-chat"
+      api_key: "your_deepseek_api_key_here"
+      base_url: "https://api.deepseek.com/v1"
+      timeout_sec: 120
+    qwen:
+      model: "qwen-plus"
+      api_key: "your_qwen_api_key_here"
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      timeout_sec: 120
+    ollama:
+      model: "qwen2.5:7b"
+      api_key: "ollama"
+      base_url: "http://127.0.0.1:11434/v1"
+      timeout_sec: 120
+
+kernel:
+  budget:
+    max_cost_usd: 1.00
+    max_tokens: 30000
+    max_tool_calls: 15
+  governance:
+    enforce_receipts: true
+    fail_closed: true
+
+gateway:
+  port: 18080
+  host: "127.0.0.1"
+
+logging:
+  level: "info"
+  format: "text"
+
+profiles:
+  development:
+    kernel:
+      budget:
+        max_cost_usd: 1.00
+  production:
+    kernel:
+      budget:
+        max_cost_usd: 10.00
+        max_tokens: 100000
+    logging:
+      level: "warn"
+      format: "json"

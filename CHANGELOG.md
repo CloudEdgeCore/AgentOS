@@ -6,7 +6,17 @@ public protocol versions evolve independently.
 
 ## Unreleased
 
-## 1.1.0 - 2026-09-15
+## 1.2.1 - 2026-10-01
+
+### Added
+- **Unified `agent` CLI (`cmd/agent`)**: Introduced developer-first `agent` command replacing `agentos` as the primary CLI entrypoint with backward compatibility fallback.
+- **Hierarchical YAML Configuration (`agent.yaml`)**: Multi-level cascading configuration system with 5-tier precedence (Builtin Defaults < Global `~/.agent/agent.yaml` < Project `./agent.yaml` < Environment Profiles < Environment Variables).
+- **Multi-Provider LLM Matrix**: Native support for OpenRouter, DeepSeek, Qwen (Aliyun), and local Ollama with instant provider switching (`agent config set llm.default_provider <name>`).
+- **CoT Streaming & Zero-Timeout Engine**: Native dual-channel stream parser separating `delta.reasoning` (thought stream) and `delta.content` (structured result), eliminating `context deadline exceeded` timeouts on multi-minute reasoning models.
+- **Agent Scaffolding (`agent init`)**: One-command generator creating decoupled `agent.yaml`, `agent.manifest.json`, `prompt.md`, and custom tool microservices.
+- **PRD Industrial Verification Suite (`agent demo`)**: Built-in scenarios for equipment fault diagnosis (CNC-03 E102) and quality defect root-cause tracing (Product-A Pareto & case-based reasoning).
+- **Automated Masking & Precedence Auditing**: `agent config` and `agent config path` for transparent configuration inspection and credential masking.
+
 
 ### Added
 
