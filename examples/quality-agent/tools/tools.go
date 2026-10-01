@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 )
 
 type ToolServer struct {
 	server *http.Server
 	port   int
-	mu     sync.Mutex
 }
 
 func NewToolServer(port int) *ToolServer {

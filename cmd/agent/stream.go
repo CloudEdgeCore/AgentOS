@@ -125,13 +125,13 @@ func StreamLLM(cfg *AgentYAMLConfig, systemPrompt, userPrompt string) (int, erro
 		req.Header.Set("X-Title", "AgentOS-CLI")
 	}
 
-	timeoutSec := 45 * time.Second
+	headerTimeout := 45 * time.Second
 	if provider.TimeoutSec > 0 {
-		timeoutSec = time.Duration(provider.TimeoutSec) * time.Second
+		headerTimeout = time.Duration(provider.TimeoutSec) * time.Second
 	}
 
 	tr := &http.Transport{
-		ResponseHeaderTimeout: timeoutSec,
+		ResponseHeaderTimeout: headerTimeout,
 	}
 	client := &http.Client{
 		Transport: tr,

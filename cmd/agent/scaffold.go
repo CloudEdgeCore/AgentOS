@@ -71,7 +71,7 @@ Format output strictly into the following sections:
 	}
 
 	// 3. Generate project-level agent.yaml
-	agentYamlContent := fmt.Sprintf(`version: "1.0"
+	agentYamlContent := `version: "1.0"
 environment: "development"
 
 llm:
@@ -91,7 +91,7 @@ kernel:
 gateway:
   port: 18080
   host: "127.0.0.1"
-`)
+`
 	if err := os.WriteFile(filepath.Join(targetDir, "agent.yaml"), []byte(agentYamlContent), 0644); err != nil {
 		return err
 	}
