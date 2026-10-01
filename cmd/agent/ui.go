@@ -1079,18 +1079,27 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       gap: 12px;
     }
     .brand-icon {
-      width: 32px;
-      height: 32px;
-      background: linear-gradient(135deg, var(--primary), var(--secondary));
-      border-radius: 8px;
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-weight: 800;
-      font-size: 16px;
-      color: #fff;
-      box-shadow: 0 0 14px var(--primary-glow);
+      box-shadow: 0 0 16px var(--primary-glow);
       border: 1px solid rgba(255, 255, 255, 0.15);
+      overflow: hidden;
+      flex-shrink: 0;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      cursor: pointer;
+    }
+    .brand-icon:hover {
+      transform: scale(1.06);
+      box-shadow: 0 0 20px var(--primary-bright);
+    }
+    .brand-icon svg {
+      width: 100%;
+      height: 100%;
+      display: block;
     }
     .brand-title {
       font-size: 15px;
@@ -1551,10 +1560,117 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
   <!-- FIXED TOP HEADER -->
   <header>
     <div class="header-brand">
-      <div class="brand-icon">A</div>
+      <div class="brand-icon" title="CloudEdge Logo">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+          <defs>
+            <radialGradient id="ce_bgGlow" cx="50%" cy="45%" r="60%">
+              <stop offset="0%" stop-color="#141c33" />
+              <stop offset="65%" stop-color="#090d16" />
+              <stop offset="100%" stop-color="#06080e" />
+            </radialGradient>
+            <linearGradient id="ce_cyanFacet" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00f0ff" />
+              <stop offset="100%" stop-color="#0284c7" />
+            </linearGradient>
+            <linearGradient id="ce_indigoFacet" x1="0%" y1="100%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#4f46e5" />
+              <stop offset="100%" stop-color="#818cf8" />
+            </linearGradient>
+            <linearGradient id="ce_emeraldFacet" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#34d399" />
+              <stop offset="100%" stop-color="#059669" />
+            </linearGradient>
+            <linearGradient id="ce_edgeGlowLine" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.9" />
+              <stop offset="50%" stop-color="#6366f1" stop-opacity="0.8" />
+              <stop offset="100%" stop-color="#10b981" stop-opacity="0.9" />
+            </linearGradient>
+            <filter id="ce_glowFilter" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="6" result="blur" />
+              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            </filter>
+            <filter id="ce_intenseGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="12" result="blur2" />
+              <feComposite in="SourceGraphic" in2="blur2" operator="over" />
+            </filter>
+          </defs>
+          <rect width="512" height="512" rx="112" fill="url(#ce_bgGlow)" stroke="#1e293b" stroke-width="2.5" />
+          <g opacity="0.12" stroke="#38bdf8" stroke-width="1">
+            <line x1="80" y1="128" x2="432" y2="128" stroke-dasharray="4 8" />
+            <line x1="80" y1="256" x2="432" y2="256" stroke-dasharray="4 8" />
+            <line x1="80" y1="384" x2="432" y2="384" stroke-dasharray="4 8" />
+            <line x1="128" y1="80" x2="128" y2="432" stroke-dasharray="4 8" />
+            <line x1="256" y1="80" x2="256" y2="432" stroke-dasharray="4 8" />
+            <line x1="384" y1="80" x2="384" y2="432" stroke-dasharray="4 8" />
+          </g>
+          <circle cx="260" cy="240" r="130" fill="#00f0ff" opacity="0.08" filter="url(#ce_intenseGlow)" />
+          <circle cx="210" cy="270" r="100" fill="#6366f1" opacity="0.1" filter="url(#ce_intenseGlow)" />
+          <circle cx="330" cy="270" r="90" fill="#10b981" opacity="0.08" filter="url(#ce_intenseGlow)" />
+          <g id="ce_cloud-facets">
+            <polygon points="286,140 356,216 264,236 220,150" fill="url(#ce_cyanFacet)" opacity="0.88" />
+            <polygon points="220,150 264,236 180,206" fill="url(#ce_indigoFacet)" opacity="0.82" />
+            <polygon points="180,206 264,236 172,284 116,260" fill="url(#ce_cyanFacet)" opacity="0.75" />
+            <polygon points="116,260 172,284 210,340 132,340" fill="url(#ce_indigoFacet)" opacity="0.9" />
+            <polygon points="264,236 356,216 348,296 270,340 210,340 172,284" fill="#0b1426" stroke="#00f0ff" stroke-width="1.5" opacity="0.95" />
+            <polygon points="264,236 348,296 270,340" fill="url(#ce_emeraldFacet)" opacity="0.75" />
+            <polygon points="264,236 270,340 210,340" fill="url(#ce_cyanFacet)" opacity="0.65" />
+            <polygon points="172,284 264,236 210,340" fill="url(#ce_indigoFacet)" opacity="0.7" />
+            <polygon points="356,216 416,276 348,296" fill="url(#ce_emeraldFacet)" opacity="0.85" />
+            <polygon points="348,296 416,276 400,340 270,340" fill="url(#ce_cyanFacet)" opacity="0.8" />
+          </g>
+          <g id="ce_edge-mesh-lines" stroke="url(#ce_edgeGlowLine)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M132,340 L116,260 L180,206 L220,150 L286,140 L356,216 L416,276 L400,340 Z" />
+            <line x1="286" y1="140" x2="264" y2="236" />
+            <line x1="220" y1="150" x2="264" y2="236" />
+            <line x1="180" y1="206" x2="264" y2="236" />
+            <line x1="356" y1="216" x2="264" y2="236" />
+            <line x1="356" y1="216" x2="348" y2="296" />
+            <line x1="172" y1="284" x2="264" y2="236" />
+            <line x1="172" y1="284" x2="210" y2="340" />
+            <line x1="264" y1="236" x2="270" y2="340" />
+            <line x1="264" y1="236" x2="348" y2="296" />
+            <line x1="348" y1="296" x2="270" y2="340" />
+          </g>
+          <g id="ce_circuit-edge-traces" stroke-linecap="round" opacity="0.9">
+            <line x1="104" y1="364" x2="200" y2="364" stroke="#6366f1" stroke-width="2" stroke-dasharray="6 4" />
+            <line x1="200" y1="364" x2="220" y2="344" stroke="#6366f1" stroke-width="2" />
+            <circle cx="104" cy="364" r="3.5" fill="#6366f1" />
+            <line x1="428" y1="364" x2="330" y2="364" stroke="#10b981" stroke-width="2" stroke-dasharray="6 4" />
+            <line x1="330" y1="364" x2="310" y2="344" stroke="#10b981" stroke-width="2" />
+            <circle cx="428" cy="364" r="3.5" fill="#10b981" />
+            <line x1="286" y1="140" x2="320" y2="108" stroke="#00f0ff" stroke-width="2" />
+            <line x1="320" y1="108" x2="380" y2="108" stroke="#00f0ff" stroke-width="2" stroke-dasharray="5 3" />
+            <circle cx="380" cy="108" r="3" fill="#00f0ff" />
+            <line x1="116" y1="260" x2="76" y2="260" stroke="#00f0ff" stroke-width="2" stroke-dasharray="4 4" />
+            <circle cx="76" cy="260" r="3.5" fill="#00f0ff" />
+            <line x1="416" y1="276" x2="452" y2="276" stroke="#34d399" stroke-width="2" stroke-dasharray="4 4" />
+            <circle cx="452" cy="276" r="3.5" fill="#34d399" />
+          </g>
+          <g id="ce_edge-nodes" filter="url(#ce_glowFilter)">
+            <circle cx="132" cy="340" r="6" fill="#6366f1" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="210" cy="340" r="5.5" fill="#38bdf8" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="270" cy="340" r="6" fill="#10b981" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="400" cy="340" r="6" fill="#10b981" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="416" cy="276" r="6.5" fill="#34d399" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="356" cy="216" r="6.5" fill="#00f0ff" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="286" cy="140" r="7.5" fill="#00f0ff" stroke="#ffffff" stroke-width="2" />
+            <circle cx="220" cy="150" r="6" fill="#818cf8" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="180" cy="206" r="6" fill="#6366f1" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="116" cy="260" r="6" fill="#38bdf8" stroke="#ffffff" stroke-width="1.5" />
+            <circle cx="172" cy="284" r="5" fill="#6366f1" stroke="#e0e7ff" stroke-width="1" />
+            <circle cx="348" cy="296" r="5.5" fill="#10b981" stroke="#e0e7ff" stroke-width="1" />
+            <circle cx="264" cy="236" r="9" fill="#00f0ff" stroke="#ffffff" stroke-width="2.5" />
+            <circle cx="264" cy="236" r="3" fill="#090d16" />
+          </g>
+          <path d="M264,222 L266,234 L278,236 L266,238 L264,250 L262,238 L250,236 L262,234 Z" fill="#ffffff" opacity="0.9" />
+        </svg>
+      </div>
       <div>
-        <span class="brand-title">AgentOS Kernel</span>
-        <span class="badge" style="margin-left: 6px;">v1.2.1 LTS</span>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="brand-title">AgentOS Kernel</span>
+          <span class="badge">v1.2.1 LTS</span>
+        </div>
+        <div style="font-size: 9px; color: var(--secondary-bright); font-family: var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase;">CloudEdge Architecture</div>
       </div>
       <div class="badge badge-primary" style="margin-left: 12px;">
         <span class="pulse-dot"></span>
