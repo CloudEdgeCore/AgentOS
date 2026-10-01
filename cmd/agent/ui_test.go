@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -168,32 +169,110 @@ func TestUIHandlers(t *testing.T) {
 		}
 	})
 
-	// 7. Test Model Configuration
-	t.Run("handleUIModelConfig", func(t *testing.T) {
-		cfgReq := UIModelConfigRequest{
-			Provider:  "openrouter",
-			Model:     "stealth/space-bunny-alpha",
-			BudgetUSD: 2.50,
+	// 7. Test Model Configuration and Full Configuration Hub
+	t.Run("handleUIFullConfig", func(t *testing.T) {
+		// Test GET /api/config
+		getReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+		getW := httptest.NewRecorder()
+		handleUIConfig(getW, getReq)
+		if getW.Code != http.StatusOK {
+			t.Fatalf("expected GET /api/config status 200, got %d", getW.Code)
 		}
-		reqBytes, _ := json.Marshal(cfgReq)
-		req := httptest.NewRequest(http.MethodPost, "/api/config/model", bytes.NewReader(reqBytes))
-		w := httptest.NewRecorder()
-		handleUIModelConfig(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d", w.Code)
+		// Test POST /api/config with full configuration
+		fullReq := UIFullConfigRequest{
+			Environment:     "staging",
+			DefaultProvider: "deepseek",
+			Model:           "deepseek-chat",
+			BaseURL:         "https://api.deepseek.com/v1",
+			APIKey:          "sk-test-key-full-config",
+			TimeoutSec:      150,
+			BudgetUSD:       3.75,
+			MaxTokens:       45000,
+			MaxToolCalls:    25,
+			EnforceReceipts: true,
+			FailClosed:      true,
+			LogLevel:        "warn",
+			LogFormat:       "json",
+			GatewayPort:     19090,
+			GatewayHost:     "0.0.0.0",
+		}
+		reqBytes, _ := json.Marshal(fullReq)
+		postReq := httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(reqBytes))
+		postW := httptest.NewRecorder()
+		handleUIConfig(postW, postReq)
+
+		if postW.Code != http.StatusOK {
+			t.Fatalf("expected POST /api/config status 200, got %d", postW.Code)
 		}
 		var resp map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		if err := json.Unmarshal(postW.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("failed to parse JSON: %v", err)
 		}
 		if resp["success"] != true {
 			t.Errorf("expected success=true, got: %v", resp["success"])
 		}
+
+		// Verify legacy /api/config/model
+		cfgReq := UIModelConfigRequest{
+			Provider:  "openrouter",
+			Model:     "stealth/space-bunny-alpha",
+			BudgetUSD: 2.50,
+		}
+		reqBytes2, _ := json.Marshal(cfgReq)
+		req2 := httptest.NewRequest(http.MethodPost, "/api/config/model", bytes.NewReader(reqBytes2))
+		w2 := httptest.NewRecorder()
+		handleUIModelConfig(w2, req2)
+		if w2.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w2.Code)
+		}
 	})
 
-	// 8. Test Agent Listing and Creation
-	t.Run("handleUIAgents", func(t *testing.T) {
+	// 8. Test Dynamic Tool Registry & Probe
+	t.Run("handleUIToolsRegisterAndProbe", func(t *testing.T) {
+		// Register a new tool
+		regReq := UIToolActionRequest{
+			Action:      "register",
+			Name:        "industrial:vision",
+			Adapter:     "industrial.vision.inspect@1.0.0",
+			Protocol:    "MCP/2.0",
+			Endpoint:    "http://127.0.0.1:8089/mcp",
+			Description: "Optical surface defect inspection via edge camera inference.",
+		}
+		b, _ := json.Marshal(regReq)
+		postW := httptest.NewRecorder()
+		handleUITools(postW, httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(b)))
+		if postW.Code != http.StatusOK {
+			t.Fatalf("expected tool register status 200, got %d", postW.Code)
+		}
+
+		// Toggle tool enabled state
+		togReq := UIToolActionRequest{
+			Action: "toggle",
+			Name:   "industrial:vision",
+		}
+		bTog, _ := json.Marshal(togReq)
+		togW := httptest.NewRecorder()
+		handleUITools(togW, httptest.NewRequest(http.MethodPost, "/api/tools", bytes.NewReader(bTog)))
+		if togW.Code != http.StatusOK {
+			t.Fatalf("expected tool toggle status 200, got %d", togW.Code)
+		}
+
+		// Probe tool endpoint
+		probeReq := map[string]string{"endpoint": "local:adapter"}
+		bProbe, _ := json.Marshal(probeReq)
+		probeW := httptest.NewRecorder()
+		handleUIToolsProbe(probeW, httptest.NewRequest(http.MethodPost, "/api/tools/probe", bytes.NewReader(bProbe)))
+		if probeW.Code != http.StatusOK {
+			t.Fatalf("expected probe status 200, got %d", probeW.Code)
+		}
+	})
+
+	// 9. Test Agent Listing, Creation, Toggle, and Deletion
+	t.Run("handleUIAgentsLifecycle", func(t *testing.T) {
+		agentName := "test-ui-agent"
+		defer os.RemoveAll(agentName)
+
 		// List agents
 		req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
 		w := httptest.NewRecorder()
@@ -212,7 +291,7 @@ func TestUIHandlers(t *testing.T) {
 
 		// Create new agent
 		createReq := UICreateAgentRequest{
-			Name:      "test-ui-agent",
+			Name:      agentName,
 			Role:      "Automated Health Monitor",
 			Model:     "deepseek/deepseek-r1",
 			BudgetUSD: 1.25,
@@ -228,6 +307,20 @@ func TestUIHandlers(t *testing.T) {
 		json.Unmarshal(w2.Body.Bytes(), &createResp)
 		if createResp["success"] != true {
 			t.Errorf("expected agent creation success, got: %v", createResp["error"])
+		}
+
+		// Toggle agent status
+		togW := httptest.NewRecorder()
+		handleUIAgents(togW, httptest.NewRequest(http.MethodPost, "/api/agents?action=toggle&name="+agentName, nil))
+		if togW.Code != http.StatusOK {
+			t.Errorf("expected toggle status 200, got %d", togW.Code)
+		}
+
+		// Delete agent
+		delW := httptest.NewRecorder()
+		handleUIAgents(delW, httptest.NewRequest(http.MethodDelete, "/api/agents?name="+agentName, nil))
+		if delW.Code != http.StatusOK {
+			t.Errorf("expected delete status 200, got %d", delW.Code)
 		}
 	})
 }

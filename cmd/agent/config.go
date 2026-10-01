@@ -60,6 +60,17 @@ type ProfileOverride struct {
 	Logging *LoggingConfig `yaml:"logging,omitempty" json:"logging,omitempty"`
 }
 
+// MCPToolConfig defines parameters for a registered Model Context Protocol tool.
+type MCPToolConfig struct {
+	Name        string `yaml:"name" json:"name"`
+	Adapter     string `yaml:"adapter" json:"adapter"`
+	Protocol    string `yaml:"protocol" json:"protocol"`
+	Endpoint    string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Status      string `yaml:"status" json:"status"`
+	Enabled     bool   `yaml:"enabled" json:"enabled"`
+	Description string `yaml:"description" json:"description"`
+}
+
 // AgentYAMLConfig is the top-level hierarchical configuration.
 type AgentYAMLConfig struct {
 	Version     string                     `yaml:"version" json:"version"`
@@ -68,6 +79,7 @@ type AgentYAMLConfig struct {
 	Kernel      KernelConfig               `yaml:"kernel" json:"kernel"`
 	Gateway     GatewayConfig              `yaml:"gateway" json:"gateway"`
 	Logging     LoggingConfig              `yaml:"logging" json:"logging"`
+	MCPTools    []MCPToolConfig            `yaml:"mcp_tools,omitempty" json:"mcp_tools,omitempty"`
 	Profiles    map[string]ProfileOverride `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 
 	// LoadedFiles tracks configuration precedence chain at runtime.
@@ -128,6 +140,56 @@ func DefaultConfig() *AgentYAMLConfig {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "text",
+		},
+		MCPTools: []MCPToolConfig{
+			{
+				Name:        "industrial:sensor",
+				Adapter:     "industrial.sensor.query@1.0.0",
+				Protocol:    "MCP/2.0",
+				Status:      "HEALTHY",
+				Enabled:     true,
+				Description: "Query live industrial telemetry including spindle temperature, motor vibration, and cooling pressure.",
+			},
+			{
+				Name:        "industrial:alarm",
+				Adapter:     "industrial.alarm.lookup@1.0.0",
+				Protocol:    "MCP/2.0",
+				Status:      "HEALTHY",
+				Enabled:     true,
+				Description: "Look up equipment fault codes, alarm thresholds, and recommended hardware mitigations.",
+			},
+			{
+				Name:        "industrial:sop",
+				Adapter:     "industrial.sop.search@1.0.0",
+				Protocol:    "MCP/2.0",
+				Status:      "HEALTHY",
+				Enabled:     true,
+				Description: "Semantic search across standard operating procedures (SOP), safety guidelines, and work instructions.",
+			},
+			{
+				Name:        "quality:metrics",
+				Adapter:     "custom.quality.metrics@1.0.0",
+				Protocol:    "Native/Go",
+				Status:      "HEALTHY",
+				Enabled:     true,
+				Description: "Retrieve Statistical Process Control (SPC) metrics, Cp/Cpk indices, and defect rates.",
+			},
+			{
+				Name:        "process:telemetry",
+				Adapter:     "custom.process.telemetry@1.0.0",
+				Protocol:    "Native/Go",
+				Status:      "HEALTHY",
+				Enabled:     true,
+				Description: "Stream high-frequency process time-series data from edge collectors.",
+			},
+			{
+				Name:        "knowledge:cases",
+				Adapter:     "custom.knowledge.cases@1.0.0",
+				Protocol:    "pgvector/SQL",
+				Status:      "HEALTHY",
+				Enabled:     true,
+				Description: "Semantic vector similarity lookup against historical incident postmortems.",
+			},
 		},
 		Profiles: map[string]ProfileOverride{
 			"development": {
@@ -272,6 +334,12 @@ func mergeYAMLFile(cfg *AgentYAMLConfig, path string) error {
 	}
 	if override.Logging.Format != "" {
 		cfg.Logging.Format = override.Logging.Format
+	}
+	if len(override.MCPTools) > 0 {
+		cfg.MCPTools = override.MCPTools
+	}
+	if override.Kernel.Governance.EnforceReceipts != cfg.Kernel.Governance.EnforceReceipts || override.Kernel.Governance.FailClosed != cfg.Kernel.Governance.FailClosed {
+		cfg.Kernel.Governance = override.Kernel.Governance
 	}
 	return nil
 }

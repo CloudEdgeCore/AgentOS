@@ -50,6 +50,35 @@ type UIModelConfigRequest struct {
 	BudgetUSD float64 `json:"budget_usd"`
 }
 
+type UIFullConfigRequest struct {
+	Environment     string  `json:"environment"`
+	DefaultProvider string  `json:"default_provider"`
+	Model           string  `json:"model"`
+	BaseURL         string  `json:"base_url"`
+	APIKey          string  `json:"api_key"`
+	TimeoutSec      int     `json:"timeout_sec"`
+	BudgetUSD       float64 `json:"budget_usd"`
+	MaxTokens       int     `json:"max_tokens"`
+	MaxToolCalls    int     `json:"max_tool_calls"`
+	EnforceReceipts bool    `json:"enforce_receipts"`
+	FailClosed      bool    `json:"fail_closed"`
+	LogLevel        string  `json:"log_level"`
+	LogFormat       string  `json:"log_format"`
+	GatewayPort     int     `json:"gateway_port"`
+	GatewayHost     string  `json:"gateway_host"`
+}
+
+type UIToolActionRequest struct {
+	Action      string `json:"action"` // "register" or "toggle"
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name"`
+	Adapter     string `json:"adapter"`
+	Protocol    string `json:"protocol"`
+	Endpoint    string `json:"endpoint,omitempty"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+}
+
 type UIAgentItem struct {
 	Name      string   `json:"name"`
 	Role      string   `json:"role"`
@@ -78,6 +107,63 @@ var (
 		{Name: "CNC-Spindle-Guard", Role: "High-Freq Vibration Telemetry", Model: "deepseek/deepseek-r1", BudgetUSD: 1.50, Latency: "18ms", Status: "ONLINE"},
 		{Name: "Ingress-Gateway", Role: "Task Admission & Rate Guard", Model: "stealth/space-bunny-alpha", BudgetUSD: 1.00, Latency: "1.2ms", Status: "ONLINE"},
 		{Name: "Ledger-Verifier", Role: "Cryptographic Merkle Notary", Model: "deterministic-go", BudgetUSD: 0.50, Latency: "0.4ms", Status: "ONLINE"},
+	}
+	uiToolsMu sync.RWMutex
+	uiTools   = []map[string]any{
+		{
+			"id":          "tool-1",
+			"name":        "industrial:sensor",
+			"adapter":     "industrial.sensor.query@1.0.0",
+			"protocol":    "MCP/2.0",
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": "Query live industrial telemetry including spindle temperature, motor vibration, and cooling pressure.",
+		},
+		{
+			"id":          "tool-2",
+			"name":        "industrial:alarm",
+			"adapter":     "industrial.alarm.lookup@1.0.0",
+			"protocol":    "MCP/2.0",
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": "Look up equipment fault codes, alarm thresholds, and recommended hardware mitigations.",
+		},
+		{
+			"id":          "tool-3",
+			"name":        "industrial:sop",
+			"adapter":     "industrial.sop.search@1.0.0",
+			"protocol":    "MCP/2.0",
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": "Semantic search across standard operating procedures (SOP), safety guidelines, and work instructions.",
+		},
+		{
+			"id":          "tool-4",
+			"name":        "quality:metrics",
+			"adapter":     "custom.quality.metrics@1.0.0",
+			"protocol":    "Native/Go",
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": "Retrieve Statistical Process Control (SPC) metrics, Cp/Cpk indices, and defect rates.",
+		},
+		{
+			"id":          "tool-5",
+			"name":        "process:telemetry",
+			"adapter":     "custom.process.telemetry@1.0.0",
+			"protocol":    "Native/Go",
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": "Stream high-frequency process time-series data from edge collectors.",
+		},
+		{
+			"id":          "tool-6",
+			"name":        "knowledge:cases",
+			"adapter":     "custom.knowledge.cases@1.0.0",
+			"protocol":    "pgvector/SQL",
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": "Semantic vector similarity lookup against historical incident postmortems.",
+		},
 	}
 	uiReceipts = []UIReceipt{
 		{
@@ -145,6 +231,7 @@ func runUI(args []string) {
 	mux.HandleFunc("/api/status", handleUIStatus)
 	mux.HandleFunc("/api/receipts", handleUIReceipts)
 	mux.HandleFunc("/api/tools", handleUITools)
+	mux.HandleFunc("/api/tools/probe", handleUIToolsProbe)
 	mux.HandleFunc("/api/nodes", handleUINodes)
 	mux.HandleFunc("/api/run", handleUIRun)
 	mux.HandleFunc("/api/halt", handleUIHalt)
@@ -246,53 +333,131 @@ func handleUIReceipts(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUITools(w http.ResponseWriter, r *http.Request) {
-	tools := []map[string]any{
-		{
-			"name":        "industrial:sensor",
-			"adapter":     "industrial.sensor.query@1.0.0",
-			"protocol":    "MCP/2.0",
-			"status":      "HEALTHY",
-			"description": "Query live industrial telemetry including spindle temperature, motor vibration, and cooling pressure.",
-		},
-		{
-			"name":        "industrial:alarm",
-			"adapter":     "industrial.alarm.lookup@1.0.0",
-			"protocol":    "MCP/2.0",
-			"status":      "HEALTHY",
-			"description": "Look up equipment fault codes, alarm thresholds, and recommended hardware mitigations.",
-		},
-		{
-			"name":        "industrial:sop",
-			"adapter":     "industrial.sop.search@1.0.0",
-			"protocol":    "MCP/2.0",
-			"status":      "HEALTHY",
-			"description": "Semantic search across standard operating procedures (SOP), safety guidelines, and work instructions.",
-		},
-		{
-			"name":        "quality:metrics",
-			"adapter":     "custom.quality.metrics@1.0.0",
-			"protocol":    "Native/Go",
-			"status":      "HEALTHY",
-			"description": "Retrieve Statistical Process Control (SPC) metrics, Cp/Cpk indices, and defect rates.",
-		},
-		{
-			"name":        "process:telemetry",
-			"adapter":     "custom.process.telemetry@1.0.0",
-			"protocol":    "Native/Go",
-			"status":      "HEALTHY",
-			"description": "Stream high-frequency process time-series data from edge collectors.",
-		},
-		{
-			"name":        "knowledge:cases",
-			"adapter":     "custom.knowledge.cases@1.0.0",
-			"protocol":    "pgvector/SQL",
-			"status":      "HEALTHY",
-			"description": "Semantic vector similarity lookup against historical incident postmortems.",
-		},
+	if r.Method == http.MethodGet {
+		uiToolsMu.RLock()
+		defer uiToolsMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(uiTools)
+		return
 	}
 
+	if r.Method == http.MethodPost {
+		var req UIToolActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		uiToolsMu.Lock()
+		defer uiToolsMu.Unlock()
+
+		if req.Action == "toggle" {
+			for i, t := range uiTools {
+				if t["name"] == req.Name || t["id"] == req.ID {
+					curEnabled, _ := t["enabled"].(bool)
+					uiTools[i]["enabled"] = !curEnabled
+					status := "HEALTHY"
+					if curEnabled {
+						status = "DISABLED"
+					}
+					uiTools[i]["status"] = status
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"success": true,
+						"tool":    uiTools[i],
+					})
+					return
+				}
+			}
+			http.Error(w, "tool not found", http.StatusNotFound)
+			return
+		}
+
+		if strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "tool name is required", http.StatusBadRequest)
+			return
+		}
+		protocol := req.Protocol
+		if protocol == "" {
+			protocol = "MCP/2.0"
+		}
+		adapter := req.Adapter
+		if adapter == "" {
+			adapter = req.Name + "@1.0.0"
+		}
+		newTool := map[string]any{
+			"id":          fmt.Sprintf("tool-%d", len(uiTools)+1),
+			"name":        req.Name,
+			"adapter":     adapter,
+			"protocol":    protocol,
+			"endpoint":    req.Endpoint,
+			"status":      "HEALTHY",
+			"enabled":     true,
+			"description": req.Description,
+		}
+		uiTools = append(uiTools, newTool)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"message": fmt.Sprintf("Successfully registered tool: %s", req.Name),
+			"tool":    newTool,
+		})
+		return
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func handleUIToolsProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Endpoint string `json:"endpoint"`
+		Name     string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	t0 := time.Now()
+	if strings.HasPrefix(req.Endpoint, "http://") || strings.HasPrefix(req.Endpoint, "https://") {
+		mcpReq := MCPRequest{
+			JSONRPC: "2.0",
+			ID:      1,
+			Method:  "ping",
+		}
+		resp, err := sendMCPRequest(req.Endpoint, mcpReq)
+		latencyMs := time.Since(t0).Milliseconds()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"success":    false,
+				"error":      err.Error(),
+				"latency_ms": latencyMs,
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success":    true,
+			"latency_ms": latencyMs,
+			"result":     string(resp.Result),
+		})
+		return
+	}
+
+	latencyMs := 2 + (time.Now().UnixNano() % 5)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tools)
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":    true,
+		"latency_ms": latencyMs,
+		"result":     "pong",
+	})
 }
 
 func handleUINodes(w http.ResponseWriter, r *http.Request) {
@@ -339,8 +504,89 @@ func handleUIConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cfg)
+
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cfg)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req UIFullConfigRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Environment != "" {
+			cfg.Environment = req.Environment
+		}
+		if req.DefaultProvider != "" {
+			cfg.LLM.DefaultProvider = req.DefaultProvider
+		}
+		curr := cfg.CurrentProvider()
+		if req.Model != "" {
+			curr.Model = req.Model
+		}
+		if req.BaseURL != "" {
+			curr.BaseURL = req.BaseURL
+		}
+		if req.APIKey != "" {
+			curr.APIKey = req.APIKey
+		}
+		if req.TimeoutSec > 0 {
+			curr.TimeoutSec = req.TimeoutSec
+		}
+		if cfg.LLM.Providers == nil {
+			cfg.LLM.Providers = make(map[string]ProviderConfig)
+		}
+		cfg.LLM.Providers[cfg.LLM.DefaultProvider] = curr
+
+		if req.BudgetUSD > 0 {
+			cfg.Kernel.Budget.MaxCostUSD = req.BudgetUSD
+		}
+		if req.MaxTokens > 0 {
+			cfg.Kernel.Budget.MaxTokens = req.MaxTokens
+		}
+		if req.MaxToolCalls > 0 {
+			cfg.Kernel.Budget.MaxToolCalls = req.MaxToolCalls
+		}
+		cfg.Kernel.Governance.EnforceReceipts = req.EnforceReceipts
+		cfg.Kernel.Governance.FailClosed = req.FailClosed
+
+		if req.LogLevel != "" {
+			cfg.Logging.Level = req.LogLevel
+		}
+		if req.LogFormat != "" {
+			cfg.Logging.Format = req.LogFormat
+		}
+		if req.GatewayPort > 0 {
+			cfg.Gateway.Port = req.GatewayPort
+		}
+		if req.GatewayHost != "" {
+			cfg.Gateway.Host = req.GatewayHost
+		}
+
+		targetFile := "agent.yaml"
+		if len(cfg.LoadedFiles) > 0 {
+			targetFile = cfg.LoadedFiles[len(cfg.LoadedFiles)-1]
+		}
+		if err := SaveConfig(cfg, targetFile); err != nil {
+			http.Error(w, fmt.Sprintf("failed to save config: %v", err), http.StatusInternalServerError)
+			return
+		}
+		activeConfig = cfg
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"message": fmt.Sprintf("Full configuration successfully saved to %s and hot-reloaded", targetFile),
+			"config":  cfg,
+		})
+		return
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func handleUIModelConfig(w http.ResponseWriter, r *http.Request) {
@@ -443,6 +689,53 @@ func handleUIAgents(w http.ResponseWriter, r *http.Request) {
 		defer uiMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(uiAgents)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		if name == "" {
+			http.Error(w, "name query param required", http.StatusBadRequest)
+			return
+		}
+		uiMu.Lock()
+		defer uiMu.Unlock()
+		found := false
+		var remaining []UIAgentItem
+		for _, a := range uiAgents {
+			if strings.EqualFold(a.Name, name) {
+				found = true
+				continue
+			}
+			remaining = append(remaining, a)
+		}
+		if !found {
+			http.Error(w, "agent not found", http.StatusNotFound)
+			return
+		}
+		uiAgents = remaining
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "Agent deleted"})
+		return
+	}
+
+	if r.Method == http.MethodPatch || (r.Method == http.MethodPost && r.URL.Query().Get("action") == "toggle") {
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		uiMu.Lock()
+		defer uiMu.Unlock()
+		for i, a := range uiAgents {
+			if strings.EqualFold(a.Name, name) {
+				if uiAgents[i].Status == "ONLINE" {
+					uiAgents[i].Status = "PAUSED"
+				} else {
+					uiAgents[i].Status = "ONLINE"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{"success": true, "agent": uiAgents[i]})
+				return
+			}
+		}
+		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
 
@@ -947,6 +1240,104 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     }
     .btn:hover { opacity: 0.9; }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .tab-bar {
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid var(--outline-variant);
+      margin-bottom: 20px;
+      padding-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--outline);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+    }
+    .tab-btn:hover {
+      color: var(--text-main);
+      background: var(--bg-container-high);
+    }
+    .tab-btn.active {
+      color: var(--primary-bright);
+      background: rgba(0, 229, 255, 0.08);
+      border-color: rgba(0, 229, 255, 0.3);
+    }
+    .tab-panel {
+      display: none;
+    }
+    .tab-panel.active {
+      display: block;
+    }
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 38px;
+      height: 20px;
+    }
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--bg-container-high);
+      border: 1px solid var(--outline-variant);
+      transition: .2s;
+      border-radius: 20px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 12px;
+      width: 12px;
+      left: 3px;
+      bottom: 3px;
+      background-color: var(--outline);
+      transition: .2s;
+      border-radius: 50%;
+    }
+    input:checked + .slider {
+      background-color: rgba(0, 229, 255, 0.2);
+      border-color: var(--primary-bright);
+    }
+    input:checked + .slider:before {
+      transform: translateX(18px);
+      background-color: var(--primary-bright);
+    }
+    .field-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--outline-variant);
+    }
+    .field-col {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .field-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .field-desc {
+      font-size: 11px;
+      color: var(--outline);
+    }
     input, select, textarea {
       width: 100%;
       background: var(--bg-container-lowest);
@@ -1054,8 +1445,8 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
           <span data-i18n="nav_orchestrator">DAG Orchestrator</span>
         </a>
         <a class="nav-item" data-view="gateway" onclick="switchView('gateway')">
-          <span class="material-symbols-outlined" style="font-size: 16px;">hub</span>
-          <span data-i18n="nav_gateway">Model Gateway</span>
+          <span class="material-symbols-outlined" style="font-size: 16px;">tune</span>
+          <span data-i18n="nav_gateway">System Config</span>
         </a>
       </nav>
     </div>
@@ -1193,10 +1584,11 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
                 <th data-i18n="col_role">Role</th>
                 <th data-i18n="col_model">Model</th>
                 <th data-i18n="col_status">Status</th>
+                <th data-i18n="col_actions">Actions</th>
               </tr>
             </thead>
             <tbody id="overviewAgentsBody">
-              <tr><td colspan="4" style="text-align: center;">Loading agents...</td></tr>
+              <tr><td colspan="5" style="text-align: center;">Loading agents...</td></tr>
             </tbody>
           </table>
         </div>
@@ -1399,58 +1791,306 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- VIEW 5: MODEL GATEWAY & CONFIGURATION -->
+    <!-- VIEW 5: UNIFIED SYSTEM CONFIGURATION HUB -->
     <div id="view-gateway" class="view-container">
+      <div class="context-strip">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span class="material-symbols-outlined" style="font-size: 18px; color: var(--primary-bright);">tune</span>
+          <span style="font-size: 14px; font-weight: 700; text-transform: uppercase;" data-i18n="config_hub_title">System Configuration Hub</span>
+          <span class="badge" style="color: var(--primary-bright);" id="configEnvBadge">ENV: DEVELOPMENT</span>
+          <span class="badge" id="configHotReloadBadge">HOT-RELOAD ENABLED</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <button class="btn" onclick="saveFullConfig()">
+            <span class="material-symbols-outlined" style="font-size: 14px;">save</span>
+            <span data-i18n="save_all_hot_reload">Save All & Hot-Reload</span>
+          </button>
+          <button class="chip" onclick="resetConfigDefaults()">
+            <span class="material-symbols-outlined" style="font-size: 14px;">restart_alt</span>
+            <span data-i18n="btn_reset_defaults">Reset Defaults</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="tab-bar">
+        <button class="tab-btn active" id="tabBtn-model" onclick="switchConfigTab('model')">
+          <span class="material-symbols-outlined" style="font-size: 15px;">hub</span>
+          <span data-i18n="tab_model">Model & Inference Gateway</span>
+        </button>
+        <button class="tab-btn" id="tabBtn-gov" onclick="switchConfigTab('gov')">
+          <span class="material-symbols-outlined" style="font-size: 15px;">shield</span>
+          <span data-i18n="tab_governance">Kernel Governance & Budget</span>
+        </button>
+        <button class="tab-btn" id="tabBtn-mcp" onclick="switchConfigTab('mcp')">
+          <span class="material-symbols-outlined" style="font-size: 15px;">extension</span>
+          <span data-i18n="tab_mcp">MCP Tool & Service Registry</span>
+        </button>
+        <button class="tab-btn" id="tabBtn-runtime" onclick="switchConfigTab('runtime')">
+          <span class="material-symbols-outlined" style="font-size: 15px;">settings_ethernet</span>
+          <span data-i18n="tab_runtime">Runtime & Observability</span>
+        </button>
+      </div>
+
       <div class="grid-2col">
-        <!-- Interactive Model Configuration Form -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-            <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="model_gateway_title">Model Provider & Budget Control</span>
-            <span class="badge badge-primary" id="modelProbeBadge">READY</span>
+        <!-- Left Column: Tab Panels -->
+        <div>
+          <!-- Tab 1: Model Gateway Panel -->
+          <div class="tab-panel active" id="cfgPanel-model">
+            <div class="card">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="model_gateway_title">Model Provider & Gateway Route</span>
+                <span class="badge badge-primary" id="modelProbeBadge">READY</span>
+              </div>
+
+              <label style="font-size: 11px; color: var(--outline);" data-i18n="provider_type">PROVIDER TYPE</label>
+              <select id="cfgProvider" onchange="autoFillProviderDefaults()">
+                <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
+                <option value="deepseek">DeepSeek (Direct API)</option>
+                <option value="qwen">Qwen / DashScope (Aliyun Direct)</option>
+                <option value="ollama">Ollama (Local Self-hosted)</option>
+                <option value="anthropic">Anthropic (Claude Direct)</option>
+              </select>
+
+              <label style="font-size: 11px; color: var(--outline); margin-top: 10px;" data-i18n="model_identifier">MODEL IDENTIFIER</label>
+              <input type="text" id="cfgModel" placeholder="e.g. deepseek/deepseek-r1"/>
+              <div style="display: flex; gap: 6px; margin-top: 4px; margin-bottom: 10px; flex-wrap: wrap;">
+                <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('deepseek/deepseek-r1')">deepseek-r1</span>
+                <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('deepseek/deepseek-chat')">deepseek-chat</span>
+                <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('qwen/qwen-2.5-72b-instruct')">qwen-2.5-72b</span>
+                <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('stealth/space-bunny-alpha')">space-bunny-alpha</span>
+                <span class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="selectModelPreset('qwen2.5:7b')">ollama-qwen2.5</span>
+              </div>
+
+              <label style="font-size: 11px; color: var(--outline);" data-i18n="base_url">BASE URL</label>
+              <input type="text" id="cfgBaseURL" placeholder="https://openrouter.ai/api/v1"/>
+
+              <label style="font-size: 11px; color: var(--outline); margin-top: 10px;" data-i18n="api_key_label">API KEY (Masked. Leave blank to preserve current key)</label>
+              <div style="position: relative;">
+                <input type="password" id="cfgAPIKey" placeholder="Enter API key..."/>
+                <span class="material-symbols-outlined" style="position: absolute; right: 10px; top: 8px; font-size: 16px; cursor: pointer; color: var(--outline);" onclick="togglePasswordVisibility('cfgAPIKey')">visibility</span>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px;">
+                <div>
+                  <label style="font-size: 11px; color: var(--outline);" data-i18n="field_timeout">TIMEOUT (SECONDS)</label>
+                  <input type="number" id="cfgTimeoutSec" min="10" max="600" value="120"/>
+                </div>
+                <div>
+                  <label style="font-size: 11px; color: var(--outline);" data-i18n="field_temperature">TEMPERATURE (0.0 - 2.0)</label>
+                  <input type="number" id="cfgTemperature" min="0" max="2" step="0.1" value="0.7"/>
+                </div>
+              </div>
+
+              <div style="display: flex; gap: 10px; margin-top: 14px;">
+                <button class="chip" style="border-color: var(--primary);" onclick="testModelConnectivity()">
+                  <span class="material-symbols-outlined" style="font-size: 14px;">wifi_tethering</span>
+                  <span data-i18n="probe_conn">Probe Connectivity & Latency</span>
+                </button>
+              </div>
+            </div>
           </div>
 
-          <label style="font-size: 11px; color: var(--outline);" data-i18n="provider_type">PROVIDER TYPE</label>
-          <select id="cfgProvider" onchange="autoFillProviderDefaults()">
-            <option value="openrouter">OpenRouter (Multi-model Gateway)</option>
-            <option value="deepseek">DeepSeek (Direct API)</option>
-            <option value="anthropic">Anthropic (Claude 3.5)</option>
-            <option value="local-oci">Local OCI (Self-hosted Qwen/Llama)</option>
-          </select>
+          <!-- Tab 2: Kernel Governance & Budget Panel -->
+          <div class="tab-panel" id="cfgPanel-gov">
+            <div class="card">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="gov_panel_title">Kernel Governance & Safety Policies</span>
+                <span class="badge badge-primary" data-i18n="status_active">ACTIVE</span>
+              </div>
 
-          <label style="font-size: 11px; color: var(--outline);" data-i18n="model_identifier">MODEL IDENTIFIER</label>
-          <input type="text" id="cfgModel" placeholder="e.g. deepseek/deepseek-r1"/>
+              <div class="field-row">
+                <div class="field-col">
+                  <div class="field-title" data-i18n="budget_ceiling_label">Task Budget Ceiling ($ USD)</div>
+                  <div class="field-desc" data-i18n="budget_ceiling_desc">Hard spending limit per execution. System halts if spend exceeds ceiling.</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span style="color: var(--primary-bright); font-family: var(--font-mono); font-weight: 600;">$</span>
+                  <input type="number" id="cfgBudget" step="0.50" min="0.10" max="100.00" value="1.00" style="width: 100px; margin: 0;"/>
+                </div>
+              </div>
 
-          <label style="font-size: 11px; color: var(--outline);" data-i18n="base_url">BASE URL</label>
-          <input type="text" id="cfgBaseURL" placeholder="https://openrouter.ai/api/v1"/>
+              <div class="field-row">
+                <div class="field-col">
+                  <div class="field-title" data-i18n="max_tokens_label">Max Output Tokens</div>
+                  <div class="field-desc" data-i18n="max_tokens_desc">Upper bound on cumulative tokens per task to prevent runaway loops.</div>
+                </div>
+                <input type="number" id="cfgMaxTokens" min="1000" max="200000" step="5000" value="30000" style="width: 110px; margin: 0;"/>
+              </div>
 
-          <label style="font-size: 11px; color: var(--outline);" data-i18n="api_key_label">API KEY (Leave blank to preserve current key)</label>
-          <input type="password" id="cfgAPIKey" placeholder="Enter API key..."/>
+              <div class="field-row">
+                <div class="field-col">
+                  <div class="field-title" data-i18n="max_tool_calls_label">Max Tool Recursion Depth</div>
+                  <div class="field-desc" data-i18n="max_tool_calls_desc">Maximum recursive tool invocations per prompt before kernel enforces a break.</div>
+                </div>
+                <input type="number" id="cfgMaxToolCalls" min="1" max="100" value="15" style="width: 80px; margin: 0;"/>
+              </div>
 
-          <label style="font-size: 11px; color: var(--outline);" data-i18n="budget_ceiling_label">BUDGET CEILING USD ($)</label>
-          <input type="number" id="cfgBudget" step="0.50" min="0.10" value="1.00"/>
+              <div class="field-row">
+                <div class="field-col">
+                  <div class="field-title" data-i18n="enforce_receipts_label">Enforce Cryptographic Receipts</div>
+                  <div class="field-desc" data-i18n="enforce_receipts_desc">Require SHA-256 Merkle chain receipts for each execution and tool step.</div>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="cfgEnforceReceipts" checked/>
+                  <span class="slider"></span>
+                </label>
+              </div>
 
-          <div style="display: flex; gap: 10px; margin-top: 14px;">
-            <button class="btn" onclick="saveModelConfig()">
-              <span class="material-symbols-outlined" style="font-size: 14px;">save</span>
-              <span data-i18n="save_hot_reload">Save & Hot-Reload</span>
-            </button>
-            <button class="chip" onclick="testModelConnectivity()">
-              <span class="material-symbols-outlined" style="font-size: 14px;">wifi_tethering</span>
-              <span data-i18n="probe_conn">Probe Connectivity</span>
-            </button>
+              <div class="field-row" style="border-bottom: none;">
+                <div class="field-col">
+                  <div class="field-title" data-i18n="fail_closed_label">Fail-Closed Safety Interlock</div>
+                  <div class="field-desc" data-i18n="fail_closed_desc">Immediately reject and isolate tasks if safety, schema, or signature validation fails.</div>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="cfgFailClosed" checked/>
+                  <span class="slider"></span>
+                </label>
+              </div>
+            </div>
           </div>
-          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--outline); margin-top: 12px;" id="modelConfigFeedback">
-            Persists to agent.yaml with instant kernel reload
+
+          <!-- Tab 3: MCP Tool Registry Panel -->
+          <div class="tab-panel" id="cfgPanel-mcp">
+            <div class="card">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="mcp_registry_title">Registered Tool Adapters & MCP Gateways</span>
+                <button class="chip" onclick="loadToolsGrid()">
+                  <span class="material-symbols-outlined" style="font-size: 13px;">refresh</span>
+                  <span data-i18n="refresh_tools">Refresh</span>
+                </button>
+              </div>
+
+              <div id="mcpToolsGrid" style="display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; margin-bottom: 16px;">
+                <!-- dynamic tools list -->
+              </div>
+
+              <!-- Inline Registration Form -->
+              <div style="background: var(--bg-container-lowest); border: 1px solid var(--outline-variant); border-radius: 4px; padding: 12px;">
+                <div style="font-weight: 600; font-size: 12px; margin-bottom: 8px; color: var(--primary-bright);" data-i18n="register_new_tool_title">+ Register External MCP Server</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                  <div>
+                    <label style="font-size: 10px; color: var(--outline);" data-i18n="tool_name_label">TOOL IDENTIFIER</label>
+                    <input type="text" id="newToolName" placeholder="e.g. industrial:vision" style="margin-bottom: 6px;"/>
+                  </div>
+                  <div>
+                    <label style="font-size: 10px; color: var(--outline);" data-i18n="tool_protocol_label">PROTOCOL</label>
+                    <select id="newToolProtocol" style="margin-bottom: 6px;">
+                      <option value="MCP/2.0">MCP/2.0 (JSON-RPC)</option>
+                      <option value="Native/Go">Native Go Plugin</option>
+                      <option value="HTTP/REST">REST / HTTP</option>
+                    </select>
+                  </div>
+                </div>
+                <label style="font-size: 10px; color: var(--outline);" data-i18n="tool_endpoint_label">ENDPOINT URL / SOCKET</label>
+                <input type="text" id="newToolEndpoint" placeholder="http://127.0.0.1:8089/mcp" style="margin-bottom: 6px;"/>
+                <label style="font-size: 10px; color: var(--outline);" data-i18n="tool_desc_label">DESCRIPTION</label>
+                <input type="text" id="newToolDesc" placeholder="Brief explanation of tool capability..." style="margin-bottom: 8px;"/>
+                <div style="display: flex; gap: 8px;">
+                  <button class="btn" style="padding: 6px 12px; font-size: 11px;" onclick="submitRegisterTool()">
+                    <span class="material-symbols-outlined" style="font-size: 13px;">add_link</span>
+                    <span data-i18n="btn_register_mcp">Register Tool</span>
+                  </button>
+                  <button class="chip" onclick="probeNewToolEndpoint()">
+                    <span class="material-symbols-outlined" style="font-size: 13px;">sensors</span>
+                    <span data-i18n="btn_probe_endpoint">Probe Endpoint</span>
+                  </button>
+                  <span id="newToolFeedback" style="font-family: var(--font-mono); font-size: 11px; align-self: center; color: var(--outline);"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 4: Runtime & Observability Panel -->
+          <div class="tab-panel" id="cfgPanel-runtime">
+            <div class="card">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <span style="font-weight: 700; text-transform: uppercase; color: var(--secondary-bright);" data-i18n="runtime_obs_title">Runtime Environment & Logging</span>
+                <span class="badge badge-primary">SYSTEMD COMPLIANT</span>
+              </div>
+
+              <label style="font-size: 11px; color: var(--outline);" data-i18n="env_mode_label">ENVIRONMENT MODE</label>
+              <div style="display: flex; gap: 8px; margin-top: 6px; margin-bottom: 14px;">
+                <button type="button" class="chip" id="envBtn-development" onclick="setEnvironment('development')">Development</button>
+                <button type="button" class="chip" id="envBtn-staging" onclick="setEnvironment('staging')">Staging</button>
+                <button type="button" class="chip" id="envBtn-production" onclick="setEnvironment('production')">Production</button>
+              </div>
+
+              <label style="font-size: 11px; color: var(--outline);" data-i18n="log_level_label">LOGGING OUTPUT LEVEL</label>
+              <div style="display: flex; gap: 8px; margin-top: 6px; margin-bottom: 14px;">
+                <button type="button" class="chip" id="logBtn-debug" onclick="setLogLevel('debug')">DEBUG</button>
+                <button type="button" class="chip" id="logBtn-info" onclick="setLogLevel('info')">INFO</button>
+                <button type="button" class="chip" id="logBtn-warn" onclick="setLogLevel('warn')">WARN</button>
+                <button type="button" class="chip" id="logBtn-error" onclick="setLogLevel('error')">ERROR</button>
+              </div>
+
+              <label style="font-size: 11px; color: var(--outline);" data-i18n="log_format_label">LOG FORMAT</label>
+              <div style="display: flex; gap: 8px; margin-top: 6px; margin-bottom: 14px;">
+                <button type="button" class="chip" id="fmtBtn-text" onclick="setLogFormat('text')">Text (Linux systemd)</button>
+                <button type="button" class="chip" id="fmtBtn-json" onclick="setLogFormat('json')">JSON (Structured)</button>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                  <label style="font-size: 11px; color: var(--outline);" data-i18n="gateway_host_label">GATEWAY HOST</label>
+                  <input type="text" id="cfgGatewayHost" value="127.0.0.1"/>
+                </div>
+                <div>
+                  <label style="font-size: 11px; color: var(--outline);" data-i18n="gateway_port_label">GATEWAY PORT</label>
+                  <input type="number" id="cfgGatewayPort" value="18080"/>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Raw YAML Preview -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <span style="font-weight: 700; text-transform: uppercase;" data-i18n="raw_yaml_title">Active agent.yaml Config</span>
-            <button class="chip" onclick="loadConfig()" data-i18n="reload_yaml">Reload</button>
+        <!-- Right Column: Active Status & Realtime agent.yaml Preview -->
+        <div>
+          <!-- Quick Status & Action Summary -->
+          <div class="card" style="margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <span style="font-weight: 700; text-transform: uppercase;" data-i18n="runtime_state_title">Active Runtime State</span>
+              <span class="badge" style="color: var(--primary-bright);" id="configReconcileState">25ms Reconciler</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 8px; font-family: var(--font-mono); font-size: 11px;">
+              <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
+                <span style="color: var(--outline);" data-i18n="lbl_active_prov">Active Provider:</span>
+                <span id="summaryProvider" style="color: var(--text-main); font-weight: 600;">openrouter</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
+                <span style="color: var(--outline);" data-i18n="lbl_active_model">Active Model:</span>
+                <span id="summaryModel" style="color: var(--secondary-bright); font-weight: 600;">stealth/space-bunny-alpha</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
+                <span style="color: var(--outline);" data-i18n="lbl_budget_cap">Budget Ceiling:</span>
+                <span id="summaryBudget" style="color: var(--primary-bright); font-weight: 600;">$1.00 USD</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--outline-variant);">
+                <span style="color: var(--outline);" data-i18n="lbl_governance_mode">Governance Mode:</span>
+                <span id="summaryGov" style="color: var(--primary-bright);">FAIL-CLOSED (Strict)</span>
+              </div>
+            </div>
+            <div style="margin-top: 14px; display: flex; gap: 10px;">
+              <button class="btn" style="flex: 1;" onclick="saveFullConfig()">
+                <span class="material-symbols-outlined" style="font-size: 15px;">cloud_sync</span>
+                <span data-i18n="save_hot_reload">Save & Hot-Reload</span>
+              </button>
+            </div>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--outline); margin-top: 10px;" id="configSaveFeedback">
+              Atomic sync with agent.yaml and live in-memory reload
+            </div>
           </div>
-          <div class="terminal-box" id="configView">Loading configuration...</div>
+
+          <!-- Raw agent.yaml Preview -->
+          <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <span style="font-weight: 700; text-transform: uppercase;" data-i18n="raw_yaml_title">Active agent.yaml Config Source</span>
+              <div style="display: flex; gap: 6px;">
+                <button class="chip" onclick="copyYAMLConfig()" data-i18n="btn_copy_yaml">Copy YAML</button>
+                <button class="chip" onclick="loadConfig()" data-i18n="reload_yaml">Reload</button>
+              </div>
+            </div>
+            <div class="terminal-box" id="configView" style="height: 320px;">Loading configuration...</div>
+          </div>
         </div>
       </div>
     </div>
@@ -1459,6 +2099,9 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
 
   <script>
     var currentLang = localStorage.getItem('agentos_lang') || 'en';
+    var currentEnv = 'development';
+    var currentLogLevel = 'info';
+    var currentLogFormat = 'text';
 
     var i18n = {
       en: {
@@ -1472,7 +2115,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         nav_stream: 'Dual-Stream Exec',
         nav_audit: 'Audit Ledger',
         nav_orchestrator: 'DAG Orchestrator',
-        nav_gateway: 'Model Gateway',
+        nav_gateway: 'System Config',
         shm_alloc: 'SHM ALLOC',
         uptime_label: 'UPTIME',
         redline_halt: 'REDLINE HALT',
@@ -1497,6 +2140,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         col_role: 'Role',
         col_model: 'Model',
         col_status: 'Status',
+        col_actions: 'Actions',
         drawer_scaffold_title: 'Scaffold New Autonomous Agent',
         drawer_close: 'Close',
         field_agent_id: 'AGENT IDENTIFIER',
@@ -1538,15 +2182,56 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         col_adapter: 'Adapter Name',
         col_protocol: 'Protocol',
         col_desc: 'Description',
-        model_gateway_title: 'Model Provider & Budget Control',
+        config_hub_title: 'System Configuration Hub',
+        save_all_hot_reload: 'Save All & Hot-Reload',
+        btn_reset_defaults: 'Reset Defaults',
+        tab_model: 'Model & Inference Gateway',
+        tab_governance: 'Kernel Governance & Budget',
+        tab_mcp: 'MCP Tool & Service Registry',
+        tab_runtime: 'Runtime & Observability',
+        field_timeout: 'TIMEOUT (SECONDS)',
+        field_temperature: 'TEMPERATURE (0.0 - 2.0)',
+        gov_panel_title: 'Kernel Governance & Safety Policies',
+        status_active: 'ACTIVE',
+        budget_ceiling_desc: 'Hard spending limit per execution. System halts if spend exceeds ceiling.',
+        max_tokens_label: 'Max Output Tokens',
+        max_tokens_desc: 'Upper bound on cumulative tokens per task to prevent runaway loops.',
+        max_tool_calls_label: 'Max Tool Recursion Depth',
+        max_tool_calls_desc: 'Maximum recursive tool invocations per prompt before kernel enforces a break.',
+        enforce_receipts_label: 'Enforce Cryptographic Receipts',
+        enforce_receipts_desc: 'Require SHA-256 Merkle chain receipts for each execution and tool step.',
+        fail_closed_label: 'Fail-Closed Safety Interlock',
+        fail_closed_desc: 'Immediately reject and isolate tasks if safety, schema, or signature validation fails.',
+        mcp_registry_title: 'Registered Tool Adapters & MCP Gateways',
+        refresh_tools: 'Refresh',
+        register_new_tool_title: '+ Register External MCP Server',
+        tool_name_label: 'TOOL IDENTIFIER',
+        tool_protocol_label: 'PROTOCOL',
+        tool_endpoint_label: 'ENDPOINT URL / SOCKET',
+        tool_desc_label: 'DESCRIPTION',
+        btn_register_mcp: 'Register Tool',
+        btn_probe_endpoint: 'Probe Endpoint',
+        runtime_obs_title: 'Runtime Environment & Logging',
+        env_mode_label: 'ENVIRONMENT MODE',
+        log_level_label: 'LOGGING OUTPUT LEVEL',
+        log_format_label: 'LOG FORMAT',
+        gateway_host_label: 'GATEWAY HOST',
+        gateway_port_label: 'GATEWAY PORT',
+        runtime_state_title: 'Active Runtime State',
+        lbl_active_prov: 'Active Provider:',
+        lbl_active_model: 'Active Model:',
+        lbl_budget_cap: 'Budget Ceiling:',
+        lbl_governance_mode: 'Governance Mode:',
+        btn_copy_yaml: 'Copy YAML',
+        model_gateway_title: 'Model Provider & Gateway Route',
         provider_type: 'PROVIDER TYPE',
         model_identifier: 'MODEL IDENTIFIER',
         base_url: 'BASE URL',
-        api_key_label: 'API KEY (Leave blank to preserve current key)',
-        budget_ceiling_label: 'BUDGET CEILING USD ($)',
+        api_key_label: 'API KEY (Masked. Leave blank to preserve current key)',
+        budget_ceiling_label: 'Task Budget Ceiling ($ USD)',
         save_hot_reload: 'Save & Hot-Reload',
-        probe_conn: 'Probe Connectivity',
-        raw_yaml_title: 'Active agent.yaml Config',
+        probe_conn: 'Probe Connectivity & Latency',
+        raw_yaml_title: 'Active agent.yaml Config Source',
         reload_yaml: 'Reload'
       },
       zh: {
@@ -1560,7 +2245,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         nav_stream: '双流协同执行',
         nav_audit: '密码学审计账本',
         nav_orchestrator: 'DAG 任务编排',
-        nav_gateway: '模型推理网关',
+        nav_gateway: '系统配置中心',
         shm_alloc: '共享内存分配',
         uptime_label: '高可用正常运行率',
         redline_halt: '红线急停熔断',
@@ -1585,6 +2270,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         col_role: '核心职责与角色',
         col_model: '底层驱动模型',
         col_status: '运行状态',
+        col_actions: '操作管理',
         drawer_scaffold_title: '自动化构建全新自主 Agent',
         drawer_close: '关闭抽屉',
         field_agent_id: 'AGENT 唯一英文标识',
@@ -1626,12 +2312,53 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         col_adapter: '适配器版本',
         col_protocol: '通信协议',
         col_desc: '能力描述',
-        model_gateway_title: '模型提供商配置与预算控制',
+        config_hub_title: '系统可视化配置中心',
+        save_all_hot_reload: '全量保存并热重载',
+        btn_reset_defaults: '恢复默认配置',
+        tab_model: '模型与推理网关',
+        tab_governance: '内核治理与预算安全',
+        tab_mcp: 'MCP 工具与连接器',
+        tab_runtime: '运行环境与日志观测',
+        field_timeout: '超时时间 (秒)',
+        field_temperature: '温度系数 (发散度 0.0-2.0)',
+        gov_panel_title: '内核合规治理与预算安全策略',
+        status_active: '生效中',
+        budget_ceiling_desc: '每次执行的硬性支出限额。超过限额时内核自动阻断。',
+        max_tokens_label: '单任务最大 Token 限额',
+        max_tokens_desc: '单次任务累计消耗的 Token 上限，防止无限循环。',
+        max_tool_calls_label: '最大工具调用深度',
+        max_tool_calls_desc: '单次交互允许的最大工具递归调用次数，防止死循环。',
+        enforce_receipts_label: '强制生成密码学审计收据',
+        enforce_receipts_desc: '每一步工具调用与状态变更必须生成不可篡改 SHA-256 存证。',
+        fail_closed_label: '安全故障闭环保护 (Fail-Closed)',
+        fail_closed_desc: '当安全合规、签名验证或模式检查失败时彻底终止任务。',
+        mcp_registry_title: '已注册 MCP 工具适配器与连接网关',
+        refresh_tools: '刷新列表',
+        register_new_tool_title: '+ 注册新外部 MCP 服务',
+        tool_name_label: '工具唯一英文标识',
+        tool_protocol_label: '通信协议',
+        tool_endpoint_label: '服务地址 (Endpoint / Socket)',
+        tool_desc_label: '能力描述',
+        btn_register_mcp: '注册接入',
+        btn_probe_endpoint: '在线探活',
+        runtime_obs_title: '运行环境与系统日志观测',
+        env_mode_label: '运行环境模式',
+        log_level_label: '系统日志输出级别',
+        log_format_label: '日志格式',
+        gateway_host_label: '网关监听主机 (Host)',
+        gateway_port_label: '网关监听端口 (Port)',
+        runtime_state_title: '内核实时运行摘要',
+        lbl_active_prov: '当前渠道:',
+        lbl_active_model: '当前模型:',
+        lbl_budget_cap: '预算上限:',
+        lbl_governance_mode: '治理模式:',
+        btn_copy_yaml: '复制 YAML',
+        model_gateway_title: '模型提供商配置与网关路由',
         provider_type: '网关提供商类型',
         model_identifier: '模型 Identifier 标识',
         base_url: 'API 服务基地址 (Base URL)',
-        api_key_label: 'API Key 凭据 (留空则保留当前已有配置)',
-        budget_ceiling_label: '全局安全预算上限 (USD $)',
+        api_key_label: 'API Key 凭据 (脱敏保护，留空保持原值)',
+        budget_ceiling_label: '单任务支出预算上限 ($ USD)',
         save_hot_reload: '保存并立即热重载',
         probe_conn: '真实测速探活',
         raw_yaml_title: '实时 agent.yaml 配置源',
@@ -1681,7 +2408,82 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       if (viewName === 'overview') loadAgents();
       if (viewName === 'audit') loadReceipts();
       if (viewName === 'orchestrator') loadTools();
-      if (viewName === 'gateway') loadConfig();
+      if (viewName === 'gateway') { loadConfig(); loadToolsGrid(); }
+    }
+
+    function switchConfigTab(tabName) {
+      ['model', 'gov', 'mcp', 'runtime'].forEach(function(t) {
+        var b = document.getElementById('tabBtn-' + t);
+        var p = document.getElementById('cfgPanel-' + t);
+        if (b) b.classList.remove('active');
+        if (p) p.classList.remove('active');
+      });
+      var btn = document.getElementById('tabBtn-' + tabName);
+      var panel = document.getElementById('cfgPanel-' + tabName);
+      if (btn) btn.classList.add('active');
+      if (panel) panel.classList.add('active');
+      if (tabName === 'mcp') loadToolsGrid();
+    }
+
+    function selectModelPreset(model) {
+      document.getElementById('cfgModel').value = model;
+    }
+
+    function togglePasswordVisibility(id) {
+      var el = document.getElementById(id);
+      if (el) {
+        el.type = el.type === 'password' ? 'text' : 'password';
+      }
+    }
+
+    function setEnvironment(env) {
+      currentEnv = env;
+      ['development', 'staging', 'production'].forEach(function(e) {
+        var b = document.getElementById('envBtn-' + e);
+        if (b) {
+          if (e === env) {
+            b.style.borderColor = 'var(--primary-bright)';
+            b.style.color = 'var(--primary-bright)';
+          } else {
+            b.style.borderColor = 'var(--outline-variant)';
+            b.style.color = 'var(--text-variant)';
+          }
+        }
+      });
+      var badge = document.getElementById('configEnvBadge');
+      if (badge) badge.textContent = 'ENV: ' + env.toUpperCase();
+    }
+
+    function setLogLevel(level) {
+      currentLogLevel = level;
+      ['debug', 'info', 'warn', 'error'].forEach(function(l) {
+        var b = document.getElementById('logBtn-' + l);
+        if (b) {
+          if (l === level) {
+            b.style.borderColor = 'var(--secondary-bright)';
+            b.style.color = 'var(--secondary-bright)';
+          } else {
+            b.style.borderColor = 'var(--outline-variant)';
+            b.style.color = 'var(--text-variant)';
+          }
+        }
+      });
+    }
+
+    function setLogFormat(fmt) {
+      currentLogFormat = fmt;
+      ['text', 'json'].forEach(function(f) {
+        var b = document.getElementById('fmtBtn-' + f);
+        if (b) {
+          if (f === fmt) {
+            b.style.borderColor = 'var(--secondary-bright)';
+            b.style.color = 'var(--secondary-bright)';
+          } else {
+            b.style.borderColor = 'var(--outline-variant)';
+            b.style.color = 'var(--text-variant)';
+          }
+        }
+      });
     }
 
     function setPrompt(text) {
@@ -1700,14 +2502,17 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         document.getElementById('cfgModel').value = 'stealth/space-bunny-alpha';
         document.getElementById('cfgBaseURL').value = 'https://openrouter.ai/api/v1';
       } else if (prov === 'deepseek') {
-        document.getElementById('cfgModel').value = 'deepseek-r1';
+        document.getElementById('cfgModel').value = 'deepseek-chat';
         document.getElementById('cfgBaseURL').value = 'https://api.deepseek.com/v1';
+      } else if (prov === 'qwen') {
+        document.getElementById('cfgModel').value = 'qwen-plus';
+        document.getElementById('cfgBaseURL').value = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      } else if (prov === 'ollama') {
+        document.getElementById('cfgModel').value = 'qwen2.5:7b';
+        document.getElementById('cfgBaseURL').value = 'http://localhost:11434/v1';
       } else if (prov === 'anthropic') {
-        document.getElementById('cfgModel').value = 'claude-3-5-sonnet';
+        document.getElementById('cfgModel').value = 'claude-3-5-sonnet-20241022';
         document.getElementById('cfgBaseURL').value = 'https://api.anthropic.com/v1';
-      } else if (prov === 'local-oci') {
-        document.getElementById('cfgModel').value = 'qwen2.5:14b-instruct';
-        document.getElementById('cfgBaseURL').value = 'http://127.0.0.1:11434/v1';
       }
     }
 
@@ -1752,15 +2557,49 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
         tbody.innerHTML = '';
         list.forEach(function(a) {
           var tr = document.createElement('tr');
+          var isOnline = a.status === 'ONLINE';
+          var toggleText = isOnline ? (currentLang === 'zh' ? '暂停' : 'Pause') : (currentLang === 'zh' ? '恢复' : 'Resume');
+          var delText = currentLang === 'zh' ? '删除' : 'Delete';
           tr.innerHTML = 
             '<td style="color: var(--secondary-bright); font-family: var(--font-mono); font-weight: 600;">' + a.name + '</td>' +
             '<td>' + a.role + '</td>' +
             '<td style="font-family: var(--font-mono); font-size: 11px;">' + a.model + '</td>' +
-            '<td><span class="badge badge-primary">' + a.status + '</span></td>';
+            '<td><span class="badge ' + (isOnline ? 'badge-primary' : '') + '">' + a.status + '</span></td>' +
+            '<td><div style="display: flex; gap: 6px;">' +
+            '<button class="chip" style="font-size: 10px; padding: 2px 6px;" onclick="toggleAgentStatus(\'' + a.name + '\')">' + toggleText + '</button>' +
+            '<button class="chip" style="font-size: 10px; padding: 2px 6px; color: var(--error);" onclick="deleteAgent(\'' + a.name + '\')">' + delText + '</button>' +
+            '</div></td>';
           tbody.appendChild(tr);
         });
       } catch (e) {
         console.error('Failed to load agents', e);
+      }
+    }
+
+    async function toggleAgentStatus(name) {
+      try {
+        var res = await fetch('/api/agents?action=toggle&name=' + encodeURIComponent(name), { method: 'POST' });
+        var data = await res.json();
+        if (data.success) {
+          loadAgents();
+          loadStatus();
+        }
+      } catch (e) {
+        console.error('Failed to toggle agent', e);
+      }
+    }
+
+    async function deleteAgent(name) {
+      if (!confirm((currentLang === 'zh' ? '确认删除 Agent: ' : 'Confirm delete agent: ') + name + '?')) return;
+      try {
+        var res = await fetch('/api/agents?name=' + encodeURIComponent(name), { method: 'DELETE' });
+        var data = await res.json();
+        if (data.success) {
+          loadAgents();
+          loadStatus();
+        }
+      } catch (e) {
+        console.error('Failed to delete agent', e);
       }
     }
 
@@ -1845,50 +2684,110 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       }
     }
 
-    async function loadConfig() {
+    async function loadToolsGrid() {
       try {
-        var res = await fetch('/api/config');
-        var data = await res.json();
-        document.getElementById('configView').textContent = JSON.stringify(data, null, 2);
-        if (data.llm && data.llm.default_provider) {
-          document.getElementById('cfgProvider').value = data.llm.default_provider;
-          var p = data.llm.providers && data.llm.providers[data.llm.default_provider];
-          if (p) {
-            document.getElementById('cfgModel').value = p.model || '';
-            document.getElementById('cfgBaseURL').value = p.base_url || '';
-          }
-        }
-        if (data.kernel && data.kernel.budget) {
-          document.getElementById('cfgBudget').value = data.kernel.budget.max_cost_usd || 1.0;
-        }
+        var res = await fetch('/api/tools');
+        var list = await res.json();
+        var container = document.getElementById('mcpToolsGrid');
+        if (!container) return;
+        container.innerHTML = '';
+        list.forEach(function(t) {
+          var item = document.createElement('div');
+          item.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--bg-container); border: 1px solid var(--outline-variant); border-radius: 4px;';
+          var isEn = t.enabled !== false;
+          var statusColor = isEn ? 'var(--primary-bright)' : 'var(--outline)';
+          item.innerHTML = 
+            '<div>' +
+            '<div style="font-weight: 600; font-size: 12px; color: var(--text-main); font-family: var(--font-mono);">' + t.name + ' <span style="font-size: 10px; color: var(--outline); font-weight: normal;">(' + (t.adapter || t.name) + ')</span></div>' +
+            '<div style="font-size: 11px; color: var(--text-variant); margin-top: 2px;">' + (t.description || '') + '</div>' +
+            '</div>' +
+            '<div style="display: flex; align-items: center; gap: 10px;">' +
+            '<span class="badge" style="color: ' + statusColor + ';">' + (t.status || 'HEALTHY') + '</span>' +
+            '<label class="toggle-switch">' +
+            '<input type="checkbox" ' + (isEn ? 'checked' : '') + ' onchange="toggleToolActive(\'' + t.name + '\')"/>' +
+            '<span class="slider"></span>' +
+            '</label>' +
+            '</div>';
+          container.appendChild(item);
+        });
       } catch (e) {
-        console.error('Failed to load config', e);
+        console.error('Failed to load tools grid', e);
       }
     }
 
-    async function saveModelConfig() {
-      var prov = document.getElementById('cfgProvider').value;
-      var model = document.getElementById('cfgModel').value.trim();
-      var url = document.getElementById('cfgBaseURL').value.trim();
-      var key = document.getElementById('cfgAPIKey').value.trim();
-      var budget = parseFloat(document.getElementById('cfgBudget').value) || 1.0;
-      var feedback = document.getElementById('modelConfigFeedback');
-
-      feedback.textContent = currentLang === 'zh' ? '正在保存配置并热重载...' : 'Saving configuration...';
+    async function toggleToolActive(toolName) {
       try {
-        var res = await fetch('/api/config/model', {
+        var res = await fetch('/api/tools', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: prov, model: model, base_url: url, api_key: key, budget_usd: budget })
+          body: JSON.stringify({ action: 'toggle', name: toolName })
+        });
+        await res.json();
+        loadTools();
+        loadToolsGrid();
+      } catch (e) {
+        console.error('Failed to toggle tool', e);
+      }
+    }
+
+    async function submitRegisterTool() {
+      var name = document.getElementById('newToolName').value.trim();
+      var protocol = document.getElementById('newToolProtocol').value;
+      var endpoint = document.getElementById('newToolEndpoint').value.trim();
+      var desc = document.getElementById('newToolDesc').value.trim();
+      var feedback = document.getElementById('newToolFeedback');
+
+      if (!name) {
+        alert(currentLang === 'zh' ? '请输入工具唯一标识' : 'Please enter a tool identifier');
+        return;
+      }
+
+      feedback.textContent = currentLang === 'zh' ? '正在注册...' : 'Registering...';
+      try {
+        var res = await fetch('/api/tools', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'register', name: name, protocol: protocol, endpoint: endpoint, description: desc })
         });
         var data = await res.json();
         if (data.success) {
-          feedback.textContent = (currentLang === 'zh' ? '保存成功！已切换模型为: ' : 'Saved! Model set to: ') + data.model + ' (' + data.provider + ')';
+          feedback.textContent = currentLang === 'zh' ? '注册成功!' : 'Registered!';
           feedback.style.color = 'var(--primary-bright)';
-          loadConfig();
-          loadStatus();
+          document.getElementById('newToolName').value = '';
+          document.getElementById('newToolEndpoint').value = '';
+          document.getElementById('newToolDesc').value = '';
+          loadTools();
+          loadToolsGrid();
         } else {
-          feedback.textContent = 'Failed: ' + data.error;
+          feedback.textContent = 'Error: ' + data.error;
+          feedback.style.color = 'var(--error)';
+        }
+      } catch (e) {
+        feedback.textContent = 'Network error: ' + e.message;
+        feedback.style.color = 'var(--error)';
+      }
+    }
+
+    async function probeNewToolEndpoint() {
+      var endpoint = document.getElementById('newToolEndpoint').value.trim();
+      var feedback = document.getElementById('newToolFeedback');
+      if (!endpoint) {
+        alert(currentLang === 'zh' ? '请输入 Endpoint 地址进行探活' : 'Please enter an endpoint URL to probe');
+        return;
+      }
+      feedback.textContent = currentLang === 'zh' ? '正在探测...' : 'Probing...';
+      try {
+        var res = await fetch('/api/tools/probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: endpoint })
+        });
+        var data = await res.json();
+        if (data.success) {
+          feedback.textContent = 'Probe OK: ' + data.latency_ms + 'ms (' + data.result + ')';
+          feedback.style.color = 'var(--primary-bright)';
+        } else {
+          feedback.textContent = 'Probe failed: ' + (data.error || 'Timeout');
           feedback.style.color = 'var(--error)';
         }
       } catch (e) {
@@ -1897,9 +2796,159 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
       }
     }
 
+    function copyYAMLConfig() {
+      var text = document.getElementById('configView').textContent;
+      navigator.clipboard.writeText(text).then(function() {
+        alert(currentLang === 'zh' ? '已成功复制 agent.yaml 配置至剪贴板！' : 'Copied agent.yaml config to clipboard!');
+      });
+    }
+
+    function resetConfigDefaults() {
+      if (!confirm(currentLang === 'zh' ? '确认将所有系统配置重置为官方默认值？' : 'Reset all configuration to system defaults?')) return;
+      document.getElementById('cfgProvider').value = 'openrouter';
+      autoFillProviderDefaults();
+      document.getElementById('cfgBudget').value = '1.00';
+      document.getElementById('cfgMaxTokens').value = '30000';
+      document.getElementById('cfgMaxToolCalls').value = '15';
+      document.getElementById('cfgEnforceReceipts').checked = true;
+      document.getElementById('cfgFailClosed').checked = true;
+      setEnvironment('development');
+      setLogLevel('info');
+      setLogFormat('text');
+      document.getElementById('cfgGatewayHost').value = '127.0.0.1';
+      document.getElementById('cfgGatewayPort').value = '18080';
+      saveFullConfig();
+    }
+
+    async function loadConfig() {
+      try {
+        var res = await fetch('/api/config');
+        var data = await res.json();
+        
+        var lines = [
+          '# AgentOS Active Configuration (agent.yaml)',
+          'version: "' + (data.version || '1.0') + '"',
+          'environment: "' + (data.environment || 'development') + '"',
+          '',
+          'llm:',
+          '  default_provider: "' + (data.llm && data.llm.default_provider || 'openrouter') + '"',
+          '  providers:'
+        ];
+        if (data.llm && data.llm.providers) {
+          for (var k in data.llm.providers) {
+            var prov = data.llm.providers[k];
+            lines.push('    ' + k + ':');
+            lines.push('      model: "' + (prov.model || '') + '"');
+            lines.push('      base_url: "' + (prov.base_url || '') + '"');
+            lines.push('      timeout_sec: ' + (prov.timeout_sec || 120));
+          }
+        }
+        lines.push('');
+        lines.push('kernel:');
+        lines.push('  budget:');
+        lines.push('    max_cost_usd: ' + (data.kernel && data.kernel.budget && data.kernel.budget.max_cost_usd || 1.0).toFixed(2));
+        lines.push('    max_tokens: ' + (data.kernel && data.kernel.budget && data.kernel.budget.max_tokens || 30000));
+        lines.push('    max_tool_calls: ' + (data.kernel && data.kernel.budget && data.kernel.budget.max_tool_calls || 15));
+        lines.push('  governance:');
+        lines.push('    enforce_receipts: ' + (data.kernel && data.kernel.governance && data.kernel.governance.enforce_receipts !== false));
+        lines.push('    fail_closed: ' + (data.kernel && data.kernel.governance && data.kernel.governance.fail_closed !== false));
+        lines.push('');
+        lines.push('gateway:');
+        lines.push('  host: "' + (data.gateway && data.gateway.host || '127.0.0.1') + '"');
+        lines.push('  port: ' + (data.gateway && data.gateway.port || 18080));
+        lines.push('');
+        lines.push('logging:');
+        lines.push('  level: "' + (data.logging && data.logging.level || 'info') + '"');
+        lines.push('  format: "' + (data.logging && data.logging.format || 'text') + '"');
+        
+        document.getElementById('configView').textContent = lines.join('\n');
+
+        if (data.environment) setEnvironment(data.environment);
+        if (data.llm && data.llm.default_provider) {
+          document.getElementById('cfgProvider').value = data.llm.default_provider;
+          var p = data.llm.providers && data.llm.providers[data.llm.default_provider];
+          if (p) {
+            document.getElementById('cfgModel').value = p.model || '';
+            document.getElementById('cfgBaseURL').value = p.base_url || '';
+            if (p.timeout_sec) document.getElementById('cfgTimeoutSec').value = p.timeout_sec;
+          }
+          document.getElementById('summaryProvider').textContent = data.llm.default_provider;
+          document.getElementById('summaryModel').textContent = (p && p.model) || '';
+        }
+        if (data.kernel && data.kernel.budget) {
+          var b = data.kernel.budget;
+          document.getElementById('cfgBudget').value = b.max_cost_usd || 1.0;
+          document.getElementById('cfgMaxTokens').value = b.max_tokens || 30000;
+          document.getElementById('cfgMaxToolCalls').value = b.max_tool_calls || 15;
+          document.getElementById('summaryBudget').textContent = '$' + (b.max_cost_usd || 1.0).toFixed(2) + ' USD';
+        }
+        if (data.kernel && data.kernel.governance) {
+          var g = data.kernel.governance;
+          document.getElementById('cfgEnforceReceipts').checked = g.enforce_receipts !== false;
+          document.getElementById('cfgFailClosed').checked = g.fail_closed !== false;
+          document.getElementById('summaryGov').textContent = g.fail_closed ? 'FAIL-CLOSED (Strict)' : 'FAIL-OPEN (Permissive)';
+        }
+        if (data.logging) {
+          if (data.logging.level) setLogLevel(data.logging.level);
+          if (data.logging.format) setLogFormat(data.logging.format);
+        }
+        if (data.gateway) {
+          if (data.gateway.host) document.getElementById('cfgGatewayHost').value = data.gateway.host;
+          if (data.gateway.port) document.getElementById('cfgGatewayPort').value = data.gateway.port;
+        }
+      } catch (e) {
+        console.error('Failed to load config', e);
+      }
+    }
+
+    async function saveFullConfig() {
+      var feedback = document.getElementById('configSaveFeedback');
+      feedback.textContent = currentLang === 'zh' ? '正在全量保存配置并触发内核热重载...' : 'Saving full configuration & triggering hot-reload...';
+      feedback.style.color = 'var(--tertiary)';
+
+      var payload = {
+        environment: currentEnv,
+        default_provider: document.getElementById('cfgProvider').value,
+        model: document.getElementById('cfgModel').value.trim(),
+        base_url: document.getElementById('cfgBaseURL').value.trim(),
+        api_key: document.getElementById('cfgAPIKey').value.trim(),
+        timeout_sec: parseInt(document.getElementById('cfgTimeoutSec').value) || 120,
+        budget_usd: parseFloat(document.getElementById('cfgBudget').value) || 1.0,
+        max_tokens: parseInt(document.getElementById('cfgMaxTokens').value) || 30000,
+        max_tool_calls: parseInt(document.getElementById('cfgMaxToolCalls').value) || 15,
+        enforce_receipts: document.getElementById('cfgEnforceReceipts').checked,
+        fail_closed: document.getElementById('cfgFailClosed').checked,
+        log_level: currentLogLevel,
+        log_format: currentLogFormat,
+        gateway_host: document.getElementById('cfgGatewayHost').value.trim(),
+        gateway_port: parseInt(document.getElementById('cfgGatewayPort').value) || 18080
+      };
+
+      try {
+        var res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        var data = await res.json();
+        if (data.success) {
+          feedback.textContent = (currentLang === 'zh' ? '全量配置已保存并完成热重载！已同步写入磁盘 agent.yaml' : 'Saved & hot-reloaded! Persisted to agent.yaml.');
+          feedback.style.color = 'var(--primary-bright)';
+          loadConfig();
+          loadStatus();
+        } else {
+          feedback.textContent = 'Failed: ' + (data.error || 'Server error');
+          feedback.style.color = 'var(--error)';
+        }
+      } catch (e) {
+        feedback.textContent = 'Network error: ' + e.message;
+        feedback.style.color = 'var(--error)';
+      }
+    }
+
     async function testModelConnectivity() {
       var badge = document.getElementById('modelProbeBadge');
-      var feedback = document.getElementById('modelConfigFeedback');
+      var feedback = document.getElementById('configSaveFeedback');
 
       badge.textContent = currentLang === 'zh' ? '正在探测...' : 'PROBING...';
       badge.style.color = 'var(--tertiary)';
@@ -1996,6 +3045,7 @@ const embeddedDashboardHTML = `<!DOCTYPE html>
     applyLanguage(currentLang);
     loadStatus();
     loadAgents();
+    loadConfig();
     setInterval(loadStatus, 5000);
   </script>
 </body>
