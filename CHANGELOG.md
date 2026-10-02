@@ -7,6 +7,10 @@ public protocol versions evolve independently.
 ## Unreleased
 
 ### Changed
+- The public README uses the Fenced brand with a formerly AgentOS transition
+  note. CLI, SDK, module, and protocol identifiers retain their existing names.
+  A minimal Runtime Interface trial is shown first; full setup and validation
+  commands are retained in `docs/development.md` with explicit evidence limits.
 - The developer interface is CLI-only: `agent ui` no longer starts for external access and is limited to the loopback-bound internal preview (`agent ui --preview`); `agent config wizard` is the supported interactive configuration path.
 - AgentService replicas execute through durable Tasks and the existing admission,
   scheduler, and Runtime Protocol. Service creation requires a published version
