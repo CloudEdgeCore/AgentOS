@@ -1,4 +1,5 @@
-# Default values for agentos Helm Chart.
+# Production Control API only. Configure the required fields below before
+# installing; credentials live in existing Secrets in the release namespace.
 
 replicaCount: 2
 
@@ -9,7 +10,10 @@ image:
 
 serviceAccount:
   create: true
-  name: "agentos-kernel"
+  # Empty uses a release-specific name when create=true, or "default" otherwise.
+  name: ""
+  annotations: {}
+  automountToken: false
 
 controlPlane:
   port: 8080
@@ -24,51 +28,31 @@ controlPlane:
       cpu: 500m
       memory: 1Gi
 
-controller:
-  id: "k8s-controller-fleet"
-  leaseTtl: "30s"
-  reapInterval: "10s"
-  resources:
-    limits:
-      cpu: 1000m
-      memory: 2Gi
-    requests:
-      cpu: 250m
-      memory: 512Mi
+# External PostgreSQL must already contain the AgentOS schema and extensions.
+database:
+  existingSecret: ""
+  secretKey: "database-url"
 
-# External or bundled PostgreSQL
-postgresql:
-  enabled: true
-  auth:
-    database: agentos
-    username: agentos
-    password: "change-me-in-production"
-  primary:
-    persistence:
-      enabled: true
-      size: 50Gi
-
-# External or bundled NATS JetStream
-nats:
-  enabled: true
-  jetstream:
-    enabled: true
-    memStorage:
-      enabled: true
-      size: 4Gi
-
-# Gateway capabilities and default tenant
+# OIDC ID tokens supply the tenant scope; there is no static development tenant.
 security:
-  devTenant: "prod"
-  spiffeEnabled: false
-  mtlsRequired: false
+  oidc:
+    issuer: ""
+    clientID: ""
+    tenantClaim: "tenant"
+  tls:
+    existingSecret: ""
+    certificateKey: "tls.crt"
+    privateKeyKey: "tls.key"
+  audit:
+    existingSecret: ""
+    privateKeyKey: "audit-signing-key"
+    keyID: "control-plane-audit"
+  packageTrust:
+    existingSecret: ""
+    keysKey: "package-trust-keys"
 
-ingress:
-  enabled: false
-  className: "nginx"
-  annotations: {}
-  hosts:
-    - host: agentos.internal.example.com
-      paths:
-        - path: /
-          pathType: ImplementationSpecific
+embedding:
+  endpoint: ""
+  # Optional for embedding services that accept unauthenticated requests.
+  tokenSecret: ""
+  tokenSecretKey: "token"

@@ -86,7 +86,7 @@ flowchart TD
 | **AgentVersion** | 发布到控制面后的只读、不可变版本对象，内容与哈希完全绑定。 | [`internal/kernel/agentversion`](../internal/kernel/agentversion) |
 | **AgentPackage** | 符合 OCI 规范的数字签名包，携带 SBOM 清单、Spec 摘要与 Provenance 来源凭据。 | [`internal/kernel/agentpkg`](../internal/kernel/agentpkg) |
 | **Task & Run & Attempt** | **单次批处理模型**：一个 Task 代表一次业务目标；包含若干次重试的 Run；每次真正派发到 Worker 执行的实体为 Attempt（非可抢占、租约栅栏保护）。 | [`internal/kernel/task`](../internal/kernel/task) |
-| **Service & Instance** | **长运行常驻模型**：长期运行的 Agent 守护进程，具备心跳探测、自动拉起、滚动升级与零停机排空。 | [`proto/agentos/service/v1/service.proto`](../proto/agentos/service/v1/service.proto) |
+| **Service & Instance** | **受监管副本模型**：每个服务实例绑定一个持久化 Task，复用准入、调度、租约和 Runtime 执行；Supervisor 管理副本、心跳与重启策略。 | [`proto/agentos/service/v1/service.proto`](../proto/agentos/service/v1/service.proto) |
 | **Syscall ABI 1.0.0** | 内核标准系统调用规范，抽象了模型推理、工具执行、内存存取、IPC 通信、服务调用等 8 大子系统。 | [`proto/agentos/syscall/v1/syscall.proto`](../proto/agentos/syscall/v1/syscall.proto) |
 
 ---
@@ -552,48 +552,91 @@ modelProv, _ := reg.GetModelProvider("openai")
 
 ## 7. 常驻服务与 Supervisor 进程监管
 
-不同于批处理任务（Task），**AgentService** 专为需要 7x24 小时保持在线、监听外部事件、充当跨租户网关或执行长轮询监视的 Agent 守护进程而设计。
+**AgentService** 声明需要维持的 Agent 副本数及重启策略。Supervisor 为每个实例提交一个持久化 Task，实际执行沿用 `Task → Run → Attempt → Runtime` 链路，因此服务同样受到版本准入、租户策略、预算、调度容量和执行时限约束。重启创建新的执行任务，实例的 `taskId` 可用于追踪普通 Task 状态和事件。
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Starting: agentos service create
-    Starting --> Serving: Healthcheck OK
-    Serving --> Degraded: Healthcheck Failed / High Load
-    Degraded --> Serving: Self Healed
-    Serving --> Terminating: Stop / Drain
-    Serving --> Crashed: Panic / Process Exit
+    [*] --> Starting: Create Task / Schedule
+    Starting --> Running: Runtime attempt and heartbeat
+    Running --> Degraded: Heartbeat overdue
+    Degraded --> Running: Heartbeat renewed
+    Running --> Terminating: Stop / Drain
+    Running --> Crashed: Attempt failed
     Crashed --> Starting: Supervisor Restart (Backoff)
     Terminating --> [*]: Clean Exit
 ```
 
 ### 7.1 服务注册与启动
 
+先发布与命名空间匹配的 AgentVersion，并启动允许其运行类的 Worker 及 Runtime Interface 端点；相应运行池必须已向调度器注册。以下命令假定 `agent.json` 声明了默认命名空间下的 `customer-service-bot@1.0.0`，允许 `remote` 运行类，且版本预算不小于任务预算。`-spec` 必须指向 JSON 对象，包含普通 Task 所需的 `budget`、`placement` 等字段；这些内容仍由服务端准入校验。
+
 ```bash
-# 创建并启动一个新的守护服务
+./bin/agentos publish -manifest agent.json
+
+cat > service-task-spec.json <<'JSON'
+{
+  "budget": {
+    "tokens": 2000,
+    "costUsd": 0.10,
+    "toolCalls": 8,
+    "wallSeconds": 120
+  },
+  "placement": {
+    "runtimeClasses": ["remote"],
+    "preferredClass": "remote",
+    "region": "cn-east",
+    "cpuMillis": 100,
+    "memoryMiB": 128,
+    "workspaceBytes": 1048576,
+    "llmConcurrency": 1
+  }
+}
+JSON
+
+# 提交一个受监管副本；调度与实际启动异步进行
 ./bin/agentos service create \
   -name "customer-service-bot" \
-  -agent "default/customer-service-bot@1.0.0" \
+  -agent "customer-service-bot@1.0.0" \
   -namespace "default" \
-  -replicas 2 \
+  -spec service-task-spec.json \
+  -runtime-class "remote" \
+  -replicas 1 \
   -restart-policy "Always"
 
-# 查看服务实例与健康状态
-./bin/agentos service instances <serviceId>
+# 将创建响应中的 id 填入 SERVICE_ID
+SERVICE_ID=your-service-id
+./bin/agentos service instances "$SERVICE_ID"
+
+# 将实例响应中的 taskId 填入 TASK_ID，跟踪实际执行事件
+TASK_ID=your-task-id
+./bin/agentos logs -task "$TASK_ID"
 ```
+
+默认命名空间的规范版本引用写作 `name@version`；其他命名空间写作 `namespace/name@version`，必须与 `-namespace` 相同。`-runtime-class` 可省略，此时按版本策略和工作负载 placement 调度。API 的 `spec.agentVersionRef` 固定服务使用的版本，`spec.workloadSpec` 保存上述 Task 配置。
+
+升级控制面和 controller 前，先应用数据库迁移 `000037`。旧 Supervisor 的实例只记录状态，没有实际 Runtime Task；迁移会清除这些实例的虚假就绪状态，并结束没有底层进程的旧 drain 状态。为已有服务补齐已发布的 `spec.agentVersionRef` 和 `spec.workloadSpec` 后，Supervisor 才会创建受准入监管的执行任务。未配置完整的旧服务会保持未就绪，并在调谐时报告配置错误。
+
+每个运行中的副本都需要实际 Worker 执行槽。当前 adapter Worker 同步执行一个 assignment；一个阻塞的常驻任务会占用该 Worker，因此增加副本数时必须准备足够的独立 Worker/运行池槽，Runtime Host 的 `maxConcurrent` 不会自动扩大 Worker 的派发并发。
+
+Go/Python Runtime Host 默认执行超时为 **1 小时**。长运行实现应主动配置 `HostOptions.ExecutionTimeout` / `RuntimeHost(execution_timeout=...)`，并调整 AgentVersion 与 Task 的 `budget.wallSeconds` 和允许的租户上限。服务配置不会自动取消这些时限。`Running` 表示内核执行状态和租约存活，不表示业务端口就绪、请求可处理或应用探针通过。
 
 ### 7.2 滚动更新与平滑排空 (Rolling Upgrade & Drain)
 
-当服务定义通过 Control API（`PUT /v1/services/{id}`）指向新的 AgentVersion 时，Supervisor 自动执行滚动更新：老版本实例收到排空信号，等待处理中的长会话自然结束；新版本实例就绪并通过连续健康检查后流量完成原子切换，失败则自动回滚。CLI 提供以下运维操作：
+Supervisor 依据目标版本、副本数和 drain deadline 收敛实例。Drain 达到期限后，停止操作取消实例绑定的 Task；Runtime Worker 在后续 heartbeat 接收取消请求并向底层 Runtime 发送 Stop。当前取消是合作式的，runtime 必须响应 context / stop event；需要强制终止时应配置隔离进程或容器的 `ForceTerminate` 回调。
+
+版本更新及排空不能单独保证业务零停机：应用 readiness、入口流量切换、正在处理的会话和隔离边界的退出确认需要部署方接入并验证。当前服务能力不包含已验证的应用健康失败自动回滚。CLI 提供以下操作，带 flag 的命令应将 flag 放在 service ID 前：
+
+生产环境需在 `AGENTOS_TOKEN` 中配置 Control API 接受的 OIDC ID token，并为命令添加 `-endpoint https://...`。`service stop` 调用 `POST /v1/services/{id}/stop`，将副本数设为零、禁用 AutoWake 并请求取消；实例仍需等待 Runtime 确认任务终止。
 
 ```bash
 # 扩缩副本（Supervisor 滚动收敛到目标副本数）
-./bin/agentos service scale <serviceId> -replicas 3
+./bin/agentos service scale -replicas 3 "$SERVICE_ID"
 
-# 滚动重启（优雅排空后重建实例）
-./bin/agentos service restart <serviceId>
+# 重启实例的执行任务
+./bin/agentos service restart "$SERVICE_ID"
 
 # 停止服务
-./bin/agentos service stop <serviceId>
+./bin/agentos service stop "$SERVICE_ID"
 ```
 
 ---
@@ -800,8 +843,8 @@ curl -sS -H "Authorization: Bearer $AGENTOS_TOKEN" \
 | **`logs`** | - | 流式跟踪任务事件（SSE） | `-task <uuid>` |
 | **`workflow`** | `create` | 创建并运行 DAG 工作流 | `-file workflow.json -goal ...` |
 | | `tree` | 可视化工作流拓扑结构 | `-id <workflow_id>` |
-| **`service`** | `create` | 创建常驻守护服务 | `-name ... -agent name@version -replicas ... -restart-policy ...` |
-| | `scale` / `restart` / `stop` | 扩缩、滚动重启与停止服务 | `<serviceId> -replicas N`（scale） |
+| **`service`** | `create` | 创建受监管服务及持久化执行任务 | `-name ... -agent name@version -spec task-spec.json [-runtime-class class] [-replicas N] [-restart-policy policy]` |
+| | `scale` / `restart` / `stop` | 扩缩、重启与停止服务 | `-replicas N <serviceId>`（scale）；其他命令使用 `<serviceId>` |
 | | `instances` | 查看服务实例与健康状态 | `<serviceId>` |
 | **`namespace`** | `create` / `list` / `get` | 组织与多租户命名空间配置 | `namespace create -name "dev"` |
 | **`migrate`** | - | 提升旧版 AgentManifest 到 v1（非数据库迁移） | `-manifest agent.v1alpha1.json -out agent.v1.json` |

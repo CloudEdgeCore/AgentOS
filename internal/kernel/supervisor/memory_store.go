@@ -65,6 +65,11 @@ func cloneInstance(inst *Instance) *Instance {
 		return nil
 	}
 	cp := *inst
+	if inst.TaskID != nil {
+		id := *inst.TaskID
+		cp.TaskID = &id
+	}
+	cp.LaunchSpec = append([]byte(nil), inst.LaunchSpec...)
 	if inst.NextRestartAt != nil {
 		t := *inst.NextRestartAt
 		cp.NextRestartAt = &t
@@ -82,6 +87,20 @@ func cloneInstance(inst *Instance) *Instance {
 		cp.TerminatedAt = &t
 	}
 	return &cp
+}
+
+// ListAllServices is reserved for the internal controller.
+func (m *MemoryStore) ListAllServices(ctx context.Context) ([]*Service, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]*Service, 0, len(m.services))
+	for _, svc := range m.services {
+		result = append(result, cloneService(svc))
+	}
+	return result, nil
 }
 
 // CreateService creates an agent service.

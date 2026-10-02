@@ -1,639 +1,193 @@
-# AgentOS
+# Fenced
 
-AgentOS is a control and runtime platform for securely publishing, scheduling, executing, recovering, governing, and auditing AI agents.
+**The OS kernel for AI agents. Every agent runs fenced.**
 
-> **Current release: AgentOS 1.3.0 (Developer Core CLI & Dynamic Orchestration)**
->
-> SemVer / Git tag: [`v1.3.0`](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.3.0)
->
-> Stable contracts: [v1.2 Contract Freeze](docs/contracts/v1.2-contract-freeze.md) (IPC v1, Service v1, Syscall ABI 1.0.0, Effect v1, Runtime v1, Gateway v1, Control API v1).
-> Architecture & Specification: [User Guide](docs/user-guide.md) | [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) | [Feature Status Matrix](docs/feature-status.md) | [Ecosystem Guide](docs/ecosystem/README.md)
+Fenced (formerly AgentOS) manages the execution around your agent code: it stores
+task state in PostgreSQL, places work on runtime pools, recovers after worker lease loss, and
+rejects writes from stale workers. Gateways authorize and meter tool and model
+calls against task budgets.
 
-AgentOS is not a chat UI, a visual workflow builder, or a managed SaaS product. It addresses the backend systems problems that appear when agents move into production: immutable versions, durable tasks, admission policy, hard budget limits, runtime isolation, multi-tenant identity, tool and model gateways, checkpoints, failure recovery, and auditability.
+Use it when your agent tasks need to survive worker failures, coordinate through
+durable mailboxes, or run with explicit execution budgets.
 
-## Execution lifecycle
+[Try locally](#try-locally) · [Recovery and fencing](#recovery-and-fencing) ·
+[Architecture](#how-it-works) · [Current limits](#current-limits) ·
+[中文使用指南](docs/user-guide.md)
+
+[Apache 2.0](LICENSE) · [Source version: 1.3.0](CHANGELOG.md#130---2026-10-01) ·
+[v1.2 public contract freeze](docs/contracts/v1.2-contract-freeze.md)
+
+## Try locally
+
+Start with a dependency-free Python agent and the Runtime Interface conformance
+suite. You need **Go 1.26.x** and **Python 3.11+**. This trial needs no Docker,
+model account, API key, or framework installation.
+
+**Naming transition:** the GitHub repository, CLI binaries, SDK package names,
+and protocol identifiers still use `AgentOS` / `agentos`. The commands and
+expected output below retain those names for compatibility.
+
+```shell
+git clone https://github.com/CloudEdgeCore/AgentOS.git Fenced
+cd Fenced
+```
+
+**PowerShell:**
+
+```powershell
+$env:PYTHONPATH = "./sdk/python"
+go run ./cmd/agentos-conformance -cmd "python examples/agents/python_remote/server.py --port 0" -timeout 30s
+```
+
+**Bash / zsh:**
+
+```bash
+PYTHONPATH=./sdk/python go run ./cmd/agentos-conformance -cmd "python3 examples/agents/python_remote/server.py --port 0" -timeout 30s
+```
+
+The command starts a local adapter, discovers its port, checks the protocol,
+and stops the adapter when finished. The first Go build downloads dependencies.
+
+Expected output includes:
+
+```text
+Adapter:  python-remote
+Protocol: agentos.runtime.interface/v1
+...
+AgentOS Compatible = PASS
+```
+
+**What this checks:** startup, idempotency, events, checkpoint/restore, result,
+stop, and capability denial at the Runtime Interface boundary.
+
+**Scope:** the example uses an EchoAgent and in-memory checkpoints. This is a
+protocol smoke test; it does not exercise the PostgreSQL task kernel, real model
+calls, durable recovery, or sandbox isolation.
+
+To run the complete local platform, follow the
+[control-plane setup](docs/development.md#start-the-local-control-plane).
+
+## Recovery and fencing
+
+When recovery retries a task after worker lease loss, it creates a replacement
+attempt with a higher fencing token. Calls carrying the expired identity are
+rejected before they can update durable task state.
+
+[Reproduce the takeover check](docs/development.md#reproduce-a-takeover) with
+Go and a disposable PostgreSQL instance; no model or API key is needed. It
+deliberately expires a lease, invokes recovery, and verifies that:
+
+1. The replacement receives a higher fencing token.
+2. The old identity cannot heartbeat, commit a checkpoint, change phase, or
+   read its assignment.
+3. No stale checkpoint reaches PostgreSQL.
+
+The check uses real storage and the Runtime Control service. It injects lease
+expiry directly; it does not kill a deployed worker process.
+
+For a broader deterministic workload, the
+[research workflow takeover report](docs/evidence/multiruntime-takeover-2026-09-14.md)
+describes worker loss and replacement across runtime pools, with commands and
+the boundaries of that experiment.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    A["Agent Manifest / Signed Package"] --> B["Control API"]
-    B --> C["PostgreSQL durable state"]
-    C --> D["Admission / Policy / Budget"]
-    D --> E["Scheduler / Recovery"]
-    E --> F["Runtime Protocol v1"]
-    F --> G["Wasmtime"]
-    F --> H["OCI / gVisor"]
-    F --> I["Reference / Adapter"]
-    G --> J["Tool / Model / Memory Gateway"]
-    H --> J
-    I --> J
-    J --> C
-    C --> K["Checkpoint / Result / Audit"]
+    A["Your agent + Runtime Interface adapter"] --> B["Control API"]
+    B --> C["PostgreSQL: Task / Run / Attempt"]
+    C --> D["Admission: policy + budgets"]
+    D --> E["Scheduler + recovery"]
+    E --> F["Worker: fenced lease"]
+    F --> G["Tool / Model / Memory gateways"]
+    G --> C
+    F --> H["Checkpoint + result"]
+    H --> C
 ```
 
-A typical task moves through the following lifecycle:
+Publish an immutable agent version, submit a task, and let admission and the
+scheduler select a runtime pool. Workers execute through Runtime Protocol v1;
+gateways enforce authorization and usage accounting on calls routed through
+them. Replacement workers can resume compatible checkpoints.
 
-1. A developer submits a stable Agent Manifest and, optionally, a signed Agent Package.
-2. The Control API creates an immutable `AgentVersion` and a durable `Task`.
-3. Admission validates the version, capabilities, policy, tenant quota, and task budget.
-4. The Scheduler selects a provider using runtime class, region, effective capacity (declared totals minus the active reservation ledger), and lease health; on a capacity race it walks the ranked candidates before deferring.
-5. A worker receives a fenced assignment through Runtime Protocol v1.
-6. The agent executes in Wasmtime, OCI/gVisor, or a co-located adapter runtime.
-7. Model, tool, memory, and secret operations pass through gateways for authorization, metering, and audit.
-8. Checkpoints, results, and side-effect receipts are persisted before the task reaches a terminal state.
-9. If a worker disappears, a lease expires, or a process restarts, the Recovery Controller converges and reschedules the workload.
+See the [architecture](docs/architecture/ARCHITECTURE.md) and
+[framework integration guide](docs/ecosystem/README.md) for the full design.
 
-## Execution semantics: non-preemptible attempts
+## What is available
 
-AgentOS schedules agents as **non-preemptible processes**. The scheduler orders
-claim batches by fair share, priority, earliest deadline, and FIFO
-([`internal/kernel/store/postgres/control.go`](internal/kernel/store/postgres/control.go)),
-but it never interrupts a running attempt to run a different one, and the
-Runtime Protocol carries no preemption primitive. This is a deliberate
-boundary, not a missing feature to be silently added later.
-
-- **Cancellation is cooperative.** The kernel marks the attempt
-  `CANCEL_REQUESTED` and reports `cancel_requested` on the next `Heartbeat`;
-  the worker must acknowledge through `AcknowledgeCancellation`
-  ([`proto/agentos/runtime/v1/runtime.proto`](proto/agentos/runtime/v1/runtime.proto)).
-  Convergence to a terminal phase is a verified liveness property of the kernel
-  model ([`modelcheck/tla`](modelcheck/tla/README.md)), but the kernel never
-  kills in-flight execution itself.
-- **The forceful path is lease expiry plus fencing.** A worker that stops
-  heartbeating loses its lease; recovery re-acquires the attempt under a
-  strictly higher fencing token, and every call from the expired owner —
-  heartbeat, checkpoint, transition — is rejected `PermissionDenied` before
-  any durable state is written
-  ([`internal/security/negative_integration_test.go`](internal/security/negative_integration_test.go)).
-  This is restart-based recovery, not preemption.
-- **Cross-runtime recovery is checkpoint-based.** Every assignment carries an
-  optional `resume_checkpoint` whose reference pins the agent version, runtime
-  class, provider, runtime ABI, schema version, and a SHA-256-pinned state
-  artifact, so a replacement attempt resumes on a different runtime instead of
-  restarting from zero.
-
-## What AgentOS provides
-
-| Area | Implemented capability |
+| Capability | What it does |
 | --- | --- |
-| **Agent lifecycle & Services** | Stable manifests, immutable AgentVersions, signed packages, and **long-running supervised Daemon Services** (`AgentService`) |
-| **Task & Process Kernel** | Dual-model execution (`Task → Run → Attempt` + `Service → Instance`), non-preemptible attempts, heartbeat auto-reap, rolling upgrades, and zero-downtime drain |
-| **Kernel Syscall ABI 1.0.0** | POSIX-modeled system call interface across 8 subsystems (Tool, Model, Memory, IPC, Runtime, Service, Resource, Effect) with standard error codes |
-| **Durable IPC Subsystem** | Durable cross-agent mailbox messaging, at-least-once delivery, receiver deduplication receipts, and tenant isolation |
-| **External Effect Engine** | Monotonic lease fencing, SHA-256 idempotency protection, and non-replayable `UNKNOWN` ambiguous outcome isolation |
-| **Scheduling and recovery** | Admission, default-deny Rego policy, effective-capacity placement with ranked-candidate fallback, leases, fencing tokens, backoff, and orphan recovery |
-| **Runtimes & Frameworks** | Wasmtime/Wasm provider, OCI/gVisor container isolation, HTTP adapter worker, plus **LangGraph, AutoGen, CrewAI, OpenAI Agents, and Custom Agent** framework support |
-| **Unified Provider SDK** | Plugin protocol for Model, Tool, Memory, Browser, Storage, and Runtime with dynamic registry and zero kernel modifications (`sdk/provider/`) |
-| **Third-Party Runtime SDK** | 7-lifecycle-hook Runtime SDK (`sdk/runtimesdk/`), CLI scaffolding (`agentos runtime init/test`), and 3 official runtimes (Docker, Python, Remote HTTP) |
-| **Agent Package Registry** | OCI + Metadata Index, `agentos login/package <build|sign|push|search|verify|install>`, and mandatory 6-stage security gate (`internal/kernel/agentpkg/`) |
-| **Gateways** | Tool, model, memory, and capability gateways with approval, idempotent receipts, budget settlement, and fail-closed behavior |
-| **Multi-tenancy & Security** | Tenant-scoped storage, OIDC principals, SPIFFE X.509-SVIDs, mTLS identity, OpenBao secret broker, and signed audit exports |
-| **Developer Core CLI & Console** | Unified `agent` CLI: hierarchical `agent.yaml`, interactive `agent config wizard`, multi-provider LLM matrix, chain-of-thought streaming, scaffolding/demo suites, and a preview-gated `agent ui` workbench (CLI-only by default) |
-| **Dynamic & distributed orchestration** | Fenced `agentos.task.spawn` with recursion/fan-out/total-step guards, workflow-wide budgets and deadlines, dynamic group joins, and lease-based fair sharding |
-| **Reliability Gates** | **Manual/fixed-host evidence complete**: 72h continuous chaos & 7d extended soak verified (zero lost tasks/IPC, monotonic fencing); **Scheduled CI evidence pending**: Multi-day CI reproduction awaits self-hosted runners; race detector, PostgreSQL/NATS integration tests, and TLA+ model checking |
-
-## Stable contracts and compatibility
-
-See the comprehensive [v1.2 Contract Freeze](docs/contracts/v1.2-contract-freeze.md) for frozen specifications.
-
-| Contract | Stable version | Source |
-| --- | --- | --- |
-| **Syscall ABI** | `1.0.0` | [`proto/agentos/syscall/v1/syscall.proto`](proto/agentos/syscall/v1/syscall.proto) |
-| **IPC Subsystem** | `agentos.ipc.v1` | [`proto/agentos/ipc/v1/ipc.proto`](proto/agentos/ipc/v1/ipc.proto) |
-| **Agent Service & Supervisor** | `agentos.service.v1` | [`proto/agentos/service/v1/service.proto`](proto/agentos/service/v1/service.proto) |
-| **External Effect API** | `agentos.effect.v1` | [`proto/agentos/effect/v1/effect.proto`](proto/agentos/effect/v1/effect.proto) |
-| Control REST API | `v1` | [`api/openapi/control-v1.yaml`](api/openapi/control-v1.yaml) |
-| Agent Manifest | `agentos.dev/v1` | [`internal/kernel/agentversion/manifest.go`](internal/kernel/agentversion/manifest.go) |
-| Runtime Protocol | `agentos.runtime.v1` | [`proto/agentos/runtime/v1/runtime.proto`](proto/agentos/runtime/v1/runtime.proto) |
-| Runtime Interface | `agentos.runtime.interface/v1` | [`api/openapi/runtime-interface-v1.yaml`](api/openapi/runtime-interface-v1.yaml) |
-| Gateway Protocol | `agentos.gateway.v1` | [`proto/agentos/gateway/v1/gateway.proto`](proto/agentos/gateway/v1/gateway.proto) |
-| Model Protocol | `agentos.model.v1` | [`proto/agentos/model/v1/model.proto`](proto/agentos/model/v1/model.proto) |
-| SLO contract | `agentos.slo/v1` | [`api/slo/v1.json`](api/slo/v1.json) |
-
-`v1alpha1` is the N-1 compatibility level for v1.0. Legacy manifests remain readable and can be promoted deterministically, while legacy gRPC service names remain available as wire-compatible aliases. The compatibility window will not close before **2027-02-17**. Breaking changes to stable contracts require a new version, and unknown fields continue to fail closed. The machine-readable policy is stored in [`api/compatibility/v1alpha1-to-v1.json`](api/compatibility/v1alpha1-to-v1.json).
-
-Promote a legacy manifest to v1:
-
-```shell
-go run ./cmd/agentos migrate \
-  -manifest agent.v1alpha1.json \
-  -out agent.v1.json
-```
-
-## Quick start
-
-### Requirements
-
-- Go `1.26.x`; CI and official releases use `1.26.6`.
-- Python `3.11+` when developing Python or framework adapters.
-- Rust `1.97.1` when building the Wasmtime provider.
-- Docker and Docker Compose for local PostgreSQL, NATS, and optional infrastructure.
-- Linux, containerd, and runsc for real OCI/gVisor provider validation.
-
-Inspect the source release identity:
-
-```shell
-go run ./cmd/agentos version -json
-```
-
-Build every Go command:
-
-```shell
-go build ./cmd/...
-```
-
-The official [`v1.3.0` release](https://github.com/CloudEdgeCore/AgentOS/releases/tag/v1.3.0) (see [CHANGELOG](CHANGELOG.md#130---2026-10-01)) provides stable binary packages, Protobuf stubs, Python wheels, and npm SDK packages. The [v1.2.0 LTS release notes](docs/releases/v1.2.0.md) document the process-system and contract-freeze baseline.
-
-### Conformance certification suite
-
-Any third-party agent framework or runtime adapter (LangGraph, AutoGen, CrewAI, OpenAI Agents SDK, custom in-house runtimes) can certify compatibility with AgentOS in a single command:
-
-```shell
-# Certify an already running adapter endpoint:
-go run ./cmd/agentos conformance -endpoint http://127.0.0.1:8088
-
-# Or auto-spawn, test, and terminate candidate adapter process:
-go run ./cmd/agentos-conformance -cmd "python examples/agents/langgraph/server.py --port 0"
-```
-
-A compliant runtime outputs the standard certification signature:
-
-```text
-=== AgentOS Runtime Interface Conformance Suite ===
-Adapter:  langgraph
-Protocol: agentos.runtime.interface/v1
-Endpoint: http://127.0.0.1:8089
-
-Checks executed:
-  [PASS] health
-  [PASS] protocol-negotiation
-  [PASS] start
-  [PASS] idempotency
-  [PASS] conflict
-  [PASS] event
-  [PASS] event-cursor
-  [PASS] result
-  [PASS] checkpoint
-  [PASS] restore
-  [PASS] stop
-  [PASS] default-deny-capabilities
---------------------------------------------------
-AgentOS Compatible = PASS
---------------------------------------------------
-```
-
-See [Conformance Suite Guide](conformance/README.md) for complete options and JSON reporting.
-
-### Multi-Framework Ecosystem Integration
-
-AgentOS supports running heterogeneous frameworks side-by-side on the same kernel:
-
-- **LangGraph**: [`adapters/langgraph`](adapters/langgraph) & [`examples/agents/langgraph`](examples/agents/langgraph)
-- **AutoGen**: [`adapters/autogen`](adapters/autogen) & [`examples/agents/autogen`](examples/agents/autogen)
-- **CrewAI**: [`adapters/crewai`](adapters/crewai) & [`examples/agents/crewai`](examples/agents/crewai)
-- **OpenAI Agents SDK**: [`adapters/openai_agents`](adapters/openai_agents) & [`examples/agents/openai_agents`](examples/agents/openai_agents)
-- **Custom Enterprise Agent**: [`adapters/custom_agent`](adapters/custom_agent) & [`examples/agents/custom`](examples/agents/custom)
-
-See the comprehensive [Multi-Framework Ecosystem Guide](docs/ecosystem/README.md) for architectural patterns, durable IPC mailbox communication, and external side-effect fencing across frameworks.
-
-### Unified Provider Plugin Protocol
-
-AgentOS provides a unified plugin protocol allowing third-party hardware, models, tools, and storage to be integrated **without modifying the Kernel**:
-
-- **ModelProvider**: LLM completions, function calling, streaming (`sdk/provider/model.go`)
-- **ToolProvider**: Callable capability tools and audit receipts (`sdk/provider/tool.go`)
-- **MemoryProvider**: Persistent KV state & pgvector semantic search (`sdk/provider/memory.go`)
-- **BrowserProvider**: Headless automation (navigate, screenshot, click) (`sdk/provider/browser.go`)
-- **StorageProvider**: Blob & artifact storage (`sdk/provider/storage.go`)
-- **RuntimeProvider**: Isolated process and sandbox management (`sdk/provider/runtime.go`)
-
-Reference implementations:
-- **`OpenAIProvider`**: [`sdk/provider/openai.go`](sdk/provider/openai.go)
-- **`BrowserProvider`**: [`sdk/provider/browser_ref.go`](sdk/provider/browser_ref.go)
-- **`PostgresMemoryProvider`**: [`sdk/provider/postgres_memory.go`](sdk/provider/postgres_memory.go)
-
-### Third-Party Runtime SDK & Scaffolding
-
-Third-party runtime adapters only need to implement 7 lifecycle hooks:
-`health` / `start` / `event` / `result` / `checkpoint` / `restore` / `stop`
-
-```bash
-# 1. Scaffold a new runtime
-agentos runtime init my-runtime --template docker
-
-# 2. Test conformance certification
-agentos runtime test http://127.0.0.1:8088
-# Output: AgentOS Compatible = PASS
-```
-
-Official reference runtimes:
-- **Docker Runtime**: [`examples/runtimes/docker-runtime`](examples/runtimes/docker-runtime)
-- **Python Runtime**: [`examples/runtimes/python-runtime`](examples/runtimes/python-runtime)
-- **Remote HTTP Runtime**: [`examples/runtimes/remote-http-runtime`](examples/runtimes/remote-http-runtime)
-
-### Agent Package Registry & Security Verification Pipeline
-
-Agent packages are distributed via OCI registries with signed metadata indexes (`agentos.agentpkg/v1`):
-
-```bash
-agentos login -registry https://registry.agentos.dev -token $REGISTRY_TOKEN
-agentos package build -manifest agent.json -out package.json
-agentos package sign -package package.json -key-id key-1 -private-key $PRIV_KEY
-agentos package push -package package.signed.json
-agentos package search "sre"
-agentos package verify -package package.signed.json -public-key $PUB_KEY
-agentos package install -package package.signed.json -tenant default
-```
-
-**Mandatory 6-Stage Security Pipeline**:
-```
-Registry Fetch → Verify Signature → Verify SBOM / Digest → Check ABI Compatibility → Check Capability → Create AgentVersion
-```
-*Security Invariant: It is strictly forbidden for any package to bypass Admission, Capability grants, or Policy rules.*
-
-### Start local control-plane infrastructure
-
-```powershell
-docker compose -f deploy/dev/compose.yaml up -d --wait postgres nats
-
-$env:DATABASE_URL = "postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos?sslmode=disable"
-go run ./cmd/agentos-migrate -database-url $env:DATABASE_URL
-```
-
-The repository-root `docker-compose.yml` includes the same definitions (project `agentos-dev`), so `docker compose up -d --wait postgres nats` from the repository root starts the identical stack.
-
-For local development, run each process below in its own terminal:
-
-```powershell
-# HTTP Control API
-go run ./cmd/agentos-control `
-  -database-url $env:DATABASE_URL `
-  -dev-tenant dev
-
-# Admission, Scheduler, and Recovery
-go run ./cmd/agentos-controller `
-  -database-url $env:DATABASE_URL `
-  -controller-id dev-controller `
-  -runtime-pools deploy/dev/runtime-pools.json `
-  -tenant-policies deploy/dev/tenant-policies.json `
-  -dev-mode
-
-# Transactional outbox to NATS JetStream
-go run ./cmd/agentos-outbox `
-  -database-url $env:DATABASE_URL `
-  -nats-url nats://127.0.0.1:54222 `
-  -dispatcher-id dev-outbox
-
-# Worker Runtime Protocol
-go run ./cmd/agentos-runtime-control `
-  -database-url $env:DATABASE_URL `
-  -listen 127.0.0.1:9090 `
-  -dev-tenant dev `
-  -dev-mode
-
-# Tool, Model, and Memory Gateway; add -model-providers to activate the
-# OpenAI-compatible execution layer (vLLM/Qwen/DeepSeek/GLM endpoints).
-# deploy/dev/*.local.json is gitignored for private endpoint configurations:
-#   -model-providers deploy/dev/model-providers.example.json
-go run ./cmd/agentos-gateway `
-  -database-url $env:DATABASE_URL `
-  -listen 127.0.0.1:9091 `
-  -tenant-policies deploy/dev/tenant-policies.json `
-  -tenant dev `
-  -seed-dev-tools `
-  -dev-mode
-
-# Non-sandboxed reference provider for development and deterministic tests
-go run ./cmd/agentos-runtime-reference `
-  -control-address 127.0.0.1:9090 `
-  -gateway-address 127.0.0.1:9091 `
-  -model-gateway-address 127.0.0.1:9091 `
-  -mcp-listen 127.0.0.1:9092 `
-  -tenant dev `
-  -runtime-instance-id dev-worker-1 `
-  -artifact-root tmp/artifacts `
-  -dev-mode
-```
-
-`agentos init` writes an environment-independent logical entrypoint
-(`agentos-binding://<agent-name>/remote`) into the manifest, so one immutable
-AgentVersion deploys across dev/staging/prod without re-signing. Map version
-refs (or `name@*` wildcards) to concrete Runtime Interface endpoints with
-`agentos-runtime-adapter -runtime-bindings deploy/dev/runtime-bindings.example.json`;
-an explicit `-adapter-endpoint` still overrides bindings, and unresolved
-logical entrypoints fail closed. The `-mcp-listen` sandbox MCP endpoint is
-loopback-only in every mode, including configured production mTLS.
-
-The adapter runtime additionally exposes a loopback MCP endpoint for its
-sandboxed agents (`-mcp-listen 127.0.0.1:9093 -gateway-address 127.0.0.1:9091`):
-tenant tools plus the brokered system tools `agentos.model.invoke`,
-`agentos.memory.put`, and `agentos.memory.search`, fenced to the open attempt
-via the `X-Agentos-Execution` identity the worker injects (default deny
-outside execution windows). A real model-backed Python agent lives at
-`examples/agents/python_remote/real_agent.py`.
-
-These commands use a fixed development tenant, loopback plaintext connections, and development executors. They are only safe for local development. Production mode rejects these downgraded settings.
-
-### CLI workflows
-
-The developer-facing entrypoint is the unified `agent` CLI introduced in
-v1.2.1 (`agent config`, `agent config wizard`, `agent test-llm`, `agent mcp`,
-`agent init`, `agent demo`). This release is deliberately CLI-only: `agent ui`
-is disabled for external access and only runs as the loopback-bound internal
-polishing preview (`agent ui --preview`). Commands the `agent` CLI does not own
-are delegated to the stable `agentos` workflows below. The `agentos` CLI exposes:
-
-```text
-agentos version   Print product, build, and protocol versions
-agentos init      Create a Go/Python/LangGraph/A2A agent project
-agentos migrate   Promote a legacy manifest to v1
-agentos validate  Strictly validate an Agent Manifest
-agentos package   Generate a package manifest with provenance
-agentos sign      Sign a package with an Ed25519 key
-agentos publish   Publish an immutable AgentVersion
-agentos run       Submit a durable task
-agentos logs      Stream task events over SSE
-agentos workflow  Create, inspect, cancel, approve/reject, and render workflow trees
-agentos runtime   Activate, cordon, or drain a runtime pool with CAS protection
-agentos conformance  Certify a running Runtime Interface adapter
-```
-
-`publish`, `run`, and `logs` use `http://127.0.0.1:8080` by default. In production, pass the HTTPS Control API through `-endpoint` and provide a bearer token through `AGENTOS_TOKEN`.
-
-Model provider configuration may also declare `routes`, mapping a stable
-tenant-visible `modelRef` to an independently selected provider and wire model.
-This keeps workflow and Agent manifests stable while operations change model
-hosts or aliases. See `deploy/dev/model-providers.example.json` for the strict
-configuration shape; keep private endpoint files in `deploy/dev/*.local.json`.
-
-### Safety limits reference
-
-| Boundary | Default hard limit |
-| --- | ---: |
-| Control API request body | 1 MiB |
-| Workflow document / declared steps | 1 MiB / 1,024 |
-| Dynamic workflow total steps | 100,000 |
-| Step goal / retry attempts | 8 KiB / 10 |
-| Runtime interface body / event payload | 2 MiB / 256 KiB |
-| Runtime event page | 256 events and 1 MiB |
-| Model provider request / response | 4 MiB / 32 MiB |
-| MCP memory response aggregate | 1 MiB |
-
-Deployment-specific admission, tenant quota, concurrency, and workflow budget
-limits may be lower; zero never silently disables a required sandbox limit.
-
-## Production security baseline
-
-AgentOS production mode is fail-closed. Processes refuse to start when required security configuration is missing.
-
-- **Control API:** requires HTTPS, OIDC, a production embedding endpoint, an audit signing key, and at least one package trust key.
-- **Runtime Protocol:** requires SPIFFE X.509-SVID mTLS and binds worker identity to the tenant.
-- **Gateway:** requires mTLS, derives the tenant from the peer SVID, and maps immutable tool versions to HTTPS endpoints.
-- **Secret Broker:** obtains controlled secrets or dynamic database credentials through OpenBao instead of exposing platform credentials to agents.
-- **OCI Provider:** requires digest-pinned production images and uses containerd with gVisor/runsc on the Linux isolation path.
-- **Agent Package:** validates signatures, provenance, image signatures, and CycloneDX SBOMs during publication.
-- **Audit:** records security-relevant events in a transactional hash chain and supports signed export and integrity verification.
-
-Development mode is restricted to loopback or requires explicit `-dev-mode`; never expose it to an untrusted network.
-
-## Observability and optional services
-
-Start the reference OpenTelemetry stack:
-
-```powershell
-docker compose -f deploy/dev/compose.yaml --profile observability up -d
-$env:OTEL_EXPORTER_OTLP_ENDPOINT = "127.0.0.1:4317"
-```
-
-- Grafana: `http://127.0.0.1:3300`
-- Prometheus: `http://127.0.0.1:9093`
-- Tempo: `http://127.0.0.1:3320`
-- Loki: `http://127.0.0.1:3310`
-
-Optional development services:
-
-```powershell
-docker compose -f deploy/dev/compose.yaml --profile secrets up -d  # OpenBao
-docker compose -f deploy/dev/compose.yaml --profile search up -d   # OpenSearch
-```
-
-Control API operational endpoints:
-
-- `GET /healthz`: process liveness.
-- `GET /readyz`: readiness of PostgreSQL and other required dependencies.
-- `GET /versionz`: product identity, build commit, and every stable protocol version.
-
-## Tests and quality gates
-
-Formatting, static analysis, unit tests, and Go vulnerability scanning:
-
-```shell
-gofmt -l .
-go vet ./...
-go test -race -count=1 ./...
-go tool govulncheck ./...
-go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
-(cd sdk/python && python -m unittest discover -s tests -v)
-(cd sdk/typescript && npm ci)
-(cd sdk/typescript && npm test)
-```
-
-Real PostgreSQL/NATS integration tests:
-
-```powershell
-docker compose -f deploy/dev/compose.yaml up -d --wait postgres nats
-$env:AGENTOS_TEST_DATABASE_URL = "postgres://agentos:agentos-dev-only@127.0.0.1:55432/agentos?sslmode=disable"
-$env:AGENTOS_TEST_NATS_URL = "nats://127.0.0.1:54222"
-go test -race -tags=integration -count=1 ./...
-```
-
-> The integration suite applies migrations and clears AgentOS test tables. Never point `AGENTOS_TEST_DATABASE_URL` at a database containing durable business data.
-
-Production migrations are forward-only and use expand/contract deployment:
-take and verify a restorable backup, apply additive schema changes, deploy
-code compatible with both shapes, backfill and reconcile, then remove the old
-shape in a later release. Rollback means rolling back the application while
-the expanded schema remains; destructive data rollback requires restoring the
-verified backup into a replacement database and switching traffic after
-integrity checks. Never edit an already-applied migration.
-
-Protobuf compatibility and deterministic generation:
-
-```shell
-buf lint
-buf generate
-git diff --exit-code -- gen/go
-```
-
-Wasmtime provider:
-
-```shell
-cargo +1.97.1 fmt --all -- --check
-cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
-cargo +1.97.1 test --workspace --locked
-```
-
-CI runs the real Linux OCI/gVisor isolation suite in the `runtime-linux-leg` job. The pinned toolchain and acceptance mapping are defined in [`deploy/ci/runtime-matrix.md`](deploy/ci/runtime-matrix.md).
-
-v1.2 workflow acceptance (multi-agent orchestration: WorkflowRun with
-dependency/parallel/join/condition/retry/approval/cancel/recovery, the
-1,000-workflow dual-agent regression, and the Phase 3 scale gates — one
-1,000-step workflow, 100 concurrent workflows, orchestrator P95 < 500ms):
-
-```powershell
-go test -race -tags=integration -count=1 -timeout 60m ./e2e/workflows/
-```
-
-Counts are tunable (`AGENTOS_E2E_WORKFLOWS`, `AGENTOS_E2E_WF_STEPS`,
-`AGENTOS_E2E_CONCURRENT_WF`). The workflow orchestrator runs as its own
-process (`go run ./cmd/agentos-orchestrator -database-url $db
--orchestrator-id dev-orchestrator -artifact-root tmp/artifacts`) and the
-Control API exposes `POST/GET /v1/workflows`, `POST /v1/workflows/{id}/cancel`
-and `POST /v1/workflows/{id}/steps/{name}/approval`.
-
-v1.3 dynamic and distributed orchestration adds fenced `agentos.task.spawn`,
-workflow-wide budgets and deadlines, recursion/fan-out/total-step guards,
-dynamic group joins (`spawn:<parent>`), and lease-based fair sharding across
-orchestrator instances. The normal integration leg covers capability denial,
-stale-attempt fencing, tenant isolation, concurrent spawn idempotency, 120
-tenant rotation, claim exclusivity, and expired-owner recovery:
-
-```powershell
-$env:AGENTOS_TEST_DATABASE_URL = "postgres://agentos:agentos-test-only@127.0.0.1:55433/agentos_test?sslmode=disable"
-go test -tags=integration -count=1 -run '^TestV13' ./internal/kernel/store/postgres
-```
-
-The opt-in lower-bound scale leg commits 10,000 dynamic steps as independent
-transactions and verifies the final 10,001-step workflow:
-
-```powershell
-$env:AGENTOS_V13_SCALE_TEST = "1"
-go test -tags=integration -count=1 -run '^TestV13DynamicSpawnScale10K$' -v ./internal/kernel/store/postgres
-go test -count=1 -run '^TestV13Orchestrates10KDynamicTasks$' -v ./internal/kernel/workflow
-```
-
-For local plaintext development, start the orchestrator with
-`-claim-lease 30s -listen 127.0.0.1:9094 -dev-mode` and give the adapter
-`-spawn-address 127.0.0.1:9094`. Production spawn transport requires the
-same worker X.509-SVID and trust bundle used by the Runtime and Gateway
-protocols; the server binds the verified SPIFFE tenant to the fenced request.
-
-v1.1 real-agent acceptance (a real Python agent, real OpenAI-compatible model
-execution, MCP tools and memory, lease-expiry recovery, 1,000-task pipeline
-and 100 fault injections):
-
-```powershell
-$env:AGENTOS_E2E_PYTHON = "python"
-go test -race -tags=integration -count=1 -timeout 30m ./e2e/single-agent/
-```
-
-See [`e2e/single-agent/README.md`](e2e/single-agent/README.md) for what each
-test proves and how to tune the counts (`AGENTOS_E2E_TASKS`,
-`AGENTOS_E2E_FAULTS`).
-
-Evaluate a measured SLO sample:
-
-```shell
-go run ./cmd/agentos-slo -sample measured-slo.json
-```
-
-## Releases and supply-chain verification
-
-The official release workflow runs the GA gates and generates:
-
-- complete command archives for Linux AMD64/ARM64, macOS AMD64/ARM64, and Windows AMD64;
-- the `agentos-runtime` Python wheel and `@agentos/sdk` TypeScript package;
-- the Wasmtime runtime binary in the Linux AMD64 archive;
-- CycloneDX SBOMs for Go, Rust, Python, and TypeScript;
-- `checksums.txt`;
-- a keyless `checksums.txt.sigstore.json` Sigstore bundle;
-- GitHub/Sigstore SLSA build provenance attestations for release assets.
-
-Download and verify all release assets:
-
-```shell
-gh release download v1.3.0 --repo CloudEdgeCore/AgentOS
-sha256sum -c checksums.txt
-```
-
-The release process is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml), and every Action dependency is pinned to an exact commit SHA.
-
-## Repository layout
-
-| Path | Contents |
+| Task kernel | Durable Task / Run / Attempt state machines, immutable agent versions, retries, checkpoints, and audited transitions |
+| Scheduling and recovery | Capacity reservations, ranked placement, worker leases, monotonic fencing, and recovery after lease expiry |
+| Execution governance | Token, cost, and tool-call budgets, deadlines, and runtime-specific resource limits |
+| Durable IPC | At-least-once mailbox delivery, receiver deduplication receipts, and tenant-scoped access |
+| Task-backed services | Supervised replicas, restart policies, rolling version convergence, and cooperative drain |
+| Runtime integration | Reference and HTTP adapter workers, Wasmtime and OCI/gVisor providers, and Go/Python/TypeScript SDKs |
+
+Framework adapters include LangGraph, AutoGen, CrewAI, OpenAI Agents, and custom
+agents. Start with the [ecosystem guide](docs/ecosystem/README.md); use the
+[conformance suite](conformance/README.md) to check an adapter's Runtime Interface
+compatibility.
+
+For services, supply a published `spec.agentVersionRef` and `spec.workloadSpec`
+(`agentos service create -spec task-spec.json`), and apply migration `000037`.
+Each replica consumes a real worker slot and retains Task budgets and timeouts.
+See the [service guide](docs/user-guide.md#71-服务注册与启动).
+
+## Current limits
+
+- **CLI-first operation.** The web workbench is an internal, loopback-only
+  preview; a production administration console and managed hosting are pending.
+- **Infrastructure you operate.** The full platform uses PostgreSQL and NATS.
+  Production paths require configured HTTPS/OIDC and SPIFFE mTLS identities;
+  model, tool, embedding, and secret services need their own configuration.
+- **Fencing protects ownership.** It rejects stale kernel operations. Physical
+  isolation depends on the runtime, such as Wasmtime or OCI/gVisor; the reference
+  provider is development infrastructure.
+- **Cancellation is cooperative; attempts are non-preemptible.** Workers must
+  acknowledge cancellation. Checkpoint recovery requires compatible agent
+  versions, runtime ABIs, and state schemas.
+- **Resource controls use different mechanisms.** Gateway budgets, scheduling
+  capacity, and sandbox limits have different enforcement points. Calls that
+  bypass the gateways are outside their usage accounting.
+- **Frozen contracts have implementation boundaries.** Syscall ABI 1.0.0 defines
+  21 calls across eight groups. Production gateway entry points currently
+  register Tool, Model, Memory, and IPC services; unified Syscall and Effect
+  endpoints are not yet wired into those entry points.
+
+See the [feature status matrix](docs/feature-status.md) and
+[production setup](docs/development.md#production-security-baseline) before deployment.
+
+## Evidence and compatibility
+
+| Evidence | Scope |
 | --- | --- |
-| `cmd/` | CLI, control-plane, gateway, runtime provider, and operator entry points |
-| `internal/kernel/` | Task/Run/Attempt, Admission, Scheduler, Policy, Budget, and Recovery |
-| `internal/runtime/` | Runtime Control, Reference, Adapter, and OCI providers |
-| `internal/gateway/` | Tool, Model, Memory, Capability, and Secret Broker implementations |
-| `sdk/agent/` | Go Runtime Interface SDK |
-| `sdk/python/` | Python Runtime Interface SDK |
-| `sdk/typescript/` | TypeScript Control API and Runtime Interface SDK |
-| `adapters/` | LangGraph and A2A adapters |
-| `api/openapi/` | Stable and compatibility REST/HTTP contracts |
-| `proto/agentos/` | Runtime, Gateway, and Model Protobuf contracts |
-| `db/migrations/` | PostgreSQL migrations |
-| `deploy/dev/` | Local dependencies and reference observability environment |
-| `deploy/ci/` | OCI/gVisor isolation and environment fingerprint tests |
-| `modelcheck/tla/` | TLA+ model of the kernel state machine |
+| [Runtime conformance checks](conformance/README.md) | Black-box Runtime Interface compatibility checks |
+| [Recovery and fencing test](internal/security/negative_integration_test.go) | PostgreSQL lease takeover and rejection of stale identities |
+| [TLA+ model](modelcheck/tla/README.md) | Finite-model checks of v0.1 core safety and liveness invariants |
+| [100K report](docs/evidence/benchmark/100k-stability-2026-09-15.md) and [1M report](docs/evidence/benchmark/1m-2026-09-16.md) | Fixed-host control-plane pipeline measurements with raw logs; not real-agent or production throughput figures |
 
-## Feature status
+Reproducible raw 72h/7d production soak evidence is not yet published. The
+[existing soak report](docs/evidence/soak-process-system-72h-7d.md) does not include
+the raw logs and run metadata needed to substantiate those duration claims.
 
-For the comprehensive capability matrix, see [Feature Status Matrix](docs/feature-status.md).
+The [v1.2 contract freeze](docs/contracts/v1.2-contract-freeze.md) documents stable
+Runtime, Gateway, Control API, Service, IPC, Effect, and Syscall contracts.
+Breaking changes require a new contract version. Legacy `v1alpha1` compatibility
+will not close before **2027-02-17**; see the
+[compatibility policy](api/compatibility/v1alpha1-to-v1.json).
 
-| Capability | Status | Verification |
-| --- | --- | --- |
-| **Task kernel, fencing, recovery, and budgets** | **Stable** | Unit, race, PostgreSQL/NATS integration, fault injection |
-| **AgentService & Process Supervisor** | **Stable (v1.2)** | Replica orchestration, heartbeat auto-reap, rolling upgrades, and auto-rollback |
-| **Syscall ABI 1.0.0** | **Stable (v1.2)** | 8 kernel subsystems, capability authorization, POSIX error codes |
-| **Durable IPC Mailbox Subsystem** | **Stable (v1.2)** | Cross-agent messaging, at-least-once delivery, receiver deduplication receipts |
-| **External Side-Effect Engine** | **Stable (v1.2)** | Monotonic fencing, idempotency hashing, `UNKNOWN` ambiguous isolation |
-| **Multi-Framework Ecosystem** | **Stable (v1.2)** | Conformance certified for LangGraph, AutoGen, CrewAI, OpenAI Agents, Custom |
-| **Workflow DAG and dynamic multi-agent spawn** | **Stable** | Workflow acceptance, multi-orchestrator claims, 10k-step scheduled scale |
-| **Go/Python Runtime Interface SDKs** | **Stable** | Conformance suite and language-specific unit tests |
-| **Runtime Interface event streaming** | **Stable (additive)** | SSE round-trip, cursor resume, and v1 polling fallback tests |
-| **TypeScript Control/Runtime client SDK** | **Stable client surface** | Strict TypeScript build and HTTP contract tests |
-| **Wasmtime and OCI/gVisor runtimes** | **Stable** | Rust tests and real Linux isolation CI |
-| **Firecracker runtime** | Evaluation only | Real-KVM probe is gated by runner-preflight; no production provider yet |
-| **Live model execution** | Stable gateway path | Deterministic tests plus mandatory scheduled real-model acceptance |
-| **Continuous Chaos & 72h/7d Soak Test Engine** | **Manual: Verified**<br>Scheduled CI: Pending | **Manual evidence complete**: 72h continuous chaos and 7d extended soak passed on dedicated fixed host with zero lost tasks/IPC and monotonic fencing — [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md); **Scheduled CI evidence**: Not yet produced on public runners (multi-day jobs exceed 6h timeout; pending self-hosted runners) |
-| **100K-scale pipeline correctness** | Measured | 3/3 runs completed with zero loss, zero duplication, zero stalls — [`docs/evidence/benchmark/100k.md`](docs/evidence/benchmark/100k.md) |
-| **Performance stability (≤10% throughput, ≤15% P95 spread)** | **Certified on fixed hardware** | Three consecutive runs on one host at `45598a9` measured 2.56% throughput / 1.78% P95 spread |
-| **1M-scale capacity baseline** | Measured on fixed hardware | Three consecutive 1M-task runs on one host at `45598a9` completed with zero lost tasks |
+## Documentation
 
-## Current boundaries
+- [User guide / 中文使用指南](docs/user-guide.md): manifests, tasks, workflows, services, and CLI usage.
+- [Development reference](docs/development.md): full local setup, observability, validation commands, and release verification.
+- [Frameworks and runtimes](docs/ecosystem/README.md): adapters, providers, SDKs, and reference applications.
+- [Helm deployment](deploy/helm/agentos/README.md): production HTTPS, OIDC, and Secret configuration.
+- [Changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/CloudEdgeCore/AgentOS/releases): source changes and published assets.
 
-- AgentOS is an agent control and execution backend. This release is deliberately CLI-only: `agent ui` is disabled for external access and only runs as an internal, loopback-bound polishing preview (`agent ui --preview`); it is not a complete multi-tenant web administration console or managed cloud service, and the full React dashboard under `web/` remains planned.
-- The reference provider is deterministic development infrastructure, not a security sandbox. Production execution should use Wasmtime or OCI/gVisor.
-- Firecracker currently has a CI KVM environment probe only and is not a delivered MicroVM provider.
-- Production deployment requires externally operated PostgreSQL, NATS, OIDC, SPIFFE/SPIRE, OpenBao, and real model, tool, and embedding services.
-- **Performance stability is certified on one fixed host, and no production capacity number
-  is claimed.** Three consecutive 100K-task runs on a single workstation at `45598a9`
-  measured a 2.56% end-to-end throughput spread and a 1.78% P95 spread, inside the
-  ≤10% / ≤15% targets — [`docs/evidence/benchmark/100k-stability-2026-09-15.md`](docs/evidence/benchmark/100k-stability-2026-09-15.md).
-  The absolute throughput (~40 tasks/s) describes that workstation, which was running 15
-  unrelated containers at the time, not supported production hardware, and it is not
-  comparable to the Linux CI figures in `100k.md`. One caveat is recorded rather than
-  smoothed over: the `enqueue` sub-phase alone spread 12.8%, above the 10% figure, while the
-  end-to-end metric that the target is defined on met it. The same targets remain unmet on
-  shared CI runners, where the measured spread was 35% / 38% and is consistent with host
-  variance rather than system behaviour.
-- **The 1M baseline is measured, but not on the scheduled path.** Three consecutive
-  1M-task runs on a single `m7i.2xlarge` at `45598a9` completed with a 3.45% end-to-end
-  throughput spread and a 2.95% P95 spread, with zero lost, duplicated, or stuck tasks —
-  [`docs/evidence/benchmark/1m-2026-09-16.md`](docs/evidence/benchmark/1m-2026-09-16.md).
-  This replaces the previous "no 1M run has ever completed" boundary: three attempts on a
-  local workstation (2026-09-12) had reached only 257K / 48K / 475K of 1M, and those
-  attempts remain unpublished. What the new result does **not** claim: ~30 tasks/s end to
-  end is the figure for that one host with an untuned 2 GiB `shared_buffers`, not a
-  production capacity number; the `capacity-baseline-1m` nightly job still skips, because
-  the self-hosted pool it needs is not provisioned, so nothing here is reproduced by CI;
-  and no same-host 100K → 1M comparison was run, so this is not a measurement of scaling
-  degradation. Disk utilisation inside the 1M runs peaked at 98.7% against a gp3 baseline
-  of 125 MiB/s — recorded as a burst (1.71% of samples ≥95%) rather than a sustained
-  bottleneck, but no run was made on a faster volume, so a gp3 limit at 1M is not ruled out.
-- **Explicit distinction between manual/fixed-host evidence and scheduled CI evidence for soak testing.**
-  To maintain strict rigor between test execution environments:
-  - **Manual/fixed-host evidence is completed and verified**: Comprehensive 72-hour continuous chaos and 7-day extended stability soak validations have successfully run to completion on dedicated fixed hosts with zero lost tasks, zero lost IPC messages, zero connection pool degradation, and verified monotonic fencing — fully documented in [`docs/evidence/soak-process-system-72h-7d.md`](docs/evidence/soak-process-system-72h-7d.md).
-  - **Scheduled CI evidence has not yet been produced**: Shared GitHub-hosted public runners enforce a strict 6-hour job execution ceiling and cannot sustain multi-day soaking. Because dedicated self-hosted runners are not yet provisioned in the repository, scheduled periodic CI soak workflows and the Firecracker KVM probe skip with an explicit runner-preflight notice rather than timing out. Evidence exists only where published under [`docs/evidence/`](docs/evidence/); a scheduled CI job that skipped proves nothing on its own, and only manual fixed-host evidence is claimed for v1.2.
+## Try it and share feedback
 
-These boundaries are intentional. AgentOS v1.3 delivers a verifiable, recoverable, default-deny agent runtime kernel on top of the stable v1.2 public contracts.
+Run the local trial and [open an issue](https://github.com/CloudEdgeCore/AgentOS/issues)
+with the first step that blocks you: your OS, the command, and the error output.
+If you already run agent workloads, describe the failure or budget-control
+problem you would want Fenced to handle.

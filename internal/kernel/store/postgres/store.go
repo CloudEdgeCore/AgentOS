@@ -20,8 +20,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// database permits a store to share a transaction with a service reconciliation.
+// Nested lifecycle operations use savepoints instead of acquiring another pool connection.
+type database interface {
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type transactionDatabase struct{ pgx.Tx }
+
+func (d transactionDatabase) BeginTx(ctx context.Context, _ pgx.TxOptions) (pgx.Tx, error) {
+	return d.Tx.Begin(ctx)
+}
+
 type Store struct {
-	pool  *pgxpool.Pool
+	pool  database
 	clock func() time.Time
 	newID func() uuid.UUID
 }

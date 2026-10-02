@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -53,6 +54,7 @@ type Supervisor struct {
 	mailbox ipc.Mailbox
 	clock   func() time.Time
 	idGen   func() string
+	scoped  bool
 }
 
 // NewSupervisor constructs a new Supervisor engine.
@@ -70,11 +72,14 @@ func NewSupervisor(store Store, opts ...Option) *Supervisor {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if spawner, ok := s.spawner.(*TaskSpawner); ok {
+		spawner.clock = s.clock
+	}
 	return s
 }
 
 // CreateService registers a new AgentService and triggers initial reconciliation.
-func (s *Supervisor) CreateService(ctx context.Context, svc *Service) (*Service, error) {
+func (s *Supervisor) createService(ctx context.Context, svc *Service) (*Service, error) {
 	if svc == nil {
 		return nil, ErrInvalidServiceSpec
 	}
@@ -82,6 +87,9 @@ func (s *Supervisor) CreateService(ctx context.Context, svc *Service) (*Service,
 		svc.ID = "svc-" + s.idGen()[:8]
 	}
 	if err := svc.Validate(); err != nil {
+		return nil, err
+	}
+	if err := s.validateLaunch(ctx, svc); err != nil {
 		return nil, err
 	}
 
@@ -107,7 +115,7 @@ func (s *Supervisor) CreateService(ctx context.Context, svc *Service) (*Service,
 
 	// Run immediate reconciliation for the newly created service
 	if err := s.ReconcileService(ctx, svc); err != nil {
-		slog.Error("initial reconciliation failed for service", "serviceId", svc.ID, "error", err)
+		return nil, err
 	}
 
 	return s.store.GetService(ctx, svc.TenantID, svc.ID)
@@ -124,7 +132,7 @@ func (s *Supervisor) ListServices(ctx context.Context, tenantID, namespace strin
 }
 
 // UpdateService updates service specification and reconciles.
-func (s *Supervisor) UpdateService(ctx context.Context, svc *Service) (*Service, error) {
+func (s *Supervisor) updateService(ctx context.Context, svc *Service) (*Service, error) {
 	if svc == nil {
 		return nil, ErrInvalidServiceSpec
 	}
@@ -137,6 +145,9 @@ func (s *Supervisor) UpdateService(ctx context.Context, svc *Service) (*Service,
 	}
 
 	if err := svc.Validate(); err != nil {
+		return nil, err
+	}
+	if err := s.validateLaunch(ctx, svc); err != nil {
 		return nil, err
 	}
 
@@ -152,14 +163,14 @@ func (s *Supervisor) UpdateService(ctx context.Context, svc *Service) (*Service,
 	}
 
 	if err := s.ReconcileService(ctx, svc); err != nil {
-		slog.Error("reconcile failed after service update", "serviceId", svc.ID, "error", err)
+		return nil, err
 	}
 
 	return s.store.GetService(ctx, svc.TenantID, svc.ID)
 }
 
 // ScaleService changes the desired replica count.
-func (s *Supervisor) ScaleService(ctx context.Context, tenantID, serviceID string, replicas int) (*Service, error) {
+func (s *Supervisor) scaleService(ctx context.Context, tenantID, serviceID string, replicas int) (*Service, error) {
 	if replicas < 0 {
 		return nil, fmt.Errorf("%w: replicas must be non-negative", ErrInvalidServiceSpec)
 	}
@@ -180,14 +191,14 @@ func (s *Supervisor) ScaleService(ctx context.Context, tenantID, serviceID strin
 	}
 
 	if err := s.ReconcileService(ctx, svc); err != nil {
-		slog.Error("reconcile failed after service scale", "serviceId", svc.ID, "error", err)
+		return nil, err
 	}
 
 	return s.store.GetService(ctx, tenantID, serviceID)
 }
 
 // RestartService marks all active instances for termination and spawns replacements.
-func (s *Supervisor) RestartService(ctx context.Context, tenantID, serviceID string) error {
+func (s *Supervisor) restartService(ctx context.Context, tenantID, serviceID string) error {
 	svc, err := s.store.GetService(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
@@ -195,29 +206,29 @@ func (s *Supervisor) RestartService(ctx context.Context, tenantID, serviceID str
 	if svc.Status.Phase == ServiceTerminated {
 		return ErrServiceTerminated
 	}
-
 	instances, err := s.store.ListInstances(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
 	}
-
-	now := s.clock()
 	for _, inst := range instances {
-		if !inst.IsTerminal() {
-			inst.Phase = InstanceStopped
-			inst.TerminatedAt = &now
-			inst.ExitCode = 0
+		if inst.IsTerminal() {
+			if plannedStop(inst.ExitReason) || inst.AgentVersion != serviceVersion(svc) {
+				continue
+			}
 			inst.ExitReason = "operator restart requested"
-			_ = s.store.UpdateInstance(ctx, inst)
-			_ = s.spawner.StopInstance(ctx, svc, inst)
+			inst.NextRestartAt = nil
+			if err := s.store.UpdateInstance(ctx, inst); err != nil {
+				return err
+			}
+		} else if err := s.stop(ctx, svc, inst, "operator restart requested"); err != nil {
+			return err
 		}
 	}
-
 	return s.ReconcileService(ctx, svc)
 }
 
 // StopService gracefully stops all instances and sets replicas to 0.
-func (s *Supervisor) StopService(ctx context.Context, tenantID, serviceID string) error {
+func (s *Supervisor) stopService(ctx context.Context, tenantID, serviceID string) error {
 	svc, err := s.store.GetService(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
@@ -225,70 +236,69 @@ func (s *Supervisor) StopService(ctx context.Context, tenantID, serviceID string
 	if svc.Status.Phase == ServiceTerminated {
 		return ErrServiceTerminated
 	}
-
 	svc.Spec.Replicas = 0
+	svc.Spec.AutoWake = false
 	svc.Status.DesiredReplicas = 0
 	svc.Status.Phase = ServiceSuspended
 	svc.Status.Message = "Service stopped by operator"
-	svc.UpdatedAt = s.clock()
-
 	if err := s.store.UpdateService(ctx, svc); err != nil {
 		return err
 	}
-
 	instances, err := s.store.ListInstances(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
 	}
-
-	now := s.clock()
 	for _, inst := range instances {
 		if !inst.IsTerminal() {
-			inst.Phase = InstanceStopped
-			inst.TerminatedAt = &now
-			inst.ExitReason = "service stopped"
-			_ = s.store.UpdateInstance(ctx, inst)
-			_ = s.spawner.StopInstance(ctx, svc, inst)
+			if err := s.stop(ctx, svc, inst, "service stopped"); err != nil {
+				return err
+			}
+		} else if inst.NextRestartAt != nil {
+			inst.NextRestartAt = nil
+			if err := s.store.UpdateInstance(ctx, inst); err != nil {
+				return err
+			}
 		}
 	}
-
 	return s.ReconcileService(ctx, svc)
 }
 
 // DeleteService stops all running instances and marks the service terminated.
-func (s *Supervisor) DeleteService(ctx context.Context, tenantID, serviceID string) error {
+func (s *Supervisor) deleteService(ctx context.Context, tenantID, serviceID string) error {
 	svc, err := s.store.GetService(ctx, tenantID, serviceID)
 	if err != nil {
 		return err
 	}
-
-	instances, err := s.store.ListInstances(ctx, tenantID, serviceID)
-	if err != nil {
+	svc.Spec.Replicas = 0
+	svc.Spec.AutoWake = false
+	svc.Status.Phase = ServiceTerminated
+	svc.Status.Message = "Service deletion waiting for runtime cancellation"
+	if err := s.store.UpdateService(ctx, svc); err != nil {
 		return err
 	}
-
-	now := s.clock()
-	for _, inst := range instances {
-		if !inst.IsTerminal() {
-			inst.Phase = InstanceStopped
-			inst.TerminatedAt = &now
-			inst.ExitReason = "service deleted"
-			_ = s.store.UpdateInstance(ctx, inst)
-			_ = s.spawner.StopInstance(ctx, svc, inst)
-		}
-	}
-
-	return s.store.DeleteService(ctx, tenantID, serviceID)
+	return s.ReconcileService(ctx, svc)
 }
 
 // RecordHeartbeat refreshes an instance's liveness timestamp and resets failure counts.
-func (s *Supervisor) RecordHeartbeat(ctx context.Context, tenantID, serviceID, instanceID string) error {
+func (s *Supervisor) recordHeartbeat(ctx context.Context, tenantID, serviceID, instanceID string) error {
 	inst, err := s.store.GetInstance(ctx, tenantID, serviceID, instanceID)
 	if err != nil {
 		return err
 	}
 	if inst.IsTerminal() {
 		return ErrInstanceTerminated
+	}
+	if refresher, ok := s.spawner.(interface {
+		RefreshInstance(context.Context, *Service, *Instance) error
+	}); ok {
+		svc, err := s.store.GetService(ctx, tenantID, serviceID)
+		if err != nil {
+			return err
+		}
+		if err := refresher.RefreshInstance(ctx, svc, inst); err != nil {
+			return err
+		}
+		return s.store.UpdateInstance(ctx, inst)
 	}
 
 	now := s.clock()
@@ -303,10 +313,13 @@ func (s *Supervisor) RecordHeartbeat(ctx context.Context, tenantID, serviceID, i
 }
 
 // ReportInstanceExit records a crash or clean termination of a service instance.
-func (s *Supervisor) ReportInstanceExit(ctx context.Context, tenantID, serviceID, instanceID string, exitCode int, reason string) error {
+func (s *Supervisor) reportInstanceExit(ctx context.Context, tenantID, serviceID, instanceID string, exitCode int, reason string) error {
 	inst, err := s.store.GetInstance(ctx, tenantID, serviceID, instanceID)
 	if err != nil {
 		return err
+	}
+	if inst.TaskID != nil {
+		return fmt.Errorf("%w: task-backed instance exits are observed from the runtime task", ErrInvalidServiceSpec)
 	}
 
 	now := s.clock()
@@ -333,7 +346,7 @@ func (s *Supervisor) ReportInstanceExit(ctx context.Context, tenantID, serviceID
 }
 
 // DrainInstance transitions an instance to Draining and sets a deadline for graceful shutdown.
-func (s *Supervisor) DrainInstance(ctx context.Context, tenantID, serviceID, instanceID string, timeout time.Duration) error {
+func (s *Supervisor) drainInstance(ctx context.Context, tenantID, serviceID, instanceID string, timeout time.Duration) error {
 	inst, err := s.store.GetInstance(ctx, tenantID, serviceID, instanceID)
 	if err != nil {
 		return err
@@ -364,7 +377,7 @@ func (s *Supervisor) DrainInstance(ctx context.Context, tenantID, serviceID, ins
 }
 
 // RolloutUpgrade updates the service's target version and triggers rolling reconciliation.
-func (s *Supervisor) RolloutUpgrade(ctx context.Context, tenantID, serviceID, newVersion string) (*Service, error) {
+func (s *Supervisor) rolloutUpgrade(ctx context.Context, tenantID, serviceID, newVersion string) (*Service, error) {
 	if strings.TrimSpace(newVersion) == "" {
 		return nil, fmt.Errorf("%w: target agent version cannot be empty", ErrInvalidServiceSpec)
 	}
@@ -383,6 +396,10 @@ func (s *Supervisor) RolloutUpgrade(ctx context.Context, tenantID, serviceID, ne
 
 	svc.Status.PreviousVersion = svc.Spec.AgentVersion
 	svc.Spec.AgentVersion = newVersion
+	svc.Spec.AgentVersionRef = newVersion
+	if err := s.validateLaunch(ctx, svc); err != nil {
+		return nil, err
+	}
 	svc.UpdatedAt = s.clock()
 
 	if err := s.store.UpdateService(ctx, svc); err != nil {
@@ -390,14 +407,14 @@ func (s *Supervisor) RolloutUpgrade(ctx context.Context, tenantID, serviceID, ne
 	}
 
 	if err := s.ReconcileService(ctx, svc); err != nil {
-		slog.Error("reconcile failed after rollout upgrade", "serviceId", svc.ID, "error", err)
+		return nil, err
 	}
 
 	return s.store.GetService(ctx, tenantID, serviceID)
 }
 
 // RollbackService reverts the service's agent version to the previous recorded version.
-func (s *Supervisor) RollbackService(ctx context.Context, tenantID, serviceID string) (*Service, error) {
+func (s *Supervisor) rollbackService(ctx context.Context, tenantID, serviceID string) (*Service, error) {
 	svc, err := s.store.GetService(ctx, tenantID, serviceID)
 	if err != nil {
 		return nil, err
@@ -412,6 +429,10 @@ func (s *Supervisor) RollbackService(ctx context.Context, tenantID, serviceID st
 	prev := svc.Status.PreviousVersion
 	curr := svc.Spec.AgentVersion
 	svc.Spec.AgentVersion = prev
+	svc.Spec.AgentVersionRef = prev
+	if err := s.validateLaunch(ctx, svc); err != nil {
+		return nil, err
+	}
 	svc.Status.PreviousVersion = curr
 	svc.UpdatedAt = s.clock()
 
@@ -420,7 +441,7 @@ func (s *Supervisor) RollbackService(ctx context.Context, tenantID, serviceID st
 	}
 
 	if err := s.ReconcileService(ctx, svc); err != nil {
-		slog.Error("reconcile failed after service rollback", "serviceId", svc.ID, "error", err)
+		return nil, err
 	}
 
 	return s.store.GetService(ctx, tenantID, serviceID)
@@ -428,26 +449,49 @@ func (s *Supervisor) RollbackService(ctx context.Context, tenantID, serviceID st
 
 // Reconcile passes through all services and reconciles their instances.
 func (s *Supervisor) Reconcile(ctx context.Context, tenantID string) error {
-	services, err := s.store.ListServices(ctx, tenantID, "")
+	var services []*Service
+	var err error
+	if tenantID == "" {
+		all, ok := s.store.(AllServicesStore)
+		if !ok {
+			return fmt.Errorf("internal service enumeration is not configured")
+		}
+		services, err = all.ListAllServices(ctx)
+	} else {
+		services, err = s.store.ListServices(ctx, tenantID, "")
+	}
 	if err != nil {
 		return err
 	}
 
+	var reconcileErr error
 	for _, svc := range services {
 		if err := s.ReconcileService(ctx, svc); err != nil {
+			if errors.Is(err, ErrServiceNotFound) {
+				continue
+			}
 			slog.Error("reconcile failed for service", "serviceId", svc.ID, "tenantId", svc.TenantID, "error", err)
+			reconcileErr = errors.Join(reconcileErr, err)
 		}
 	}
-	return nil
+	return reconcileErr
 }
 
 // ReconcileService reconciles a single AgentService state against desired spec.
-func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
+func (s *Supervisor) reconcileService(ctx context.Context, svc *Service) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if svc == nil || svc.Status.Phase == ServiceTerminated {
+	if svc == nil {
 		return nil
+	}
+	if svc.Status.Phase == ServiceTerminated {
+		return s.finishDeletion(ctx, svc)
+	}
+	if svc.Spec.Replicas > 0 || svc.Spec.AutoWake {
+		if err := s.validateLaunch(ctx, svc); err != nil {
+			return err
+		}
 	}
 
 	now := s.clock()
@@ -456,21 +500,50 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 		return err
 	}
 
+	// Reconstruct instance state from the durable task/lease, including after
+	// a controller restart. Do not re-observe a retired generation.
+	if refresher, ok := s.spawner.(interface {
+		RefreshInstance(context.Context, *Service, *Instance) error
+	}); ok {
+		for _, inst := range instances {
+			if inst.IsActive() || inst.IsDraining() || inst.Phase == InstanceStopping {
+				if err := refresher.RefreshInstance(ctx, svc, inst); err != nil {
+					return err
+				}
+				inst.UpdatedAt = now
+				if err := s.store.UpdateInstance(ctx, inst); err != nil {
+					return err
+				}
+				if inst.Phase == InstanceStopping {
+					if err := s.spawner.StopInstance(ctx, svc, inst); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 	// 1. Health inspection: check heartbeats
 	for _, inst := range instances {
 		if inst.Phase == InstanceRunning || inst.Phase == InstanceStarting || inst.Phase == InstanceDegraded {
 			if !inst.LastHeartbeat.IsZero() && now.Sub(inst.LastHeartbeat) > svc.Spec.Health.HeartbeatTTL {
 				inst.ConsecutiveFailures++
 				if inst.ConsecutiveFailures >= svc.Spec.Health.UnhealthyThreshold {
-					inst.Phase = InstanceFailed
-					inst.ExitReason = fmt.Sprintf("missed %d consecutive heartbeats (TTL: %v)", inst.ConsecutiveFailures, svc.Spec.Health.HeartbeatTTL)
 					inst.ExitCode = -1
-					inst.TerminatedAt = &now
-					_ = s.store.UpdateInstance(ctx, inst)
-					_ = s.spawner.StopInstance(ctx, svc, inst)
+					reason := fmt.Sprintf("missed %d consecutive heartbeats (TTL: %v)", inst.ConsecutiveFailures, svc.Spec.Health.HeartbeatTTL)
+					if err := s.stop(ctx, svc, inst, reason); err != nil {
+						return err
+					}
+					if inst.Phase == InstanceStopped {
+						inst.Phase = InstanceFailed
+						if err := s.store.UpdateInstance(ctx, inst); err != nil {
+							return err
+						}
+					}
 				} else {
 					inst.Phase = InstanceDegraded
-					_ = s.store.UpdateInstance(ctx, inst)
+					if err := s.store.UpdateInstance(ctx, inst); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -492,13 +565,10 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 				}
 			}
 			if deadlineExpired || (s.mailbox != nil && mailboxDrained) {
-				inst.Phase = InstanceStopped
-				inst.TerminatedAt = &now
 				inst.ExitCode = 0
-				inst.ExitReason = "drained"
-				inst.UpdatedAt = now
-				_ = s.store.UpdateInstance(ctx, inst)
-				_ = s.spawner.StopInstance(ctx, svc, inst)
+				if err := s.stop(ctx, svc, inst, "drained"); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -508,8 +578,20 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 	if err != nil {
 		return err
 	}
+	targetVersion := serviceVersion(svc)
 	for _, inst := range instances {
-		if inst.Phase == InstanceFailed || (inst.Phase == InstanceStopped && inst.ExitReason != "scaled down" && inst.ExitReason != "service stopped" && inst.ExitReason != "drained" && inst.ExitReason != "service deleted") {
+		// Retired versions do not own a replica in the new deployment. A
+		// pending backoff must not resurrect them alongside its replacements.
+		if inst.IsTerminal() && inst.AgentVersion != targetVersion {
+			if inst.NextRestartAt != nil {
+				inst.NextRestartAt = nil
+				if err := s.store.UpdateInstance(ctx, inst); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if svc.Spec.Replicas > 0 && inst.IsTerminal() && !plannedStop(inst.ExitReason) {
 			shouldRestart := false
 			switch svc.Spec.RestartPolicy {
 			case RestartAlways:
@@ -522,17 +604,23 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 				shouldRestart = false
 			}
 
-			if shouldRestart {
+			manualRestart := inst.ExitReason == "operator restart requested"
+			if shouldRestart || manualRestart {
 				maxRetries := svc.Spec.Backoff.MaxRetries
-				if maxRetries > 0 && inst.RestartCount >= maxRetries {
+				if !manualRestart && maxRetries > 0 && inst.RestartCount >= maxRetries {
 					continue
 				}
 
 				if inst.NextRestartAt == nil {
 					delay := svc.Spec.Backoff.CalculateDelay(inst.RestartCount)
+					if manualRestart {
+						delay = 0
+					}
 					next := now.Add(delay)
 					inst.NextRestartAt = &next
-					_ = s.store.UpdateInstance(ctx, inst)
+					if err := s.store.UpdateInstance(ctx, inst); err != nil {
+						return err
+					}
 				}
 
 				if inst.NextRestartAt != nil && (now.After(*inst.NextRestartAt) || now.Equal(*inst.NextRestartAt)) {
@@ -547,8 +635,13 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 					inst.TerminatedAt = nil
 					inst.UpdatedAt = now
 
-					_ = s.store.UpdateInstance(ctx, inst)
-					_ = s.spawner.SpawnInstance(ctx, svc, inst)
+					s.prepareLaunch(svc, inst)
+					if err := s.store.UpdateInstance(ctx, inst); err != nil {
+						return err
+					}
+					if err := s.spawn(ctx, svc, inst); err != nil {
+						return err
+					}
 					svc.Status.RestartCount++
 				}
 			}
@@ -561,12 +654,12 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 		return err
 	}
 
-	targetVersion := svc.Spec.AgentVersion
 	var activeInstances []*Instance
 	var recoveringInstances []*Instance
 	var readyInstances []*Instance
 	var updatedActiveInstances []*Instance
 	var outdatedActiveInstances []*Instance
+	stoppingCount, retiredCount, drainingCount, updatedRecoveringCount := 0, 0, 0, 0
 
 	for _, inst := range instances {
 		if inst.IsActive() {
@@ -583,6 +676,15 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 			}
 		} else if inst.IsRecovering() {
 			recoveringInstances = append(recoveringInstances, inst)
+			if inst.AgentVersion == targetVersion {
+				updatedRecoveringCount++
+			}
+		} else if inst.Phase == InstanceStopping {
+			stoppingCount++
+		} else if inst.IsDraining() {
+			drainingCount++
+		} else if inst.IsTerminal() && !plannedStop(inst.ExitReason) && inst.AgentVersion == targetVersion {
+			retiredCount++
 		}
 	}
 
@@ -615,9 +717,13 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 		}
 
 		// A. Surge step: spawn target version instances if needed and within maxSurge
-		if len(updatedActiveInstances) < desired && len(activeInstances) < maxAllowedTotal {
-			surgeCount := maxAllowedTotal - len(activeInstances)
-			neededUpdated := desired - len(updatedActiveInstances)
+		// Backoff and retired target slots still belong to this deployment;
+		// creating fresh instances here would bypass its restart policy.
+		updatedAllocated := len(updatedActiveInstances) + updatedRecoveringCount + retiredCount
+		allocated := len(activeInstances) + len(recoveringInstances) + stoppingCount + drainingCount + retiredCount
+		if updatedAllocated < desired && allocated < maxAllowedTotal {
+			surgeCount := maxAllowedTotal - allocated
+			neededUpdated := desired - updatedAllocated
 			toSpawn := surgeCount
 			if neededUpdated < toSpawn {
 				toSpawn = neededUpdated
@@ -639,18 +745,36 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 					CreatedAt:     now,
 					UpdatedAt:     now,
 				}
-				if err := s.store.CreateInstance(ctx, newInstance); err == nil {
-					_ = s.spawner.SpawnInstance(ctx, svc, newInstance)
-					activeInstances = append(activeInstances, newInstance)
-					readyInstances = append(readyInstances, newInstance)
-					updatedActiveInstances = append(updatedActiveInstances, newInstance)
+				s.prepareLaunch(svc, newInstance)
+				if err := s.store.CreateInstance(ctx, newInstance); err != nil {
+					return err
 				}
+				if err := s.spawn(ctx, svc, newInstance); err != nil {
+					return err
+				}
+				activeInstances = append(activeInstances, newInstance)
+				if newInstance.Phase == InstanceRunning {
+					readyInstances = append(readyInstances, newInstance)
+				}
+				updatedActiveInstances = append(updatedActiveInstances, newInstance)
 			}
 		}
 
 		// B. Drain step: if we meet minimum healthy requirement, drain outdated instances
 		healthyCount := len(readyInstances)
-		if healthyCount >= minAllowedHealthy && len(outdatedActiveInstances) > 0 {
+		canDrain := healthyCount >= minAllowedHealthy
+		if _, managed := s.spawner.(interface {
+			RefreshInstance(context.Context, *Service, *Instance) error
+		}); managed {
+			updatedReady := 0
+			for _, inst := range updatedActiveInstances {
+				if inst.Phase == InstanceRunning {
+					updatedReady++
+				}
+			}
+			canDrain = updatedReady > 0 && healthyCount-1 >= minAllowedHealthy
+		}
+		if canDrain && len(outdatedActiveInstances) > 0 {
 			instToDrain := outdatedActiveInstances[0]
 			instToDrain.Phase = InstanceDraining
 			instToDrain.DrainingAt = &now
@@ -661,11 +785,13 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 			deadline := now.Add(drainTimeout)
 			instToDrain.DrainDeadline = &deadline
 			instToDrain.UpdatedAt = now
-			_ = s.store.UpdateInstance(ctx, instToDrain)
+			if err := s.store.UpdateInstance(ctx, instToDrain); err != nil {
+				return err
+			}
 		}
 	} else {
 		// 6. Normal Replica Balancing (Scale Up / Graceful Scale Down)
-		allocated := len(activeInstances) + len(recoveringInstances)
+		allocated := len(activeInstances) + len(recoveringInstances) + stoppingCount + drainingCount + retiredCount
 		if allocated < desired {
 			needed := desired - allocated
 			for i := 0; i < needed; i++ {
@@ -685,9 +811,15 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 					CreatedAt:     now,
 					UpdatedAt:     now,
 				}
-				if err := s.store.CreateInstance(ctx, newInstance); err == nil {
-					_ = s.spawner.SpawnInstance(ctx, svc, newInstance)
-					activeInstances = append(activeInstances, newInstance)
+				s.prepareLaunch(svc, newInstance)
+				if err := s.store.CreateInstance(ctx, newInstance); err != nil {
+					return err
+				}
+				if err := s.spawn(ctx, svc, newInstance); err != nil {
+					return err
+				}
+				activeInstances = append(activeInstances, newInstance)
+				if newInstance.Phase == InstanceRunning {
 					readyInstances = append(readyInstances, newInstance)
 				}
 			}
@@ -701,14 +833,13 @@ func (s *Supervisor) ReconcileService(ctx context.Context, svc *Service) error {
 					deadline := now.Add(svc.Spec.DrainTimeout)
 					instToStop.DrainDeadline = &deadline
 					instToStop.UpdatedAt = now
-					_ = s.store.UpdateInstance(ctx, instToStop)
+					if err := s.store.UpdateInstance(ctx, instToStop); err != nil {
+						return err
+					}
 				} else {
-					instToStop.Phase = InstanceStopped
-					instToStop.TerminatedAt = &now
-					instToStop.ExitReason = "scaled down"
-					instToStop.UpdatedAt = now
-					_ = s.store.UpdateInstance(ctx, instToStop)
-					_ = s.spawner.StopInstance(ctx, svc, instToStop)
+					if err := s.stop(ctx, svc, instToStop, "scaled down"); err != nil {
+						return err
+					}
 				}
 			}
 			activeInstances = activeInstances[:desired]

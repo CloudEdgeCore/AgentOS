@@ -108,7 +108,7 @@ func main() {
 	options = append(options, controlapi.WithWorkflowStore(repository))
 	options = append(options, controlapi.WithMetricsStore(repository))
 	options = append(options, controlapi.WithRuntimePoolOperatorStore(repository))
-	supervisorEngine := supervisor.NewSupervisor(repository)
+	supervisorEngine := supervisor.NewSupervisor(repository, supervisor.WithSpawner(supervisor.NewTaskSpawner(repository)))
 	options = append(options, controlapi.WithSupervisor(supervisorEngine, repository))
 	options = append(options, controlapi.WithReadiness(pool.Ping))
 	if strings.TrimSpace(*auditSigningKey) != "" {

@@ -11,11 +11,11 @@ This matrix provides the verified implementation status for all subsystems, prot
 | **Task State Machine** | **GA** | v1.0 | `agentos.dev/v1` | `Task → Run → Attempt` lifecycle with non-preemptible execution semantics. |
 | **Cooperative Cancellation** | **GA** | v1.0 | `proto/agentos/runtime/v1` | Heartbeat-driven cancellation signaling with verified TLA+ liveness convergence. |
 | **Lease & Fencing Token** | **GA** | v1.0 | Kernel Store | Monotonically increasing fencing tokens preventing split-brain zombie writes. |
-| **AgentService Daemon** | **GA** | v1.2 | `proto/agentos/service/v1` | Long-running supervised agent services with configurable replica topology. |
-| **Process Supervisor** | **GA** | v1.2 | `proto/agentos/service/v1` | Process lifecycle supervisor with auto-restart, backoff, and health tracking. |
-| **Heartbeat Auto-Reap** | **GA** | v1.2 | `proto/agentos/service/v1` | Detects unresponsive instances exceeding TTL and automatically fences & provisions replacements. |
-| **Rolling Upgrade & Drain** | **GA** | v1.2 | `proto/agentos/service/v1` | Zero-downtime rolling upgrades enforcing `max_surge`, `max_unavailable`, and graceful draining. |
-| **Automatic Rollback** | **GA** | v1.2 | `proto/agentos/service/v1` | Reverts fleet to last stable version if new instances fail health checks within `min_ready_seconds`. |
+| **AgentService execution** | **Implemented (runtime-dependent)** | v1.2 | `proto/agentos/service/v1` | Each instance runs through a durable Task with normal admission, budgets, placement, leases, and Runtime execution. Every active replica needs a Worker slot; Host and Task execution timeouts still apply. |
+| **Process Supervisor** | **Implemented** | v1.2 | `proto/agentos/service/v1` | Replica reconciliation, restart policy, backoff, and runtime lifecycle tracking. Running reflects Kernel execution state, not application readiness. |
+| **Heartbeat Auto-Reap** | **Implemented** | v1.2 | `proto/agentos/service/v1` | Detects stale instance liveness and requests cancellation/replacement. Physical termination of a non-cooperative runtime requires an isolation-boundary termination hook. |
+| **Rolling Upgrade & Drain** | **Limited** | v1.2 | `proto/agentos/service/v1` | Version and replica convergence with drain deadlines and cooperative task cancellation. Zero-downtime application traffic switching and readiness checks are not certified. |
+| **Automatic Rollback** | **Not verified** | v1.2 | `proto/agentos/service/v1` | Explicit rollback operations exist; automatic rollback triggered by application health failures is not certified. |
 
 ---
 
