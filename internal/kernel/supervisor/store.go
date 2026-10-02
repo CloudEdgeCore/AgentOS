@@ -2,6 +2,18 @@ package supervisor
 
 import "context"
 
+// ServiceLockStore serializes mutations of one service across API and controller
+// processes. The callback receives a store bound to the lock's transaction.
+type ServiceLockStore interface {
+	WithServiceLock(context.Context, string, string, func(Store) error) error
+}
+
+// AllServicesStore is an internal controller enumeration, separate from the
+// tenant-scoped API query.
+type AllServicesStore interface {
+	ListAllServices(context.Context) ([]*Service, error)
+}
+
 // Store defines persistence operations for Agent Services and their Instances.
 type Store interface {
 	// Service operations

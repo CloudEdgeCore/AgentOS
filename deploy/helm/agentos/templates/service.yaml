@@ -9,8 +9,8 @@ spec:
   type: {{ .Values.controlPlane.service.type }}
   ports:
     - port: {{ .Values.controlPlane.service.port }}
-      targetPort: http
+      targetPort: https
       protocol: TCP
-      name: http
+      name: https
   selector:
-    app.kubernetes.io/name: agentos-control
+    {{- include "agentos.controlSelectorLabels" . | nindent 4 }}

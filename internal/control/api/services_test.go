@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -160,5 +161,53 @@ func TestServiceEndpointsRequireAuthentication(t *testing.T) {
 
 	if resp.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 Unauthorized, got %d: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestServiceStopEndpointDisablesAutowakeAndPreservesTenantScope(t *testing.T) {
+	backend := newMemoryStore()
+	serviceStore := supervisor.NewMemoryStore()
+	sup := supervisor.NewSupervisor(serviceStore)
+	ctx := context.Background()
+	svc, err := sup.CreateService(ctx, &supervisor.Service{
+		ID: "svc-stop", TenantID: "tenant-a", Namespace: "default", Name: "worker", AgentID: "worker",
+		Spec: supervisor.ServiceSpec{Replicas: 1, AutoWake: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := controlapi.NewHandler(backend, backend, backend, backend, controlapi.WithSupervisor(sup, serviceStore))
+	for _, tc := range []struct {
+		name   string
+		tenant string
+		status int
+	}{
+		{"unauthenticated", "", http.StatusUnauthorized},
+		{"other tenant", "tenant-b", http.StatusNotFound},
+		{"operator stop", "tenant-a", http.StatusOK},
+		{"idempotent stop", "tenant-a", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var route http.Handler = handler
+			if tc.tenant != "" {
+				route = auth.StaticMiddleware(auth.Principal{Subject: "user-1", TenantID: tc.tenant}, handler)
+			}
+			response := httptest.NewRecorder()
+			route.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/services/"+svc.ID+"/stop", nil))
+			if response.Code != tc.status {
+				t.Fatalf("stop response = %d: %s", response.Code, response.Body.String())
+			}
+			current, err := sup.GetService(ctx, svc.TenantID, svc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.status == http.StatusOK {
+				if current.Spec.Replicas != 0 || current.Spec.AutoWake || current.Status.ReadyReplicas != 0 {
+					t.Fatalf("operator stop did not suspend the service: %+v", current)
+				}
+			} else if current.Spec.Replicas != 1 || !current.Spec.AutoWake {
+				t.Fatalf("unauthorized stop changed the service: %+v", current)
+			}
+		})
 	}
 }

@@ -219,37 +219,56 @@ func (s *Store) ListServices(ctx context.Context, tenantID, namespace string) ([
 	return result, rows.Err()
 }
 
-// CreateInstance inserts a new service instance record.
+const serviceInstanceColumns = `id, service_id, tenant_id, namespace, agent_id, address,
+    phase, restart_count, consecutive_failures, next_restart_at,
+    last_heartbeat, created_at, updated_at, terminated_at, exit_code, COALESCE(exit_reason, ''),
+    agent_version, runtime_class, fencing_token, task_id, launch_spec, draining_at, drain_deadline`
+
+func scanServiceInstance(row scanner) (*supervisor.Instance, error) {
+	var inst supervisor.Instance
+	var address []byte
+	if err := row.Scan(&inst.ID, &inst.ServiceID, &inst.TenantID, &inst.Namespace, &inst.AgentID,
+		&address, &inst.Phase, &inst.RestartCount, &inst.ConsecutiveFailures, &inst.NextRestartAt,
+		&inst.LastHeartbeat, &inst.CreatedAt, &inst.UpdatedAt, &inst.TerminatedAt, &inst.ExitCode,
+		&inst.ExitReason, &inst.AgentVersion, &inst.RuntimeClass, &inst.FencingToken, &inst.TaskID,
+		&inst.LaunchSpec, &inst.DrainingAt, &inst.DrainDeadline); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(address, &inst.Address); err != nil {
+		return nil, fmt.Errorf("unmarshal instance address: %w", err)
+	}
+	return &inst, nil
+}
+
+// CreateInstance inserts a service instance and its frozen execution generation.
 func (s *Store) CreateInstance(ctx context.Context, inst *supervisor.Instance) error {
 	if inst == nil {
 		return supervisor.ErrInstanceNotFound
 	}
-	addressBytes, err := json.Marshal(inst.Address)
+	address, err := json.Marshal(inst.Address)
 	if err != nil {
 		return fmt.Errorf("marshal address: %w", err)
 	}
-
 	now := s.clock()
 	if inst.CreatedAt.IsZero() {
 		inst.CreatedAt = now
 	}
 	inst.UpdatedAt = now
-	if inst.LastHeartbeat.IsZero() {
+	if inst.LastHeartbeat.IsZero() && inst.TaskID == nil {
 		inst.LastHeartbeat = now
 	}
-
-	const query = `
-		INSERT INTO agent_service_instances (
-			id, service_id, tenant_id, namespace, agent_id, address,
-			phase, restart_count, consecutive_failures, next_restart_at,
-			last_heartbeat, created_at, updated_at, terminated_at, exit_code, exit_reason
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-	`
-	_, err = s.pool.Exec(ctx, query,
-		inst.ID, inst.ServiceID, inst.TenantID, inst.Namespace, inst.AgentID, addressBytes,
+	_, err = s.pool.Exec(ctx, `INSERT INTO agent_service_instances (
+        id, service_id, tenant_id, namespace, agent_id, address,
+        phase, restart_count, consecutive_failures, next_restart_at,
+        last_heartbeat, created_at, updated_at, terminated_at, exit_code, exit_reason,
+        agent_version, runtime_class, fencing_token, task_id, launch_spec, draining_at, drain_deadline
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21, $22, $23)`,
+		inst.ID, inst.ServiceID, inst.TenantID, inst.Namespace, inst.AgentID, address,
 		string(inst.Phase), inst.RestartCount, inst.ConsecutiveFailures, inst.NextRestartAt,
 		inst.LastHeartbeat, inst.CreatedAt, inst.UpdatedAt, inst.TerminatedAt, inst.ExitCode, inst.ExitReason,
-	)
+		inst.AgentVersion, inst.RuntimeClass, inst.FencingToken, inst.TaskID, inst.LaunchSpec,
+		inst.DrainingAt, inst.DrainDeadline)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -260,63 +279,39 @@ func (s *Store) CreateInstance(ctx context.Context, inst *supervisor.Instance) e
 	return nil
 }
 
-// GetInstance retrieves an instance by tenant, service ID, and instance ID.
+// GetInstance retrieves an instance within its tenant and service.
 func (s *Store) GetInstance(ctx context.Context, tenantID, serviceID, instanceID string) (*supervisor.Instance, error) {
-	const query = `
-		SELECT id, service_id, tenant_id, namespace, agent_id, address,
-		       phase, restart_count, consecutive_failures, next_restart_at,
-		       last_heartbeat, created_at, updated_at, terminated_at, exit_code, exit_reason
-		FROM agent_service_instances
-		WHERE tenant_id = $1 AND service_id = $2 AND id = $3
-	`
-	var (
-		inst         supervisor.Instance
-		addressBytes []byte
-		phaseStr     string
-	)
-	err := s.pool.QueryRow(ctx, query, tenantID, serviceID, instanceID).Scan(
-		&inst.ID, &inst.ServiceID, &inst.TenantID, &inst.Namespace, &inst.AgentID, &addressBytes,
-		&phaseStr, &inst.RestartCount, &inst.ConsecutiveFailures, &inst.NextRestartAt,
-		&inst.LastHeartbeat, &inst.CreatedAt, &inst.UpdatedAt, &inst.TerminatedAt, &inst.ExitCode, &inst.ExitReason,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, supervisor.ErrInstanceNotFound
-		}
-		return nil, err
+	inst, err := scanServiceInstance(s.pool.QueryRow(ctx, `SELECT `+serviceInstanceColumns+`
+        FROM agent_service_instances WHERE tenant_id = $1 AND service_id = $2 AND id = $3`,
+		tenantID, serviceID, instanceID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, supervisor.ErrInstanceNotFound
 	}
-	inst.Phase = supervisor.InstancePhase(phaseStr)
-	if err := json.Unmarshal(addressBytes, &inst.Address); err != nil {
-		return nil, fmt.Errorf("unmarshal address: %w", err)
-	}
-	return &inst, nil
+	return inst, err
 }
 
-// UpdateInstance updates an instance record.
+// UpdateInstance persists all execution and drain state, including the task linkage.
 func (s *Store) UpdateInstance(ctx context.Context, inst *supervisor.Instance) error {
 	if inst == nil {
 		return supervisor.ErrInstanceNotFound
 	}
-	addressBytes, err := json.Marshal(inst.Address)
+	address, err := json.Marshal(inst.Address)
 	if err != nil {
 		return fmt.Errorf("marshal address: %w", err)
 	}
-
 	inst.UpdatedAt = s.clock()
-
-	const query = `
-		UPDATE agent_service_instances
-		SET address = $1, phase = $2, restart_count = $3, consecutive_failures = $4,
-		    next_restart_at = $5, last_heartbeat = $6, updated_at = $7,
-		    terminated_at = $8, exit_code = $9, exit_reason = $10
-		WHERE tenant_id = $11 AND service_id = $12 AND id = $13
-	`
-	tag, err := s.pool.Exec(ctx, query,
-		addressBytes, string(inst.Phase), inst.RestartCount, inst.ConsecutiveFailures,
+	tag, err := s.pool.Exec(ctx, `UPDATE agent_service_instances
+        SET address = $1, phase = $2, restart_count = $3, consecutive_failures = $4,
+            next_restart_at = $5, last_heartbeat = $6, updated_at = $7,
+            terminated_at = $8, exit_code = $9, exit_reason = $10,
+            agent_version = $11, runtime_class = $12, fencing_token = $13, task_id = $14,
+            launch_spec = $15, draining_at = $16, drain_deadline = $17
+        WHERE tenant_id = $18 AND service_id = $19 AND id = $20`,
+		address, string(inst.Phase), inst.RestartCount, inst.ConsecutiveFailures,
 		inst.NextRestartAt, inst.LastHeartbeat, inst.UpdatedAt,
 		inst.TerminatedAt, inst.ExitCode, inst.ExitReason,
-		inst.TenantID, inst.ServiceID, inst.ID,
-	)
+		inst.AgentVersion, inst.RuntimeClass, inst.FencingToken, inst.TaskID, inst.LaunchSpec,
+		inst.DrainingAt, inst.DrainDeadline, inst.TenantID, inst.ServiceID, inst.ID)
 	if err != nil {
 		return err
 	}
@@ -328,11 +323,8 @@ func (s *Store) UpdateInstance(ctx context.Context, inst *supervisor.Instance) e
 
 // DeleteInstance deletes an instance record.
 func (s *Store) DeleteInstance(ctx context.Context, tenantID, serviceID, instanceID string) error {
-	const query = `
-		DELETE FROM agent_service_instances
-		WHERE tenant_id = $1 AND service_id = $2 AND id = $3
-	`
-	tag, err := s.pool.Exec(ctx, query, tenantID, serviceID, instanceID)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM agent_service_instances
+        WHERE tenant_id = $1 AND service_id = $2 AND id = $3`, tenantID, serviceID, instanceID)
 	if err != nil {
 		return err
 	}
@@ -342,80 +334,31 @@ func (s *Store) DeleteInstance(ctx context.Context, tenantID, serviceID, instanc
 	return nil
 }
 
-// ListInstances lists all instances belonging to a service.
-func (s *Store) ListInstances(ctx context.Context, tenantID, serviceID string) ([]*supervisor.Instance, error) {
-	const query = `
-		SELECT id, service_id, tenant_id, namespace, agent_id, address,
-		       phase, restart_count, consecutive_failures, next_restart_at,
-		       last_heartbeat, created_at, updated_at, terminated_at, exit_code, exit_reason
-		FROM agent_service_instances
-		WHERE tenant_id = $1 AND service_id = $2
-		ORDER BY created_at ASC
-	`
-	rows, err := s.pool.Query(ctx, query, tenantID, serviceID)
+func (s *Store) listServiceInstances(ctx context.Context, query string, arguments ...any) ([]*supervisor.Instance, error) {
+	rows, err := s.pool.Query(ctx, query, arguments...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var result []*supervisor.Instance
+	var instances []*supervisor.Instance
 	for rows.Next() {
-		var (
-			inst         supervisor.Instance
-			addressBytes []byte
-			phaseStr     string
-		)
-		if err := rows.Scan(
-			&inst.ID, &inst.ServiceID, &inst.TenantID, &inst.Namespace, &inst.AgentID, &addressBytes,
-			&phaseStr, &inst.RestartCount, &inst.ConsecutiveFailures, &inst.NextRestartAt,
-			&inst.LastHeartbeat, &inst.CreatedAt, &inst.UpdatedAt, &inst.TerminatedAt, &inst.ExitCode, &inst.ExitReason,
-		); err != nil {
+		inst, err := scanServiceInstance(rows)
+		if err != nil {
 			return nil, err
 		}
-		inst.Phase = supervisor.InstancePhase(phaseStr)
-		if err := json.Unmarshal(addressBytes, &inst.Address); err != nil {
-			return nil, fmt.Errorf("unmarshal address: %w", err)
-		}
-		result = append(result, &inst)
+		instances = append(instances, inst)
 	}
-	return result, rows.Err()
+	return instances, rows.Err()
 }
 
-// ListAllInstances lists all instances for a tenant.
-func (s *Store) ListAllInstances(ctx context.Context, tenantID string) ([]*supervisor.Instance, error) {
-	const query = `
-		SELECT id, service_id, tenant_id, namespace, agent_id, address,
-		       phase, restart_count, consecutive_failures, next_restart_at,
-		       last_heartbeat, created_at, updated_at, terminated_at, exit_code, exit_reason
-		FROM agent_service_instances
-		WHERE tenant_id = $1
-		ORDER BY created_at ASC
-	`
-	rows, err := s.pool.Query(ctx, query, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// ListInstances lists instances belonging to one service within a tenant.
+func (s *Store) ListInstances(ctx context.Context, tenantID, serviceID string) ([]*supervisor.Instance, error) {
+	return s.listServiceInstances(ctx, `SELECT `+serviceInstanceColumns+` FROM agent_service_instances
+        WHERE tenant_id = $1 AND service_id = $2 ORDER BY created_at, id`, tenantID, serviceID)
+}
 
-	var result []*supervisor.Instance
-	for rows.Next() {
-		var (
-			inst         supervisor.Instance
-			addressBytes []byte
-			phaseStr     string
-		)
-		if err := rows.Scan(
-			&inst.ID, &inst.ServiceID, &inst.TenantID, &inst.Namespace, &inst.AgentID, &addressBytes,
-			&phaseStr, &inst.RestartCount, &inst.ConsecutiveFailures, &inst.NextRestartAt,
-			&inst.LastHeartbeat, &inst.CreatedAt, &inst.UpdatedAt, &inst.TerminatedAt, &inst.ExitCode, &inst.ExitReason,
-		); err != nil {
-			return nil, err
-		}
-		inst.Phase = supervisor.InstancePhase(phaseStr)
-		if err := json.Unmarshal(addressBytes, &inst.Address); err != nil {
-			return nil, fmt.Errorf("unmarshal address: %w", err)
-		}
-		result = append(result, &inst)
-	}
-	return result, rows.Err()
+// ListAllInstances lists instances within a tenant.
+func (s *Store) ListAllInstances(ctx context.Context, tenantID string) ([]*supervisor.Instance, error) {
+	return s.listServiceInstances(ctx, `SELECT `+serviceInstanceColumns+` FROM agent_service_instances
+        WHERE tenant_id = $1 ORDER BY created_at, id`, tenantID)
 }

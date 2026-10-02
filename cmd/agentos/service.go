@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/CloudEdgeCore/AgentOS/internal/kernel/agentversion"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
 )
 
@@ -46,8 +48,10 @@ func runServiceCreate(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	endpoint := flags.String("endpoint", "http://127.0.0.1:8080", "Control API endpoint")
 	name := flags.String("name", "", "Service name")
-	agentID := flags.String("agent", "", "Agent identity")
+	agentID := flags.String("agent", "", "Published canonical [namespace/]name@version")
 	namespace := flags.String("namespace", "default", "Service namespace")
+	specPath := flags.String("spec", "", "Required workload spec JSON file (budget and placement)")
+	runtimeClass := flags.String("runtime-class", "", "Optional runtime class within the published AgentVersion policy")
 	replicas := flags.Int("replicas", 1, "Desired replicas")
 	policy := flags.String("restart-policy", "Always", "Restart policy (Always, OnFailure, Never)")
 	if err := flags.Parse(args); err != nil {
@@ -59,15 +63,50 @@ func runServiceCreate(args []string, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(*agentID) == "" {
 		return errors.New("-agent is required")
 	}
+	refNamespace, refName, refVersion, err := agentversion.ParseRef(*agentID)
+	if err != nil {
+		return fmt.Errorf("-agent: %w", err)
+	}
+	if agentversion.FormatRef(refNamespace, refName, refVersion) != *agentID {
+		return errors.New("-agent must be canonical; omit the default/ namespace prefix")
+	}
+	if err := agentversion.ValidateNamespace(*namespace); err != nil {
+		return fmt.Errorf("-namespace: %w", err)
+	}
+	if refNamespace != *namespace {
+		return errors.New("-agent namespace must match -namespace")
+	}
+	if strings.TrimSpace(*specPath) == "" {
+		return errors.New("-spec is required")
+	}
+	workloadSpec, err := os.ReadFile(*specPath)
+	if err != nil {
+		return fmt.Errorf("read workload spec: %w", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(workloadSpec, &document); err != nil || document == nil {
+		return errors.New("workload spec must be a JSON object")
+	}
+	if *runtimeClass != "" {
+		if err := agentversion.ValidateName(*runtimeClass); err != nil {
+			return fmt.Errorf("-runtime-class: %w", err)
+		}
+	}
 
+	serviceSpec := map[string]any{
+		"replicas":        *replicas,
+		"restartPolicy":   *policy,
+		"agentVersionRef": *agentID,
+		"workloadSpec":    json.RawMessage(workloadSpec),
+	}
+	if *runtimeClass != "" {
+		serviceSpec["runtimeClass"] = *runtimeClass
+	}
 	payload := map[string]any{
 		"namespace": *namespace,
 		"name":      *name,
 		"agentId":   *agentID,
-		"spec": map[string]any{
-			"replicas":      *replicas,
-			"restartPolicy": *policy,
-		},
+		"spec":      serviceSpec,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -80,6 +119,7 @@ func runServiceCreate(args []string, stdout, stderr io.Writer) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -114,6 +154,7 @@ func runServiceList(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -147,6 +188,7 @@ func runServiceGet(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -188,6 +230,7 @@ func runServiceScale(args []string, stdout, stderr io.Writer) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -221,6 +264,7 @@ func runServiceRestart(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -237,7 +281,6 @@ func runServiceRestart(args []string, stdout, stderr io.Writer) error {
 }
 
 func runServiceStop(args []string, stdout, stderr io.Writer) error {
-	// Stopping a service is scaling it to 0
 	flags := flag.NewFlagSet("service stop", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	endpoint := flags.String("endpoint", "http://127.0.0.1:8080", "Control API endpoint")
@@ -249,16 +292,12 @@ func runServiceStop(args []string, stdout, stderr io.Writer) error {
 	}
 	serviceID := flags.Arg(0)
 
-	payload := map[string]any{"replicas": 0}
-	raw, _ := json.Marshal(payload)
-
-	url := fmt.Sprintf("%s/v1/services/%s/scale", strings.TrimRight(*endpoint, "/"), serviceID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(raw))
+	url := fmt.Sprintf("%s/v1/services/%s/stop", strings.TrimRight(*endpoint, "/"), serviceID)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -270,7 +309,7 @@ func runServiceStop(args []string, stdout, stderr io.Writer) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("stop service failed (%d): %s", resp.StatusCode, string(body))
 	}
-	fmt.Fprintf(stdout, "Service %s stopped (scaled to 0 replicas)\n", serviceID)
+	fmt.Fprintf(stdout, "Service %s stop requested\n", serviceID)
 	return nil
 }
 
@@ -292,6 +331,7 @@ func runServiceDelete(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -325,6 +365,7 @@ func runServiceInstances(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	setBearer(req)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {

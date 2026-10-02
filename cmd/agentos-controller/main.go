@@ -142,7 +142,7 @@ func main() {
 		slog.Warn("controller instance is NOT sharded (claims every tenant; ADR-016)", "controllerID", *controllerID)
 	}
 	recoveryController := recovery.NewController(repository, 50, 30*time.Second)
-	supervisorController := supervisor.NewSupervisor(repository)
+	supervisorController := supervisor.NewSupervisor(repository, supervisor.WithSpawner(supervisor.NewTaskSpawner(repository)))
 	nextAccountingAudit := time.Now().UTC()
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()

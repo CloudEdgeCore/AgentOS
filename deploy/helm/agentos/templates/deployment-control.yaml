@@ -1,3 +1,4 @@
+{{- include "agentos.validateProduction" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,41 +10,80 @@ spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: agentos-control
+      {{- include "agentos.controlSelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: agentos-control
+        {{- include "agentos.controlSelectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+      serviceAccountName: {{ include "agentos.serviceAccountName" . | quote }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
       containers:
         - name: control
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/agentos-control"]
           args:
-            - "-listen=0.0.0.0:{{ .Values.controlPlane.port }}"
-            - "-dev-tenant={{ .Values.security.devTenant }}"
+            - {{ printf "-listen=0.0.0.0:%v" .Values.controlPlane.port | quote }}
+            - {{ printf "-oidc-issuer=%s" .Values.security.oidc.issuer | quote }}
+            - {{ printf "-oidc-client-id=%s" .Values.security.oidc.clientID | quote }}
+            - {{ printf "-oidc-tenant-claim=%s" .Values.security.oidc.tenantClaim | quote }}
+            - "-tls-cert=/etc/agentos/tls/tls.crt"
+            - "-tls-key=/etc/agentos/tls/tls.key"
+            - {{ printf "-embedding-endpoint=%s" .Values.embedding.endpoint | quote }}
+            - {{ printf "-audit-signing-key-id=%s" .Values.security.audit.keyID | quote }}
           ports:
             - containerPort: {{ .Values.controlPlane.port }}
-              name: http
+              name: https
           env:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "agentos.fullname" . }}-db-secret
-                  key: database-url
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: {{ .Values.database.secretKey | quote }}
+            - name: AGENTOS_AUDIT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.security.audit.existingSecret | quote }}
+                  key: {{ .Values.security.audit.privateKeyKey | quote }}
+            - name: AGENTOS_PACKAGE_TRUST_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.security.packageTrust.existingSecret | quote }}
+                  key: {{ .Values.security.packageTrust.keysKey | quote }}
+            {{- if .Values.embedding.tokenSecret }}
+            - name: AGENTOS_EMBEDDING_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.embedding.tokenSecret | quote }}
+                  key: {{ .Values.embedding.tokenSecretKey | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: control-tls
+              mountPath: /etc/agentos/tls
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: https
+              scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http
+              port: https
+              scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:
             {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+      volumes:
+        - name: control-tls
+          secret:
+            secretName: {{ .Values.security.tls.existingSecret | quote }}
+            items:
+              - key: {{ .Values.security.tls.certificateKey | quote }}
+                path: tls.crt
+              - key: {{ .Values.security.tls.privateKeyKey | quote }}
+                path: tls.key

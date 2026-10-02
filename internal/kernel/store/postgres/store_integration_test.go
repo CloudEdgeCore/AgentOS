@@ -533,7 +533,8 @@ func prepare(t *testing.T, clock func() time.Time) (*pgxpool.Pool, *postgresstor
 	if _, err := migrate.Apply(ctx, pool, migrations); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE TABLE task_usage_reservations,
+	if _, err := pool.Exec(ctx, `TRUNCATE TABLE agent_service_instances, agent_services,
+		task_usage_reservations,
 		runtime_capacity_reservations, runtime_pool_capacities, runtime_pool_tenant_grants, runtime_pools,
 		provider_circuit_breakers, workflow_usage_ledgers, workflow_steps, workflows,
 		model_calls, model_descriptors, tool_approvals, tool_calls, tool_descriptors,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/CloudEdgeCore/AgentOS/internal/control/auth"
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/supervisor"
+	"github.com/google/uuid"
 )
 
 type createServiceRequest struct {
@@ -71,6 +72,10 @@ type instanceResponse struct {
 	TenantID      string                   `json:"tenantId"`
 	Namespace     string                   `json:"namespace"`
 	AgentID       string                   `json:"agentId"`
+	TaskID        *uuid.UUID               `json:"taskId,omitempty"`
+	AgentVersion  string                   `json:"agentVersion,omitempty"`
+	RuntimeClass  string                   `json:"runtimeClass,omitempty"`
+	FencingToken  uint64                   `json:"fencingToken,omitempty"`
 	Address       string                   `json:"address"`
 	Phase         supervisor.InstancePhase `json:"phase"`
 	RestartCount  int                      `json:"restartCount"`
@@ -90,6 +95,10 @@ func formatInstanceResponse(inst *supervisor.Instance, traceID string) instanceR
 		TenantID:      inst.TenantID,
 		Namespace:     inst.Namespace,
 		AgentID:       inst.AgentID,
+		TaskID:        inst.TaskID,
+		AgentVersion:  inst.AgentVersion,
+		RuntimeClass:  inst.RuntimeClass,
+		FencingToken:  inst.FencingToken,
 		Address:       inst.Address.String(),
 		Phase:         inst.Phase,
 		RestartCount:  inst.RestartCount,
@@ -358,6 +367,38 @@ func (h *Handler) restartService(writer http.ResponseWriter, request *http.Reque
 	}
 
 	svc, _ := h.supervisor.GetService(request.Context(), principal.TenantID, serviceID)
+	writeJSON(writer, http.StatusOK, formatServiceResponse(svc, traceID))
+}
+
+// stopService disables autowake and requests cancellation of every active task.
+func (h *Handler) stopService(writer http.ResponseWriter, request *http.Request) {
+	traceID := traceIDFrom(request.Context())
+	principal, ok := auth.PrincipalFromContext(request.Context())
+	if !ok {
+		h.writeProblem(writer, request, http.StatusUnauthorized, "AUTHENTICATION_REQUIRED", "authenticated principal is required", traceID)
+		return
+	}
+	if h.supervisor == nil {
+		h.writeProblem(writer, request, http.StatusNotFound, "SERVICES_DISABLED", "service supervisor is not configured", traceID)
+		return
+	}
+	serviceID := request.PathValue("serviceID")
+	if err := h.supervisor.StopService(request.Context(), principal.TenantID, serviceID); err != nil {
+		switch {
+		case errors.Is(err, supervisor.ErrServiceNotFound):
+			h.writeProblem(writer, request, http.StatusNotFound, "SERVICE_NOT_FOUND", "service not found", traceID)
+		case errors.Is(err, supervisor.ErrServiceTerminated):
+			h.writeProblem(writer, request, http.StatusConflict, "SERVICE_TERMINATED", "service is terminated", traceID)
+		default:
+			h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), traceID)
+		}
+		return
+	}
+	svc, err := h.supervisor.GetService(request.Context(), principal.TenantID, serviceID)
+	if err != nil {
+		h.writeProblem(writer, request, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), traceID)
+		return
+	}
 	writeJSON(writer, http.StatusOK, formatServiceResponse(svc, traceID))
 }
 

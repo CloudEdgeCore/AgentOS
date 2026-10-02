@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CloudEdgeCore/AgentOS/internal/kernel/ipc"
+	"github.com/google/uuid"
 )
 
 // ServicePhase indicates the lifecycle state of an AgentService.
@@ -258,6 +259,8 @@ type Instance struct {
 	AgentVersion        string           `json:"agentVersion,omitempty"`
 	RuntimeClass        string           `json:"runtimeClass,omitempty"`
 	FencingToken        uint64           `json:"fencingToken,omitempty"`
+	TaskID              *uuid.UUID       `json:"taskId,omitempty"`
+	LaunchSpec          json.RawMessage  `json:"launchSpec,omitempty"`
 	Address             ipc.AgentAddress `json:"address"`
 	Phase               InstancePhase    `json:"phase"`
 	RestartCount        int              `json:"restartCount"`
